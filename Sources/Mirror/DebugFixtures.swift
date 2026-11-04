@@ -175,5 +175,35 @@ enum DebugFixtures {
             }
         }
     }
+
+    /// Renders ProgressRow states (determinate, indeterminate, iCloud estimate) in light and dark.
+    static func snapshotProgress(to dir: URL) {
+        try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        let pair = PairID(set: UUID(), destination: UUID())
+        let now = Date()
+        let rows: [(String, TransferProgress)] = [
+            ("Projects to Google Drive", TransferProgress(pair: pair, phase: .transferring, bytesDone: 2_125_824_000,
+                bytesTotal: 5_000_000_000, filesDone: 412, filesTotal: 1_040, bytesPerSecond: 3_400_000, eta: 845, updated: now)),
+            ("Documents to OneDrive", TransferProgress(pair: pair, phase: .scanning, updated: now)),
+            ("Documents to iCloud Drive", TransferProgress.iCloud(pair: pair, filesDone: 40, filesTotal: 100, filesPerSecond: 2, now: now)),
+        ]
+        let net = NetworkStatus()
+        let view = VStack(alignment: .leading, spacing: 8) {
+            ForEach(rows.indices, id: \.self) { ProgressRow(label: rows[$0].0, progress: rows[$0].1) }
+            NetworkUploadRow(network: net)
+        }.padding().frame(width: 320)
+        for (label, appearance) in [("light", NSAppearance.Name.aqua), ("dark", .darkAqua)] {
+            let host = NSHostingView(rootView: view.background(Color(nsColor: .windowBackgroundColor)))
+            host.appearance = NSAppearance(named: appearance)
+            host.frame = NSRect(origin: .zero, size: host.fittingSize)
+            let window = NSWindow(contentRect: host.frame, styleMask: [.titled], backing: .buffered, defer: false)
+            window.appearance = host.appearance
+            window.contentView = host
+            window.layoutIfNeeded(); host.layoutSubtreeIfNeeded()
+            guard let rep = host.bitmapImageRepForCachingDisplay(in: host.bounds) else { continue }
+            host.cacheDisplay(in: host.bounds, to: rep)
+            try? rep.representation(using: .png, properties: [:])?.write(to: dir.appendingPathComponent("progress-\(label).png"))
+        }
+    }
 }
 #endif
