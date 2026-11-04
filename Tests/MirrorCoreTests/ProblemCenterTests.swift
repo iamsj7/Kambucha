@@ -22,6 +22,16 @@ struct ProblemCenterTests {
     }
     let pair = PairID(set: UUID(), destination: UUID())
 
+    @Test func retainingDropsProblemsOfPairsThatAreGoneAndKeepsTheAgents() throws {
+        let c = ProblemCenter(root: root(), notifier: FakeNotifier())
+        let gone = PairID(set: UUID(), destination: UUID())
+        try c.store(.verificationFailed, pair: gone, setName: "Old", detail: "d")
+        try c.store(.deletionsHeld, pair: pair, setName: "P", detail: "d")
+        try c.store(.agentFailed, pair: .agent, setName: "Mirror", detail: "d")
+        try c.retain(pairs: [pair])
+        #expect(try c.active().map(\.problem) == [.deletionsHeld, .agentFailed])
+    }
+
     @Test func raisingTwicePostsOnce() async throws {
         let n = FakeNotifier()
         let c = ProblemCenter(root: root(), notifier: n)

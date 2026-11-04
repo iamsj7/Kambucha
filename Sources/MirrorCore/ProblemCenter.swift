@@ -173,6 +173,16 @@ public struct ProblemCenter: Sendable {
         }
     }
 
+    /// Lets go of problems whose pair no longer exists, so nothing is left that no run could ever clear.
+    /// The agent's own problems belong to no pair and stay.
+    public func retain(pairs: Set<PairID>) throws {
+        try locked {
+            let all = try load()
+            let kept = all.filter { $0.pair == .agent || pairs.contains($0.pair) }
+            if kept.count != all.count { try save(kept) }
+        }
+    }
+
     public func active() throws -> [ActiveProblem] { try locked { try load() } }
 
     /// Only marks the same occurrence that was posted, not one raised again after a clear.

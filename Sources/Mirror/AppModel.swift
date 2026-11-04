@@ -291,6 +291,8 @@ final class AppModel {
         do { try write() } catch { lastError = "Mirror could not save your changes." }
         // Apply at once so the screen the owner is on reflects the change before the file watcher fires.
         reload()
+        // A pair that's gone can't be cleared by any run, so its problems end with it.
+        try? ProblemCenter(root: support, notifier: NoNotifier()).retain(pairs: BackupSet.pairs(of: sets))
         refresh()
     }
 

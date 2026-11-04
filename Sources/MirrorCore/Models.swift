@@ -88,6 +88,13 @@ public struct PairID: Codable, Hashable, Sendable {
     public static let agent = PairID(set: UUID(uuid: UUID_NULL), destination: UUID(uuid: UUID_NULL))
 }
 
+extension BackupSet {
+    /// Every set-and-destination pair of these sets.
+    public static func pairs(of sets: [BackupSet]) -> Set<PairID> {
+        Set(sets.flatMap { s in s.destinationIDs.map { PairID(set: s.id, destination: $0) } })
+    }
+}
+
 public struct ReviewItem: Codable, Equatable, Identifiable, Sendable {
     public enum Kind: String, Codable, Sendable { case trackedInExcluded, secretInExcluded, refusedByICloud }
     public var id: String

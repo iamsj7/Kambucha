@@ -4275,6 +4275,16 @@ private struct LeavesAfterOneMoreLook: RcloneRunning {
     }
 }
 
+@Suite struct LivePairsTests {
+    @Test func aRunDropsProblemsOfPairsThatAreGone() async throws {
+        let h = try Harness(); try h.prime()
+        try h.problems.store(.verificationFailed, pair: PairID(set: h.set.id, destination: UUID()), setName: "x", detail: "d")
+        try h.problems.store(.repeatedFailures, pair: PairID(set: UUID(), destination: h.iCloudDest.id), setName: "Old", detail: "d")
+        await h.run()
+        #expect(try h.active.isEmpty)
+    }
+}
+
 /// Spec section 8a: after the first backup to an encrypted destination, then every 6 months.
 @Suite struct DrillReminderTests {
     private func primedCloud(_ h: Harness) throws -> (Destination, PairID) {

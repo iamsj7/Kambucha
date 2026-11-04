@@ -78,9 +78,9 @@ public enum StatusSummary {
 
         // 1. Anything that needs the owner, other than held deletions (handled below) and the two reminders.
         let quiet: Set<Problem> = [.drillDue, .driveOverdue, .deletionsHeld]
-        let activeIDs = Set(active.map(\.id))
+        let live = BackupSet.pairs(of: active)
         if let p = problems.first(where: {
-            !quiet.contains($0.problem) && activeIDs.contains($0.pair.set)
+            !quiet.contains($0.problem) && live.contains($0.pair)
                 && !($0.problem == .verificationFailed && waits($0.pair))
         }) {
             return .attention(p.problem.headline)
@@ -95,7 +95,7 @@ public enum StatusSummary {
 
         // 2. Held deletions.
         let held = pairs.reduce(0) { $0 + (states[$1]?.heldDeletions ?? 0) }
-        let heldProblem = problems.contains { $0.problem == .deletionsHeld && activeIDs.contains($0.pair.set) }
+        let heldProblem = problems.contains { $0.problem == .deletionsHeld && live.contains($0.pair) }
         if held > 0 || heldProblem { return .held(max(held, 1)) }
 
         // 3. A run in progress, then uploads still pending.

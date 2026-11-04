@@ -260,6 +260,14 @@ struct StatusSummaryTests {
         #expect(StatusSummary.withPreviewNeeded(.driveNotConnected(name: "SSD", last: nil), sets: [s]) == .attention("Preview needed: Projects"))
     }
 
+    @Test func aProblemFromAPairNoLongerInUseSaysNothing() {
+        let s = set([dest])
+        let oldPair = ActiveProblem(problem: .verificationFailed, pair: PairID(set: s.id, destination: dest2.id), setName: s.name, detail: "x", since: now)
+        let oldSet = ActiveProblem(problem: .deletionsHeld, pair: PairID(set: UUID(), destination: dest.id), setName: "Gone", detail: "x", since: now)
+        let oldHold = ActiveProblem(problem: .deletionsHeld, pair: PairID(set: s.id, destination: dest2.id), setName: s.name, detail: "x", since: now)
+        #expect(overall(s, [dest, dest2], [pair(s, dest): state()], [record(s, dest, .success)], [oldPair, oldSet, oldHold]) == .backedUp(last: now, files: 100))
+    }
+
     @Test func drillDueDoesNotBlockBackedUp() {
         let s = set([dest])
         let r = overall(s, [dest], [pair(s, dest): state()], [record(s, dest, .success)], [problem(.drillDue, s, dest)])

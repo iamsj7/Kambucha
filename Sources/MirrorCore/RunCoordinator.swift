@@ -195,6 +195,8 @@ public final class RunCoordinator: Sendable {
             return false
         }
         clear([.agentFailed], .agent)
+        // The app does this on removal. A run covers a change it missed, and only here can the agent's own lag show.
+        do { try problems.retain(pairs: BackupSet.pairs(of: sets)) } catch { Self.log.error("could not tidy problems") }
         var pairs: [(PairID, DestinationKind, SetState)] = []
         for set in sets where command.setID == nil || command.setID == set.id {
             for id in set.destinationIDs {

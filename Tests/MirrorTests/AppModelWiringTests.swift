@@ -201,6 +201,48 @@ private func vol(_ uuid: String, internalLooking: Bool = false) -> VolumeInfo {
         #expect(m.reviewEntries.isEmpty)
     }
 
+    // MARK: Problems end with their pair (final review S5)
+
+    private func activeProblems(_ m: AppModel) throws -> [Problem] {
+        try ProblemCenter(root: m.support, notifier: NoNotifier()).active().map(\.problem)
+    }
+
+    private func modelWithProblem() throws -> (AppModel, BackupSet, Destination, Destination) {
+        let a = Destination(name: "A", kind: .iCloudFolder), b = Destination(name: "B", kind: .googleDrive, encrypted: false)
+        var s = BackupSet(name: "Docs", source: URL(fileURLWithPath: "/tmp/docs"), destinationIDs: [a.id, b.id])
+        s.acceptPreview()
+        let m = try make(destinations: [a, b], sets: [s]) { _, root in
+            try ProblemCenter(root: root, notifier: NoNotifier()).store(.verificationFailed, pair: PairID(set: s.id, destination: b.id),
+                                                                        setName: "Docs", detail: "d")
+        }
+        return (m, s, a, b)
+    }
+
+    @Test func removingASetClearsItsProblems() throws {
+        let (m, s, _, _) = try modelWithProblem()
+        m.removeSet(s.id)
+        #expect(try activeProblems(m).isEmpty)
+    }
+
+    @Test func removingADestinationClearsItsProblems() throws {
+        let (m, _, _, b) = try modelWithProblem()
+        m.removeDestination(b.id)
+        #expect(try activeProblems(m).isEmpty)
+    }
+
+    @Test func untickingADestinationClearsItsProblems() throws {
+        let (m, s, a, _) = try modelWithProblem()
+        var updated = s; updated.destinationIDs = [a.id]
+        m.save(set: updated)
+        #expect(try activeProblems(m).isEmpty)
+    }
+
+    @Test func savingALivePairLeavesItsProblemOpen() throws {
+        let (m, s, _, _) = try modelWithProblem()
+        m.save(set: s)
+        #expect(try activeProblems(m) == [.verificationFailed])
+    }
+
     @Test func resolvingAReviewItemKeepsAnAcceptedSetAccepted() throws {
         let dest = Destination(name: "iCloud", kind: .iCloudFolder)
         var set = BackupSet(name: "Docs", source: URL(fileURLWithPath: "/tmp/docs"), destinationIDs: [dest.id])
