@@ -92,7 +92,10 @@ struct MainWindow: View {
             Text(removalMessage)
         }
         .safeAreaInset(edge: .bottom) {
-            if let error = model.lastError { ErrorBar(message: error) { model.dismissError() } }
+            VStack(spacing: 0) {
+                if onboarding.accessWarning { AccessWarningBar { onboarding.openFullDiskAccess() } }
+                if let error = model.lastError { ErrorBar(message: error) { model.dismissError() } }
+            }
         }
         // The Dock icon shows only while this window is open; the app is otherwise a menu bar item.
         .onAppear { DockPresence.windowOpened(); model.windowAppeared() }
@@ -261,6 +264,23 @@ struct ErrorBar: View {
             Label(message, systemImage: "exclamationmark.triangle").lineLimit(3)
             Spacer()
             Button("Dismiss", action: dismiss)
+        }
+        .padding(10)
+        .background(.bar)
+        .accessibilityElement(children: .contain)
+    }
+}
+
+/// The background helper's last check failed. Not a dead end: runs still say what they could and couldn't read.
+struct AccessWarningBar: View {
+    let open: () -> Void
+    var body: some View {
+        HStack {
+            Label("The background helper can't confirm Full Disk Access, so backups may not read every folder.",
+                  systemImage: "exclamationmark.triangle").lineLimit(3)
+            Spacer()
+            Button("Open Settings", action: open)
+                .accessibilityHint("Opens Full Disk Access in System Settings")
         }
         .padding(10)
         .background(.bar)

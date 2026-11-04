@@ -17,6 +17,7 @@ public struct AccessReport: Codable, Equatable, Sendable {
 /// app's grant, so only a report written by the launchd-started agent proves the agent's own access.
 public enum AgentAccess {
     public static let fileName = "access.json"
+    public static let defaultMaxAge: TimeInterval = 2 * 3600
     /// Readable only with Full Disk Access, whatever else has been allowed.
     public static let fullDiskAccessProbe = URL(fileURLWithPath: "/Library/Application Support/com.apple.TCC/TCC.db")
 
@@ -60,8 +61,18 @@ public enum AgentAccess {
         return (try? Data(contentsOf: support.appendingPathComponent(fileName))).flatMap { try? d.decode(AccessReport.self, from: $0) }
     }
 
+    public enum Status: Equatable, Sendable { case confirmed, stale, failing, unknown }
+
+    /// What the last report says now. Launchd won't start a job that's still running, so while the agent runs an
+    /// old report isn't stale: a long first upload is no sign of lost access.
+    public static func status(support: URL, now: Date = Date(), maxAge: TimeInterval = defaultMaxAge, agentRunning: Bool) -> Status {
+        guard let r = readReport(support: support), r.checkedAt <= now else { return .unknown }
+        guard r.passed else { return .failing }
+        return agentRunning || now.timeIntervalSince(r.checkedAt) <= maxAge ? .confirmed : .stale
+    }
+
     /// Confirmed only by a passing report no older than `maxAge` (and not older than `notBefore`, when given).
-    public static func isConfirmed(support: URL, now: Date = Date(), maxAge: TimeInterval = 2 * 3600, notBefore: Date? = nil) -> Bool {
+    public static func isConfirmed(support: URL, now: Date = Date(), maxAge: TimeInterval = defaultMaxAge, notBefore: Date? = nil) -> Bool {
         guard let r = readReport(support: support), r.passed, r.checkedAt <= now,   // a clock set ahead can't pre-confirm
               now.timeIntervalSince(r.checkedAt) <= maxAge else { return false }
         if let notBefore, r.checkedAt < notBefore { return false }

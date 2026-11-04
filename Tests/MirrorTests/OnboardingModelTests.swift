@@ -10,7 +10,8 @@ private final class FakeSystem: OnboardingSystem {
     var agent: SMAppService.Status = .notRegistered
     var notes: NotificationAccess = .notDetermined
     var enableError: (any Error)?
-    func fullDiskAccessConfirmed() async -> Bool { fda }
+    var access: AgentAccess.Status?
+    func fullDiskAccess() async -> AgentAccess.Status { access ?? (fda ? .confirmed : .unknown) }
     var report: AccessReport?
     func accessReport() -> AccessReport? { report }
     var checked = 0
@@ -99,6 +100,59 @@ struct OnboardingModelTests {
         await m.firstCheckIfNeeded()
         await m.refresh()
         #expect(sys.checked == 1)
+    }
+
+    private func finished(_ sys: FakeSystem) async throws -> OnboardingModel {
+        sys.agent = .enabled; sys.fda = true; sys.notes = .allowed
+        let (m, root) = make(sys)
+        let folder = root.appendingPathComponent("Projects")
+        try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+        m.addFirstSet(folder: folder)
+        await m.refresh()
+        #expect(m.isComplete)
+        return m
+    }
+
+    @Test func anOldReportIsNotEnoughBeforeOnboardingFinishes() async {
+        let sys = FakeSystem(); sys.access = .stale
+        let (m, _) = make(sys)
+        await m.refresh()
+        #expect(!m.isDone(.fullDiskAccess))
+    }
+
+    @Test func anOldReportDoesNotSendAFinishedOwnerBack() async throws {
+        let sys = FakeSystem()
+        let m = try await finished(sys)
+        sys.access = .stale
+        await m.refresh()
+        #expect(m.isComplete && !m.accessWarning)
+    }
+
+    @Test func aFailingReportWarnsAFinishedOwnerInsteadOfSendingThemBack() async throws {
+        let sys = FakeSystem()
+        let m = try await finished(sys)
+        sys.access = .failing
+        await m.refresh()
+        #expect(m.isComplete && m.accessWarning)
+        sys.access = .confirmed
+        await m.refresh()
+        #expect(!m.accessWarning)
+    }
+
+    @Test func aFinishedOwnerStaysFinishedAcrossLaunches() async throws {
+        let sys = FakeSystem()
+        sys.agent = .enabled; sys.fda = true; sys.notes = .allowed
+        let (m, root) = make(sys)
+        let folder = root.appendingPathComponent("Projects")
+        try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+        m.addFirstSet(folder: folder)
+        await m.refresh()
+        sys.access = .stale
+        let icloud = root.appendingPathComponent("iCloud")
+        let again = OnboardingModel(system: sys, store: ConfigStore(root: root), settings: SettingsStore(root: root),
+                                    pathGuard: PathGuard(iCloudDrive: icloud, backupRoot: MirrorPaths.backupRoot(iCloudDrive: icloud)))
+        await again.refresh()
+        #expect(again.isComplete)
     }
 
     @Test func readingFoldersWithoutFullDiskAccessIsSaidApart() async {

@@ -9,8 +9,8 @@ enum NotificationAccess: Equatable { case notDetermined, allowed, denied }
 /// Everything onboarding reads from or asks of macOS, so the steps can be tested with a fake.
 @MainActor
 protocol OnboardingSystem {
-    /// Reads the agent's last report (`access.json`). False means not confirmed.
-    func fullDiskAccessConfirmed() async -> Bool
+    /// Reads the agent's last report (`access.json`).
+    func fullDiskAccess() async -> AgentAccess.Status
     func accessReport() -> AccessReport?
     /// Asks launchd to start the agent and waits (bounded) for its report.
     func checkFullDiskAccessNow() async -> AccessConfirmation.Outcome
@@ -25,7 +25,9 @@ protocol OnboardingSystem {
 
 @MainActor
 struct LiveOnboardingSystem: OnboardingSystem {
-    func fullDiskAccessConfirmed() async -> Bool { AgentAccess.isConfirmed(support: MirrorPaths.support) }
+    func fullDiskAccess() async -> AgentAccess.Status {
+        AgentAccess.status(support: MirrorPaths.support, agentRunning: AgentPresence.isRunning(support: MirrorPaths.support))
+    }
     func accessReport() -> AccessReport? { AgentAccess.readReport(support: MirrorPaths.support) }
     func checkFullDiskAccessNow() async -> AccessConfirmation.Outcome { await AccessConfirmation.confirm(support: MirrorPaths.support) }
     func agentStatus() -> SMAppService.Status { AgentRegistration.status() }
@@ -167,6 +169,8 @@ final class OnboardingModel {
     private(set) var kickFailed = false
     /// The helper can read Documents and iCloud Drive, but not what only Full Disk Access opens.
     private(set) var accessIsPartial = false
+    /// A finished owner's helper failed its last check. They're told, and left where they are.
+    private(set) var accessWarning = false
     /// The set just added here. The window goes straight to its preview, since nothing backs up until that's accepted.
     private(set) var setAwaitingPreview: UUID?
     @ObservationIgnored private var firstCheckDone = false
@@ -190,10 +194,14 @@ final class OnboardingModel {
     /// The first step still to do, or nil when everything is.
     var current: OnboardingStep? { OnboardingStep.allCases.first { !done.contains($0) } }
 
-    /// Re-reads every grant. A grant revoked later brings onboarding back.
+    /// Re-reads every grant. A grant revoked later brings onboarding back, except Full Disk Access, which an
+    /// owner past this screen hears about from a warning and from any run it stops.
     func refresh() async {
         var d: Set<OnboardingStep> = []
-        if await system.fullDiskAccessConfirmed() { d.insert(.fullDiskAccess) }
+        let disk = await system.fullDiskAccess()
+        let finished = store.onboardingFinished
+        if disk == .confirmed || finished { d.insert(.fullDiskAccess) }
+        accessWarning = finished && disk == .failing
         accessIsPartial = system.accessReport().map { $0.folders && !$0.fullDiskAccess } ?? false
         let status = system.agentStatus()
         agentNeedsApproval = status == .requiresApproval
@@ -204,6 +212,7 @@ final class OnboardingModel {
         if let sets = try? store.loadSets(), !sets.isEmpty { d.insert(.firstSet) }
         done = d
         hasRefreshed = true
+        if isComplete, !finished { try? store.noteOnboardingFinished() }
     }
 
     /// Asks launchd to start the agent and waits up to 15 seconds for its access report. This starts a

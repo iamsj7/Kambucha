@@ -42,7 +42,7 @@ The background helper is inside the app, so this one permission covers both. Mir
 
 Then allow it to run in the background. Open System Settings, then General, then Login Items & Extensions, and switch on Mirror under "Allow in the Background". Mirror's first-run screen walks through both steps.
 
-If Full Disk Access is ever lost, Mirror sends a notification and shows "Needs Attention". Switch it back on in the same place.
+If Full Disk Access is ever lost, Mirror sends a notification and shows "Needs Attention", and the main window shows a warning with a button to open the setting. Switch it back on in the same place. A long upload never counts as losing it.
 
 ## 3. Add a folder and run the first backup
 

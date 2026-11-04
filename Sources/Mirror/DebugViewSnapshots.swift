@@ -20,7 +20,7 @@ enum DebugViewSnapshots {
     }
 
     @MainActor private final class FakeSystem: OnboardingSystem {
-        func fullDiskAccessConfirmed() async -> Bool { true }
+        func fullDiskAccess() async -> AgentAccess.Status { .confirmed }
         func accessReport() -> AccessReport? { nil }
         func checkFullDiskAccessNow() async -> AccessConfirmation.Outcome { .confirmed }
         func agentStatus() -> SMAppService.Status { .requiresApproval }

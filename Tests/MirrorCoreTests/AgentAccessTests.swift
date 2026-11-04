@@ -72,6 +72,28 @@ struct AgentAccessTests {
         #expect(!AgentAccess.isConfirmed(support: support, now: now.addingTimeInterval(60), notBefore: now.addingTimeInterval(30)))
     }
 
+    @Test func theStatusTellsAnOldReportFromAFailingOne() throws {
+        let support = try dir()
+        let now = Date(timeIntervalSince1970: 1_800_000_000)
+        #expect(AgentAccess.status(support: support, now: now, agentRunning: false) == .unknown)
+        AgentAccess.writeReport(support: support, paths: [try dir()], fullDiskProbe: try readable(), now: now)
+        #expect(AgentAccess.status(support: support, now: now.addingTimeInterval(60), agentRunning: false) == .confirmed)
+        #expect(AgentAccess.status(support: support, now: now.addingTimeInterval(3 * 3600), agentRunning: false) == .stale)
+        #expect(AgentAccess.status(support: support, now: now.addingTimeInterval(-60), agentRunning: false) == .unknown)
+        AgentAccess.writeReport(support: support, paths: [try dir()], fullDiskProbe: support, now: now)
+        #expect(AgentAccess.status(support: support, now: now, agentRunning: false) == .failing)
+    }
+
+    /// Launchd won't start the agent while it's running, so a long first upload leaves the report to age.
+    @Test func theReportDoesNotAgeWhileTheAgentRuns() throws {
+        let support = try dir()
+        let now = Date(timeIntervalSince1970: 1_800_000_000)
+        AgentAccess.writeReport(support: support, paths: [try dir()], fullDiskProbe: try readable(), now: now)
+        #expect(AgentAccess.status(support: support, now: now.addingTimeInterval(9 * 3600), agentRunning: true) == .confirmed)
+        AgentAccess.writeReport(support: support, paths: [try dir()], fullDiskProbe: support, now: now)
+        #expect(AgentAccess.status(support: support, now: now.addingTimeInterval(9 * 3600), agentRunning: true) == .failing)
+    }
+
     @Test func aFailingReportNeverConfirms() throws {
         let support = try dir()
         let now = Date()
