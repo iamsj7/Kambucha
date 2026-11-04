@@ -621,7 +621,7 @@ private final class Harness: @unchecked Sendable {
         try FileManager.default.createDirectory(at: h.backupRoot.appendingPathComponent("Sets/X"), withIntermediateDirectories: true)
         await h.run()
         #expect(h.rclone.allCalls == 0)
-        #expect(try h.active == [.destinationMissing])
+        #expect(try h.active == [.setNameInUse])
     }
 
     @Test func aPairThatRanBeforeNeverReclaimsALostMarker() async throws {
@@ -4272,6 +4272,61 @@ private struct LeavesAfterOneMoreLook: RcloneRunning {
     }
     func capture(_ arguments: [String], context: RcloneContext) async throws -> RcloneCapture {
         try await wrapping.capture(arguments, context: context)
+    }
+}
+
+/// A set was removed and another added under its name: the old folder is still there (final review S6).
+@Suite struct NameInUseTests {
+    private func leftBehind(_ h: Harness) throws -> UUID {
+        let old = UUID()
+        try RootMarker(sets: [old: h.set.name]).save(backupRoot: h.backupRoot)
+        try FileManager.default.createDirectory(at: URL(fileURLWithPath: h.mirror), withIntermediateDirectories: true)
+        return old
+    }
+
+    @Test func aNameStillInUseSaysSoAndTouchesNothing() async throws {
+        let h = try Harness()
+        let old = try leftBehind(h)
+        await h.run(RunCommand(force: true))
+        #expect(try h.active == [.setNameInUse])
+        #expect(try h.problems.active().first?.detail == "\"x\" is still in use by a backup in iCloud")
+        #expect(try h.state.stoppedBy == .setNameInUse)
+        #expect(h.rclone.allCalls == 0)
+        #expect(try RootMarker.load(backupRoot: h.backupRoot) == RootMarker(sets: [old: "x"]))
+    }
+
+    @Test func adoptingTheBackupTakesOverTheNameAndClearsTheStop() async throws {
+        let h = try Harness()
+        let old = try leftBehind(h)
+        await h.run(RunCommand(force: true))
+        h.set.adoptsBackupIn = [h.iCloudDest.id]
+        try h.save()
+        await h.run(RunCommand(force: true))
+        #expect(try !h.active.contains(.setNameInUse))
+        #expect(try h.state.stoppedBy == nil)
+        #expect(!h.rclone.realSyncs.isEmpty)
+        let marker = try #require(try RootMarker.load(backupRoot: h.backupRoot))
+        #expect(marker.sets[h.set.id] == "x" && marker.sets[old] == nil)
+    }
+
+    @Test func consentForAnotherDestinationDoesNotCount() async throws {
+        let h = try Harness()
+        _ = try leftBehind(h)
+        h.set.adoptsBackupIn = [UUID()]
+        try h.save()
+        await h.run(RunCommand(force: true))
+        #expect(try h.active == [.setNameInUse])
+        #expect(h.rclone.allCalls == 0)
+    }
+
+    @Test func aRootThatIsNotMirrorsIsNeverAdopted() async throws {
+        let h = try Harness()
+        try FileManager.default.createDirectory(at: URL(fileURLWithPath: h.mirror), withIntermediateDirectories: true)
+        h.set.adoptsBackupIn = [h.iCloudDest.id]
+        try h.save()
+        await h.run(RunCommand(force: true))
+        #expect(try h.active == [.destinationMissing])
+        #expect(h.rclone.allCalls == 0)
     }
 }
 

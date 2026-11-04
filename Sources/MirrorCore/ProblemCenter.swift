@@ -5,6 +5,7 @@ public enum Problem: String, Codable, CaseIterable, Sendable {
     case repeatedFailures, uploadStalled, fileRefused, signInExpired, drillFailed, drillDue
     case agentFailed
     case driveOverdue, driveFull
+    case setNameInUse
 
     /// Plain, specific lead-in. Never includes file contents or secrets.
     public var headline: String {
@@ -23,6 +24,7 @@ public enum Problem: String, Codable, CaseIterable, Sendable {
         case .agentFailed: "Mirror could not run"
         case .driveOverdue: "Backup drive not connected"
         case .driveFull: "Backup drive is full"
+        case .setNameInUse: "Set name is already in use"
         }
     }
 }

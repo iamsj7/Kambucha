@@ -275,6 +275,50 @@ public enum NewSet {
     }
 }
 
+// MARK: A name still in use
+
+/// What folders a destination holds under `Sets/`. A cloud needs its sign-in, so this goes through the agent.
+public protocol SetNameListing: Sendable {
+    /// Nil is the iCloud folder before a destination has been saved for it.
+    func names(in destination: UUID?) async throws -> [String]
+}
+
+public struct NoSetNames: SetNameListing {
+    public init() {}
+    public func names(in destination: UUID?) async throws -> [String] { [] }
+}
+
+/// A set that's removed leaves its backup behind on purpose, so a new set can land on the same name. Nothing is
+/// overwritten unless the owner says so: a run refuses, and this is how they hear why and choose.
+public enum SetNameConflict {
+    public static func isTaken(_ name: String, in folders: [String]) -> Bool {
+        let wanted = name.lowercased()
+        return folders.contains { $0.lowercased() == wanted || $0.lowercased() == wanted + "/" }
+    }
+
+    /// The ones holding a folder of that name. One that can't be asked, a drive that's away say, is left out, as
+    /// the run makes the same check and stops without changing anything.
+    public static func destinations(holding name: String, among chosen: [Destination], stored: [Destination],
+                                    names: any SetNameListing) async -> [Destination] {
+        var found: [Destination] = []
+        for destination in chosen {
+            let id = stored.contains { $0.id == destination.id } ? destination.id : nil
+            if let folders = try? await names.names(in: id), isTaken(name, in: folders) { found.append(destination) }
+        }
+        return found
+    }
+
+    public static func title(name: String, in destinations: [Destination]) -> String {
+        "\"\(name)\" is still in use in \(destinations.map(\.name).formatted(.list(type: .and)))"
+    }
+
+    public static func message(name: String) -> String {
+        "A backup called \"\(name)\" is already there, left by a set you removed or by another Mac. Choose a different name to start a fresh backup beside it, or use the existing backup. Using it makes this folder its new source: files in the backup that aren't in this folder move to the archive."
+    }
+
+    public static let adoptButton = "Use Existing Backup"
+}
+
 // MARK: Names, drafts and Back Up Now
 
 public enum SetNaming {
@@ -295,7 +339,7 @@ public enum SetDraftMerge {
             if latest[keyPath: k] != previouslySaved[keyPath: k] { out[keyPath: k] = latest[keyPath: k] }
         }
         take(\.isPaused); take(\.destinationIDs); take(\.presets); take(\.backupSecrets); take(\.backupGit)
-        take(\.deletion); take(\.archiveDays); take(\.acceptedFingerprint)
+        take(\.deletion); take(\.archiveDays); take(\.acceptedFingerprint); take(\.adoptsBackupIn)
         if latest.rules != previouslySaved.rules {
             // A rule still being typed (empty pattern) stays in the draft.
             out.rules = latest.rules + draft.rules.filter { $0.pattern.trimmingCharacters(in: .whitespaces).isEmpty }

@@ -59,6 +59,7 @@ Some things Mirror will refuse or warn about:
 
 - A folder inside iCloud Drive cannot be backed up, and two sets cannot overlap.
 - A folder on a different disk from iCloud Drive works, but copies use real disk space.
+- A name still used by a backup in the destination, left by a set you removed, is not taken over without asking. Choose a different name to start fresh, or Use Existing Backup to carry on from it. Anything in that backup that isn't in your folder moves to the archive.
 
 The first backup of a large folder can take a long time. Google Drive allows about two files a second, so 120,000 files takes around 17 hours or more. Mirror stops cleanly after 25 minutes of cloud uploading and carries on at the next wake-up, so you can close the lid.
 

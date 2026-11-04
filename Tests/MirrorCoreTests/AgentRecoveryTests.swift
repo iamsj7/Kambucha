@@ -85,9 +85,33 @@ private final class Rig: @unchecked Sendable {
 private let stamp = "2026-11-04T10-00-00"
 
 @Suite struct AgentRecoveryTests {
+    // MARK: Names in a destination
+
+    @Test func setNamesListsTheFoldersInTheDestination() async throws {
+        let r = try Rig()
+        try r.put("Sets/Old Work/a.txt")
+        try r.put("Sets/Docs/b.txt")
+        let stored = try await r.ask(AgentWire.setNames, AgentWire.NamesRequest(destination: r.iCloudDest.id))
+        #expect(stored.ok == true)
+        #expect(stored.files?.sorted() == ["Docs", "Old Work"])
+        // No iCloud destination saved yet, as with the first set: the folder is still the one to look in.
+        let unsaved = try await r.ask(AgentWire.setNames, AgentWire.NamesRequest(destination: nil))
+        #expect(unsaved.files?.sorted() == ["Docs", "Old Work"])
+    }
+
+    @Test func setNamesOfAnEmptyDestinationIsEmpty() async throws {
+        let r = try Rig()
+        #expect(try await r.ask(AgentWire.setNames, AgentWire.NamesRequest(destination: r.iCloudDest.id)).files == [])
+    }
+
+    @Test func setNamesNeedsAStoredDestination() async throws {
+        let r = try Rig()
+        #expect(try await r.ask(AgentWire.setNames, AgentWire.NamesRequest(destination: UUID())).failure == .notFound)
+    }
+
     // MARK: Who may ask
 
-    @Test(arguments: [AgentWire.archiveList, AgentWire.archiveRestore, AgentWire.dryRunDeletions])
+    @Test(arguments: [AgentWire.archiveList, AgentWire.archiveRestore, AgentWire.dryRunDeletions, AgentWire.setNames])
     func aRefusedCallerGetsNothingAndItsInputIsNeverRead(subcommand: String) async throws {
         let r = try Rig()
         r.trust.callerFailure = .untrustedCaller

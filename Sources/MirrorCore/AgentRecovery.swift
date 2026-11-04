@@ -28,6 +28,9 @@ struct AgentRecovery: Sendable {
         case AgentWire.dryRunDeletions:
             guard let r = try? decoder.decode(AgentWire.PairRequest.self, from: input) else { throw AgentFailure.invalidRequest }
             return try await dryRun(r)
+        case AgentWire.setNames:
+            guard let r = try? decoder.decode(AgentWire.NamesRequest.self, from: input) else { throw AgentFailure.invalidRequest }
+            return try await names(r)
         default:
             throw AgentFailure.invalidRequest
         }
@@ -93,6 +96,20 @@ struct AgentRecovery: Sendable {
         return AgentWire.Response(ok: true, entries: entries.map {
             AgentWire.Entry(id: $0.id, setName: $0.setName, stamp: $0.stamp, path: $0.path, size: $0.size)
         })
+    }
+
+    private func names(_ r: AgentWire.NamesRequest) async throws -> AgentWire.Response {
+        guard let destinations = try? store.loadDestinations() else { throw AgentFailure.configUnreadable }
+        var destination = Destination(name: MirrorPaths.rootFolderName, kind: .iCloudFolder)
+        if let id = r.destination {
+            guard let stored = destinations.first(where: { $0.id == id }) else { throw AgentFailure.notFound }
+            destination = stored
+        }
+        let found = try await withAccess(destination) { access in
+            try await RcloneRemoteFiles(binary: binary, helper: trust, workDir: workDir)
+                .list(ArchiveScope.join(access.endpoint, "Sets"), context: access.context) ?? []
+        }
+        return AgentWire.Response(ok: true, files: found.map { $0.hasSuffix("/") ? String($0.dropLast()) : $0 })
     }
 
     private func restore(_ r: AgentWire.RestoreRequest) async throws -> AgentWire.Response {

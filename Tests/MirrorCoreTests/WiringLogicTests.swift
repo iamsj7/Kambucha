@@ -377,3 +377,37 @@ private final class FakeEjector: VolumeEjecting, @unchecked Sendable {
     await m.begin()
     #expect(m.phase == .shown && m.kitText == "KIT")
 }
+
+private struct Names: SetNameListing {
+    var byDestination: [UUID?: [String]]
+    func names(in destination: UUID?) async throws -> [String] {
+        guard let list = byDestination[destination] else { throw AgentFailure.driveNotConnected }
+        return list
+    }
+}
+
+@Test func aNameInUseIsFoundWhateverItsCase() async {
+    let a = Destination(name: "iCloud", kind: .iCloudFolder), b = Destination(name: "Drive", kind: .googleDrive)
+    let names = Names(byDestination: [a.id: ["projects"], b.id: ["Other"]])
+    let found = await SetNameConflict.destinations(holding: "Projects", among: [a, b], stored: [a, b], names: names)
+    #expect(found == [a])
+}
+
+@Test func aDestinationThatCantBeAskedIsLeftToTheRun() async {
+    let a = Destination(name: "SSD", kind: .externalDrive)
+    let found = await SetNameConflict.destinations(holding: "Projects", among: [a], stored: [a], names: Names(byDestination: [:]))
+    #expect(found.isEmpty)
+}
+
+@Test func aDestinationNotSavedYetIsAskedAsTheICloudFolder() async {
+    let a = Destination(name: "iCloud Drive", kind: .iCloudFolder)
+    let found = await SetNameConflict.destinations(holding: "Docs", among: [a], stored: [], names: Names(byDestination: [nil: ["Docs"]]))
+    #expect(found == [a])
+}
+
+@Test func theConflictWordingNamesTheDestinationsAndWhatAdoptingDoes() {
+    let a = Destination(name: "iCloud", kind: .iCloudFolder), b = Destination(name: "SSD", kind: .externalDrive)
+    #expect(SetNameConflict.title(name: "Docs", in: [a]) == "\"Docs\" is still in use in iCloud")
+    #expect(SetNameConflict.title(name: "Docs", in: [a, b]) == "\"Docs\" is still in use in iCloud and SSD")
+    #expect(SetNameConflict.message(name: "Docs").contains("move to the archive"))
+}

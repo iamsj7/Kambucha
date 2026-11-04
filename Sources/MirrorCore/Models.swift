@@ -34,6 +34,9 @@ public struct BackupSet: Codable, Equatable, Identifiable, Sendable {
     /// `previewFingerprint` as it was when the owner accepted the preview. The agent starts no backup of a set
     /// unless this equals the current fingerprint, so changing rules, stacks or switches asks again.
     public var acceptedFingerprint: String?
+    /// Destinations where the owner confirmed this set takes over a backup left under its name by a set that
+    /// was removed. Only ever read when claiming, so it means nothing once a destination has been claimed.
+    public var adoptsBackupIn: Set<UUID>?
     public init(id: UUID = UUID(), name: String, source: URL, presets: Set<String> = [],
                 destinationIDs: [UUID] = []) {
         self.id = id; self.name = name; self.source = source; self.presets = presets

@@ -148,6 +148,12 @@ enum DebugFixtures {
         let awayModel = AppModel(support: awayRoot, services: services)
         spin(0.5)
         render(MenuBarPanel(model: awayModel), size: CGSize(width: 320, height: 300), to: at("panel-drive-away"))
+        // A set whose name is still used by a backup in the destination.
+        var conflict = (try? store.state(for: PairID(set: sets[1].id, destination: dests[0].id))) ?? SetState()
+        conflict.stoppedBy = .setNameInUse
+        try? store.save(conflict, for: PairID(set: sets[1].id, destination: dests[0].id))
+        model.reload()
+        render(NavigationStack { SetDetailView(model: model, setID: sets[1].id) }, size: CGSize(width: 620, height: 420), to: at("set-name-in-use"))
         // MainWindow itself shows onboarding until the real system checks pass, so the overview is rendered directly.
         render(NavigationStack { OverviewView(model: model, select: { _ in }) }, size: CGSize(width: 700, height: 900), to: at("main-overview"))
         render(NavigationStack { SetDetailView(model: model, setID: model.sets[0].id) }, size: CGSize(width: 620, height: 2000), to: at("set-detail"))

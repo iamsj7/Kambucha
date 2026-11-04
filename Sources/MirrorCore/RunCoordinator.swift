@@ -195,7 +195,7 @@ public final class RunCoordinator: Sendable {
             return false
         }
         clear([.agentFailed], .agent)
-        // The app does this on removal. A run covers a change it missed, and only here can the agent's own lag show.
+        // The app does this on removal. This catches what a run in progress raised after it.
         do { try problems.retain(pairs: BackupSet.pairs(of: sets)) } catch { Self.log.error("could not tidy problems") }
         var pairs: [(PairID, DestinationKind, SetState)] = []
         for set in sets where command.setID == nil || command.setID == set.id {
@@ -297,6 +297,7 @@ public final class RunCoordinator: Sendable {
         case driveGone
         case driveFull(needed: Int64, free: Int64)
         case markerNotLocal
+        case nameInUse
     }
 
     /// How one pair's run leaves the rest. `stop` is a cancelled run. `agentFailed` also fails the agent.
@@ -1055,7 +1056,7 @@ public final class RunCoordinator: Sendable {
             // Small, and it lets a later wake-up read the claim this one had to take on trust.
             request([URL(fileURLWithPath: path)])
             guard Self.hasRun(state) else { throw Stop.markerNotLocal }
-            clear([.destinationMissing, .signInExpired, .iCloudUnavailable], job.pair)
+            clear([.destinationMissing, .signInExpired, .iCloudUnavailable, .setNameInUse], job.pair)
             state.stoppedBy = nil
             return
         }
@@ -1075,12 +1076,11 @@ public final class RunCoordinator: Sendable {
                 throw GuardFailure.destinationUnclaimed
             }
             let taken = try await files.list(Self.join(endpoint, "Sets"), context: context) ?? []
-            let name = set.name.lowercased()
-            if taken.contains(where: { $0.lowercased() == name || $0.lowercased() == name + "/" }) {
-                throw GuardFailure.destinationUnclaimed
-            }
+            let adopting = set.adoptsBackupIn?.contains(job.destination.id) == true
+            if SetNameConflict.isTaken(set.name, in: taken), !adopting { throw Stop.nameInUse }
             try await requireICloud(job, at: job.pathGuard.backupRoot.deletingLastPathComponent())
             var claimed = marker ?? RootMarker()
+            if adopting { claimed.sets = claimed.sets.filter { $0.value.lowercased() != set.name.lowercased() } }
             claimed.sets[set.id] = set.name
             try confirmDrive(job)
             let encoder = JSONEncoder()
@@ -1090,7 +1090,7 @@ public final class RunCoordinator: Sendable {
         }
         try job.pathGuard.validateRun(set, destination: job.destination, marker: marker,
                                       sampleFileCount: 1, state: SetState(), volume: job.volume)
-        clear([.destinationMissing, .signInExpired, .iCloudUnavailable], job.pair)
+        clear([.destinationMissing, .signInExpired, .iCloudUnavailable, .setNameInUse], job.pair)
         state.stoppedBy = nil
     }
 
@@ -1294,6 +1294,9 @@ public final class RunCoordinator: Sendable {
             let (want, have) = (Self.size(needed), Self.size(free))
             stop(.driveFull, "The drive doesn't have room for this backup",
                  detail: "\(job.destination.name) needs \(want) free and has \(have)")
+        case Stop.nameInUse:
+            stop(.setNameInUse, "The name is still used by a backup in this destination",
+                 detail: "\"\(set.name)\" is still in use by a backup in \(job.destination.name)")
         case Stop.markerNotLocal:
             // Nothing is wrong: a new pair needs the marker's contents, and iCloud is fetching them.
             tally.status = .skipped; tally.scope = "waiting for iCloud to download the marker"

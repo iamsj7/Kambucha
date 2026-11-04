@@ -146,7 +146,7 @@ Do not forget `--links`. Section 7 explains why. Then do sections 7 and 8 for sy
 3. Wait. Open Finder, then iCloud Drive, and check that `Mac Backup` appears. Large backups take a long time to appear in full. Let the Mac stay on and connected. Do not restore until the status shows no more downloading.
 4. With the app: install Mirror ([setup guide](setup.md)), give it Full Disk Access, and restore from Archive or the set. Without the app: follow section 4 using the iCloud folder path in section 1.
 
-Do not add the old set again as a new backup right away. First restore, then check the result. If you point Mirror at a restored folder later, it will compare and carry on.
+Do not add the old set again as a new backup right away. First restore, then check the result. When you do add the restored folder under its old name, Mirror tells you the name is still in use by a backup in that destination. Choose Use Existing Backup to carry on from it: Mirror compares, copies what changed, and moves anything that isn't in the folder to the archive. Or choose a different name to start a fresh backup beside the old one, which stays where it is.
 
 ### External drive
 

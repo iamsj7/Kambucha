@@ -14,6 +14,12 @@ struct AddSetFlow: View {
     @State private var catalog: [Preset] = []
     @State private var chosenDestinations: Set<UUID> = []
     @State private var previewing = false
+    @State private var checkingName = false
+    @State private var nameConflicts: [Destination] = []
+    /// What the owner agreed to take over, for this name only.
+    @State private var adopting: (name: String, destinations: Set<UUID>)?
+    /// Used if nothing was chosen and no iCloud destination is saved yet, so a check and the set agree on it.
+    @State private var newICloud = Destination(name: "iCloud Drive", kind: .iCloudFolder)
 
     private let guardrail = PathGuard(iCloudDrive: MirrorPaths.iCloudDrive, backupRoot: MirrorPaths.backupRoot)
 
@@ -99,10 +105,11 @@ struct AddSetFlow: View {
             HStack {
                 Spacer()
                 Button("Cancel", role: .cancel) { dismiss() }.keyboardShortcut(.cancelAction)
-                Button("Preview…") { previewing = true }
+                if checkingName { ProgressView().controlSize(.small).accessibilityLabel("Checking the name") }
+                Button("Preview…") { Task { await preview() } }
                     .keyboardShortcut(.defaultAction)
                     .buttonStyle(.borderedProminent)
-                    .disabled(candidate == nil || problem != nil || SetNaming.suggestion(for: name) != nil || name.trimmingCharacters(in: .whitespaces).isEmpty)
+                    .disabled(checkingName || candidate == nil || problem != nil || SetNaming.suggestion(for: name) != nil || name.trimmingCharacters(in: .whitespaces).isEmpty)
             }
             .padding(16)
         }
@@ -111,10 +118,42 @@ struct AddSetFlow: View {
             catalog = (try? PresetCatalog.all()) ?? []
             chosenDestinations = Set(model.destinations.prefix(1).map(\.id))
         }
+        .confirmationDialog(SetNameConflict.title(name: trimmedName, in: nameConflicts),
+                            isPresented: Binding(get: { !nameConflicts.isEmpty }, set: { if !$0 { nameConflicts = [] } }),
+                            titleVisibility: .visible) {
+            Button(SetNameConflict.adoptButton, role: .destructive) {
+                adopting = (trimmedName, Set(nameConflicts.map(\.id)))
+                nameConflicts = []
+                previewing = true
+            }
+            Button("Choose a Different Name", role: .cancel) { nameConflicts = [] }
+        } message: { Text(SetNameConflict.message(name: trimmedName)) }
         .sheet(isPresented: $previewing) {
             if let c = candidate {
                 PreviewSheet(model: model, set: c, startLabel: "Start Backup") { accepted in create(accepted) }
             }
+        }
+    }
+
+    private var trimmedName: String { name.trimmingCharacters(in: .whitespacesAndNewlines) }
+
+    /// Where this set will back up: what's ticked, or iCloud Drive when nothing is.
+    private var targets: [Destination] {
+        let chosen = model.destinations.filter { chosenDestinations.contains($0.id) }
+        return chosen.isEmpty ? [model.destinations.first { $0.kind == .iCloudFolder } ?? newICloud] : chosen
+    }
+
+    /// Asks before the preview, so the owner hears about a name in use here and not from a stopped run.
+    private func preview() async {
+        checkingName = true
+        defer { checkingName = false }
+        if adopting?.name != trimmedName { adopting = nil }
+        let found = await SetNameConflict.destinations(holding: trimmedName, among: targets, stored: model.destinations,
+                                                       names: model.services.names)
+        if found.isEmpty || adopting.map({ Set(found.map(\.id)).isSubset(of: $0.destinations) }) == true {
+            previewing = true
+        } else {
+            nameConflicts = found
         }
     }
 
@@ -137,10 +176,11 @@ struct AddSetFlow: View {
         if final.destinationIDs.isEmpty {
             // iCloud Drive needs no sign-in, so it is the destination when none was chosen.
             let existing = model.destinations.first { $0.kind == .iCloudFolder }
-            let icloud = existing ?? Destination(name: "iCloud Drive", kind: .iCloudFolder)
+            let icloud = existing ?? newICloud
             if existing == nil { model.save(destination: icloud) }
             final.destinationIDs = [icloud.id]
         }
+        if let adopting, adopting.name == final.name { final.adoptsBackupIn = adopting.destinations }
         final.acceptPreview()
         model.save(set: final)
         model.runNow(final.id)

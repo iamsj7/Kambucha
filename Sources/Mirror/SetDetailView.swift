@@ -11,6 +11,7 @@ struct SetDetailView: View {
     @State private var previewTask: Task<Void, Never>?
     @State private var lastSaved: BackupSet
     @State private var network = NetworkStatus()
+    @State private var confirmingAdoption = false
 
     init(model: AppModel, setID: UUID) {
         self.model = model
@@ -27,6 +28,10 @@ struct SetDetailView: View {
         return c
     }
     private var accepted: Bool { Self.cleaned(draft).isPreviewAccepted }
+    /// Destinations whose run stopped because a backup there already has this set's name.
+    private var nameConflicts: [Destination] {
+        model.destinations.filter { draft.destinationIDs.contains($0.id) && model.states[PairID(set: setID, destination: $0.id)]?.stoppedBy == .setNameInUse }
+    }
 
     var body: some View {
         Form {
@@ -35,6 +40,14 @@ struct SetDetailView: View {
                 Section("Backing Up") {
                     ForEach(running) { ProgressRow(label: $0.label, progress: $0.progress) }
                     NetworkUploadRow(network: network)
+                }
+            }
+            if !nameConflicts.isEmpty {
+                Section {
+                    Label(SetNameConflict.title(name: draft.name, in: nameConflicts), systemImage: "exclamationmark.triangle")
+                    Text("Nothing has been changed there. To start a fresh backup instead, remove this set and add it under another name.")
+                        .font(.caption).foregroundStyle(.secondary)
+                    Button("\(SetNameConflict.adoptButton)…") { confirmingAdoption = true }
                 }
             }
             if !accepted {
@@ -156,6 +169,14 @@ struct SetDetailView: View {
             draft = SetDraftMerge.merge(draft: draft, previouslySaved: lastSaved, latest: latest)
             lastSaved = latest
         }
+        .confirmationDialog(SetNameConflict.title(name: draft.name, in: nameConflicts), isPresented: $confirmingAdoption, titleVisibility: .visible) {
+            Button(SetNameConflict.adoptButton, role: .destructive) {
+                draft.adoptsBackupIn = (draft.adoptsBackupIn ?? []).union(nameConflicts.map(\.id))
+                model.save(set: Self.cleaned(draft))
+                model.runNow(setID)
+            }
+            Button("Cancel", role: .cancel) {}
+        } message: { Text(SetNameConflict.message(name: draft.name)) }
         .onChange(of: draft.presets) { requestPreview() }
         .onChange(of: draft.backupSecrets) { requestPreview() }
         .onChange(of: draft.backupGit) { requestPreview() }

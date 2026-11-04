@@ -80,6 +80,14 @@ public struct AgentArchiveClient: ArchiveAgentCalling {
     }
 }
 
+extension AgentArchiveClient: SetNameListing {
+    public func names(in destination: UUID?) async throws -> [String] {
+        let answer = try await ask(AgentWire.setNames, AgentWire.NamesRequest(destination: destination))
+        guard let files = answer.files else { throw AgentClientError.noResponse(exitCode: 0) }
+        return files
+    }
+}
+
 public struct AgentArchiveProvider: ArchiveProviding {
     private let client: any ArchiveAgentCalling
     public init(client: any ArchiveAgentCalling) { self.client = client }

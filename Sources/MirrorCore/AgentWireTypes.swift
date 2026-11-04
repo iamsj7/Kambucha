@@ -7,7 +7,8 @@ public enum AgentWire {
     public static let archiveList = "archive-list"
     public static let archiveRestore = "archive-restore"
     public static let dryRunDeletions = "dry-run-deletions"
-    public static let subcommands: Set<String> = [archiveList, archiveRestore, dryRunDeletions]
+    public static let setNames = "set-names"
+    public static let subcommands: Set<String> = [archiveList, archiveRestore, dryRunDeletions, setNames]
 
     /// `archive-list` and `dry-run-deletions`.
     public struct PairRequest: Codable, Equatable, Sendable {
@@ -26,6 +27,13 @@ public enum AgentWire {
         public init(set: UUID, destination: UUID, path: String, to: String) {
             self.set = set; self.destination = destination; self.path = path; self.to = to
         }
+    }
+
+    /// `set-names`. Nil is the iCloud folder before any destination was saved for it. `files` answers with the
+    /// folder names under `Sets/`, decrypted on an encrypted destination.
+    public struct NamesRequest: Codable, Equatable, Sendable {
+        public var destination: UUID?
+        public init(destination: UUID?) { self.destination = destination }
     }
 
     public struct Entry: Codable, Equatable, Sendable {
