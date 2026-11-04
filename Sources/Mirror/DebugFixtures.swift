@@ -126,6 +126,7 @@ enum DebugFixtures {
         var sets = (try? store.loadSets()) ?? []
         sets[0].rules = [UserRule(pattern: "*.log", action: .exclude)]
         sets[0].presets = ["node", "ios"]
+        sets[1].acceptPreview()
         try? store.saveSets(sets)
         let docsPair = PairID(set: sets[1].id, destination: dests[0].id)
         var st = (try? store.state(for: docsPair)) ?? SetState()
@@ -136,7 +137,6 @@ enum DebugFixtures {
                                    volumes: FakeVolumes(), agent: .bundled(in: Bundle.main.bundleURL),
                                    archive: AppServices.live.archive)
         let model = AppModel(support: root, services: services)
-        PreviewAcceptanceStore(root: root).accept(model.sets[1])
 
         func at(_ n: String) -> URL { dir.appendingPathComponent(n) }
         render(MainWindow(model: model), size: CGSize(width: 900, height: 640), to: at("main-overview"))

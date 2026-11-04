@@ -93,7 +93,6 @@ final class AppModel {
     @ObservationIgnored let support: URL
     @ObservationIgnored private let store: ConfigStore
     @ObservationIgnored let services: AppServices
-    @ObservationIgnored let acceptance: PreviewAcceptanceStore
     @ObservationIgnored private nonisolated(unsafe) var watchers: [String: DispatchSourceFileSystemObject] = [:]
     @ObservationIgnored private var generation = 0
     @ObservationIgnored private var process: Process?
@@ -104,7 +103,6 @@ final class AppModel {
     init(support: URL = MirrorPaths.support, services: AppServices = .live) {
         self.support = support
         self.services = services
-        acceptance = PreviewAcceptanceStore(root: support)
         store = ConfigStore(root: support)
         if let snap = Snapshot.load(support: support) { apply(snap) }   // first paint is synchronous
         else { status = .attention("Mirror could not read its settings") }
@@ -173,7 +171,7 @@ final class AppModel {
         runQueue.start(.all)
         // No backup for a set starts until its preview was accepted once (spec section 9).
         // Accepted sets still run; the others are named so the owner can preview them.
-        let plan = RunNowPlan.make(sets: sets, target: set, isAccepted: { acceptance.isAccepted($0) })
+        let plan = RunNowPlan.make(sets: sets, target: set, isAccepted: \.isPreviewAccepted)
         if !plan.unaccepted.isEmpty {
             lastError = "Preview before the first backup: \(plan.unaccepted.joined(separator: ", ")). Open each in Mirror and choose Preview Backup."
         }
@@ -220,7 +218,6 @@ final class AppModel {
 
     func removeSet(_ id: UUID) {
         persist { try store.saveSets(sets.filter { $0.id != id }) }
-        acceptance.forget(id)
     }
 
     func save(destination updated: Destination) {

@@ -141,8 +141,8 @@ struct AddSetFlow: View {
             if existing == nil { model.save(destination: icloud) }
             final.destinationIDs = [icloud.id]
         }
+        final.acceptPreview()
         model.save(set: final)
-        model.acceptance.accept(final)
         model.runNow(final.id)
         added(final.id)
         dismiss()

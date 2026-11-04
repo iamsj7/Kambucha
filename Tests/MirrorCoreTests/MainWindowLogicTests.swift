@@ -118,36 +118,6 @@ private func aSet() -> BackupSet { BackupSet(name: "Projects", source: URL(fileU
     #expect(c.pendingImpact == nil)
 }
 
-// MARK: Acceptance
-
-@Test func backupIsBlockedUntilPreviewAccepted() {
-    let store = PreviewAcceptanceStore(root: tempDir())
-    let set = aSet()
-    #expect(!store.isAccepted(set))
-    store.accept(set)
-    #expect(store.isAccepted(set))
-}
-
-@Test func ruleChangeReopensThePreview() {
-    let store = PreviewAcceptanceStore(root: tempDir())
-    var set = aSet()
-    store.accept(set)
-    set.rules.append(UserRule(pattern: "*.log", action: .exclude))
-    #expect(!store.isAccepted(set))
-    store.accept(set)
-    #expect(store.isAccepted(set))
-    set.presets.insert("node")
-    #expect(!store.isAccepted(set))
-}
-
-@Test func acceptanceSurvivesRelaunchAndIgnoresRenameOnly() {
-    let root = tempDir()
-    var set = aSet()
-    PreviewAcceptanceStore(root: root).accept(set)
-    set.name = "Renamed"
-    #expect(PreviewAcceptanceStore(root: root).isAccepted(set))
-}
-
 // MARK: Deletion review
 
 @MainActor @Test func deletionReviewShowsCountAndPassesReviewedCount() async {

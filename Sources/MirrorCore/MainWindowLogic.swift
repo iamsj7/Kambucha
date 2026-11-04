@@ -19,44 +19,6 @@ public protocol MirroredExcludeInspecting: Sendable {
 
 public enum ExcludeResolution: Sendable { case moveToArchive, leaveInPlace }
 
-// MARK: Preview acceptance
-
-/// Remembers which rule set the owner accepted for each backup set. A change to the rules, presets or
-/// switches makes the set unaccepted again, so the preview reopens. Stored as plain JSON, no secrets.
-public final class PreviewAcceptanceStore: Sendable {
-    private let url: URL
-    public init(root: URL) { url = root.appendingPathComponent("preview-accepted.json") }
-
-    public static func fingerprint(_ set: BackupSet) -> String {
-        let rules = set.rules.map { "\($0.action.rawValue):\($0.pattern)" }.joined(separator: "\n")
-        return ["presets=" + set.presets.sorted().joined(separator: ","), "secrets=\(set.backupSecrets)",
-                "git=\(set.backupGit)", rules].joined(separator: "|")
-    }
-
-    public func isAccepted(_ set: BackupSet) -> Bool { load()[set.id.uuidString] == Self.fingerprint(set) }
-
-    public func accept(_ set: BackupSet) {
-        var all = load()
-        all[set.id.uuidString] = Self.fingerprint(set)
-        write(all)
-    }
-
-    public func forget(_ id: UUID) {
-        var all = load()
-        all[id.uuidString] = nil
-        write(all)
-    }
-
-    private func load() -> [String: String] {
-        (try? JSONDecoder().decode([String: String].self, from: Data(contentsOf: url))) ?? [:]
-    }
-
-    private func write(_ all: [String: String]) {
-        try? FileManager.default.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
-        try? JSONEncoder().encode(all).write(to: url, options: .atomic)
-    }
-}
-
 // MARK: Preview
 
 @MainActor @Observable
@@ -261,7 +223,7 @@ public enum SetDraftMerge {
             if latest[keyPath: k] != previouslySaved[keyPath: k] { out[keyPath: k] = latest[keyPath: k] }
         }
         take(\.isPaused); take(\.destinationIDs); take(\.presets); take(\.backupSecrets); take(\.backupGit)
-        take(\.deletion); take(\.archiveDays)
+        take(\.deletion); take(\.archiveDays); take(\.acceptedFingerprint)
         if latest.rules != previouslySaved.rules {
             // A rule still being typed (empty pattern) stays in the draft.
             out.rules = latest.rules + draft.rules.filter { $0.pattern.trimmingCharacters(in: .whitespaces).isEmpty }

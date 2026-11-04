@@ -25,7 +25,7 @@ struct SetDetailView: View {
         c.rules.removeAll { $0.pattern.trimmingCharacters(in: .whitespaces).isEmpty }
         return c
     }
-    private var accepted: Bool { model.acceptance.isAccepted(Self.cleaned(draft)) }
+    private var accepted: Bool { Self.cleaned(draft).isPreviewAccepted }
 
     var body: some View {
         Form {
@@ -154,10 +154,11 @@ struct SetDetailView: View {
         .task { presets = (try? PresetCatalog.all()) ?? [] }
         .sheet(isPresented: $showingPreview, onDismiss: { if let s = model.set(setID) { draft = s } }) {
             PreviewSheet(model: model, set: Self.cleaned(draft), startLabel: "Start Backup") { updated in
-                draft = updated
-                model.save(set: updated)
-                model.acceptance.accept(updated)
-                model.runNow(updated.id)
+                var accepted = updated
+                accepted.acceptPreview()
+                draft = accepted
+                model.save(set: accepted)
+                model.runNow(accepted.id)
             }
         }
     }
