@@ -272,3 +272,36 @@ private func aSet() -> BackupSet { BackupSet(name: "Projects", source: URL(fileU
     #expect(one.run.isEmpty)
     #expect(one.unaccepted == ["B"])
 }
+
+// MARK: Fix round 2
+
+@Test func failedRunLeavesNothingQueuedAndRunAllLaunchesOnce() {
+    let a = UUID(), b = UUID()
+    var q = RunQueue()
+    q.start(.sets([a, b]))                  // first launch is a; b waits
+    #expect(q.next(afterExit: 1) == nil)    // a failed: nothing may be left behind
+    #expect(q.waiting.isEmpty)
+    q.start(.all)                           // a later run-all
+    #expect(q.waiting.isEmpty)
+    #expect(q.next(afterExit: 0) == nil)    // launches once, no leftover set
+}
+
+@Test func queueDrainsInOrderOnSuccess() {
+    let a = UUID(), b = UUID(), c = UUID()
+    var q = RunQueue()
+    q.start(.sets([a, b, c]))
+    #expect(q.first == a)
+    #expect(q.next(afterExit: 0) == b)
+    #expect(q.next(afterExit: 0) == c)
+    #expect(q.next(afterExit: 0) == nil)
+}
+
+@Test func inProgressEmptyRuleSurvivesAnExternalRulesChange() {
+    let base = aSet()
+    var draft = base
+    draft.rules = [UserRule(pattern: "", action: .exclude)]
+    var latest = base
+    latest.rules = [UserRule(pattern: "*.log", action: .exclude)]
+    let merged = SetDraftMerge.merge(draft: draft, previouslySaved: base, latest: latest)
+    #expect(merged.rules.map(\.pattern) == ["*.log", ""])
+}

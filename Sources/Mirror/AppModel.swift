@@ -81,7 +81,7 @@ final class AppModel {
     @ObservationIgnored private nonisolated(unsafe) var watchers: [String: DispatchSourceFileSystemObject] = [:]
     @ObservationIgnored private var generation = 0
     @ObservationIgnored private var process: Process?
-    @ObservationIgnored private var queuedRuns: [UUID] = []
+    @ObservationIgnored private var runQueue = RunQueue()
     @ObservationIgnored private var panelVisible = false
     @ObservationIgnored private var poller: Task<Void, Never>?
 
@@ -149,6 +149,7 @@ final class AppModel {
     /// Runs the agent for one set, or all sets when nil.
     func runNow(_ set: UUID?) {
         lastError = nil
+        runQueue.start(.all)
         // No backup for a set starts until its preview was accepted once (spec section 9).
         // Accepted sets still run; the others are named so the owner can preview them.
         let plan = RunNowPlan.make(sets: sets, target: set, isAccepted: { acceptance.isAccepted($0) })
@@ -159,8 +160,8 @@ final class AppModel {
         if set == nil && plan.unaccepted.isEmpty {
             launchAgent(["--run-now"])
         } else {
-            queuedRuns = Array(plan.run.dropFirst())
-            launchAgent(["--run-now", plan.run[0].uuidString])
+            runQueue.start(.sets(plan.run))
+            if let id = runQueue.first { launchAgent(["--run-now", id.uuidString]) }
         }
     }
 
@@ -256,7 +257,7 @@ final class AppModel {
                     self.lastError = "The backup agent stopped with code \(code)." + (why.isEmpty ? "" : " \(why)")
                 }
                 self.refresh()
-                if code == 0, !self.queuedRuns.isEmpty { self.launchAgent(["--run-now", self.queuedRuns.removeFirst().uuidString]) }
+                if let id = self.runQueue.next(afterExit: code) { self.launchAgent(["--run-now", id.uuidString]) }
             }
         }
         do { try p.run(); process = p }

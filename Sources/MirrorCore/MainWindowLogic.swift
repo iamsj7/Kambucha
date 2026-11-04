@@ -257,8 +257,33 @@ public enum SetDraftMerge {
             if latest[keyPath: k] != previouslySaved[keyPath: k] { out[keyPath: k] = latest[keyPath: k] }
         }
         take(\.isPaused); take(\.destinationIDs); take(\.presets); take(\.backupSecrets); take(\.backupGit)
-        take(\.rules); take(\.deletion); take(\.archiveDays)
+        take(\.deletion); take(\.archiveDays)
+        if latest.rules != previouslySaved.rules {
+            // A rule still being typed (empty pattern) stays in the draft.
+            out.rules = latest.rules + draft.rules.filter { $0.pattern.trimmingCharacters(in: .whitespaces).isEmpty }
+        }
         return out
+    }
+}
+
+/// The set runs waiting behind the one agent launch in flight. Any new request or failure clears it,
+/// so a failed multi-set run can't leave a set to be launched again later.
+public struct RunQueue: Sendable {
+    public enum Request: Sendable { case all, sets([UUID]) }
+    public private(set) var waiting: [UUID] = []
+    public private(set) var first: UUID?
+    public init() {}
+
+    /// Starts afresh. For `.sets`, `first` is launched now and the rest wait.
+    public mutating func start(_ request: Request) {
+        waiting = []; first = nil
+        if case .sets(let ids) = request { first = ids.first; waiting = Array(ids.dropFirst()) }
+    }
+
+    /// The next set to launch after the agent exited, or nil. A non-zero exit empties the queue.
+    public mutating func next(afterExit code: Int32) -> UUID? {
+        guard code == 0, !waiting.isEmpty else { waiting = []; return nil }
+        return waiting.removeFirst()
     }
 }
 
