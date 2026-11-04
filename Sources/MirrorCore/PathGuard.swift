@@ -2,7 +2,7 @@ import Foundation
 
 public enum GuardFailure: Error, Equatable {
     case sourceMissing, sourceUnreadable, sourceInsideICloud, sourceContainsBackupRoot, setsOverlap(String), setNameTaken(String)
-    case iCloudUnavailable, destinationOutsideRoot, destinationUnclaimed
+    case iCloudUnavailable, destinationOutsideRoot, destinationUnclaimed, wrongDrive
     case sourceSuspiciouslyEmpty(now: Int, last: Int)
 }
 
@@ -12,6 +12,11 @@ public struct PathGuard: Sendable {
 
     public init(iCloudDrive: URL, backupRoot: URL) {
         self.iCloudDrive = iCloudDrive; self.backupRoot = backupRoot
+    }
+
+    /// A guard whose `Mac Backup` root is at the top of an external volume.
+    public static func forVolume(_ volume: VolumeInfo, iCloudDrive: URL) -> PathGuard {
+        PathGuard(iCloudDrive: iCloudDrive, backupRoot: ExternalVolume.backupRoot(on: volume))
     }
 
     /// Reduces a set name to a single safe path component (for display or new names).
@@ -35,8 +40,16 @@ public struct PathGuard: Sendable {
     }
 
     public func validateRun(_ set: BackupSet, destination: Destination, marker: RootMarker?,
-                            sampleFileCount: Int, state: SetState) throws {
+                            sampleFileCount: Int, state: SetState, volume: VolumeInfo? = nil) throws {
         try checkSource(set)
+        if destination.kind == .externalDrive {
+            // The backup root must sit on the mounted drive whose UUID the destination names.
+            let mount = volume?.mountPoint.standardizedFileURL.path ?? "/"
+            guard let volume, !volume.isSystem, mount != "/", !mount.hasPrefix("/System/Volumes"),
+                  let uuid = destination.volumeUUID,
+                  volume.uuid.caseInsensitiveCompare(uuid) == .orderedSame,
+                  Self.strictlyInsideCanonical(backupRoot, volume.mountPoint) else { throw GuardFailure.wrongDrive }
+        }
         try assertInsideRoot(mirrorURL(set))
         // Cloud destinations don't live in iCloud Drive, so only the iCloud folder needs it present.
         if destination.kind == .iCloudFolder {

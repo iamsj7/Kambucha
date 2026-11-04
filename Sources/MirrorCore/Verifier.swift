@@ -37,7 +37,7 @@ public struct Verifier: Sendable {
         var differences = 0
         differences += try await run(CheckRequest(
             source: source, destination: destination, filterFile: filter, filesFrom: nil, sizeOnly: true,
-            oneWay: oneWay, cryptCheck: false, context: context, logFile: logDir.appendingPathComponent("quick-size.log")))
+            oneWay: oneWay, cryptCheck: false, context: context, logFile: logDir.appendingPathComponent("quick-size.log")).applying(profile))
         var toHash = copied
         let root = URL(fileURLWithPath: destination)
         if audits(profile) { toHash = copied.filter { !isDataless(root.appendingPathComponent($0)) } }
@@ -46,7 +46,7 @@ public struct Verifier: Sendable {
             differences += try await run(CheckRequest(
                 source: source, destination: destination, filterFile: filter, filesFrom: list, sizeOnly: false,
                 oneWay: oneWay, cryptCheck: profile.encrypted, context: context,
-                logFile: logDir.appendingPathComponent("quick-hash.log")))
+                logFile: logDir.appendingPathComponent("quick-hash.log")).applying(profile))
         }
         var audit = AuditResult(pending: [], refused: [])
         if audits(profile) { audit = try await runAudit(copied.map { root.appendingPathComponent($0) }) }
@@ -59,7 +59,7 @@ public struct Verifier: Sendable {
             let d = try await run(CheckRequest(
                 source: source, destination: destination, filterFile: filter, filesFrom: nil, sizeOnly: false,
                 oneWay: false, cryptCheck: profile.encrypted, context: context,
-                logFile: logDir.appendingPathComponent("deep.log")))
+                logFile: logDir.appendingPathComponent("deep.log")).applying(profile))
             return VerifyResult(differences: d, audit: AuditResult(pending: [], refused: []), checksClean: d == 0)
         }
         let root = URL(fileURLWithPath: destination)
@@ -68,7 +68,7 @@ public struct Verifier: Sendable {
         // Same filtered size-only check as Quick, so a file missing from the mirror fails Deep too.
         var differences = try await run(CheckRequest(
             source: source, destination: destination, filterFile: filter, filesFrom: nil, sizeOnly: true,
-            oneWay: false, cryptCheck: false, context: context, logFile: logDir.appendingPathComponent("deep-size.log")))
+            oneWay: false, cryptCheck: false, context: context, logFile: logDir.appendingPathComponent("deep-size.log")).applying(profile))
         var present: [String] = [], freed: [String] = []
         for rel in all {
             if isDataless(root.appendingPathComponent(rel)) { freed.append(rel) } else { present.append(rel) }
@@ -81,7 +81,7 @@ public struct Verifier: Sendable {
                 source: source, destination: destination, filterFile: nil,
                 filesFrom: try writeList(list, to: logDir.appendingPathComponent("deep.list")),
                 sizeOnly: false, oneWay: false, cryptCheck: profile.encrypted, context: context,
-                logFile: logDir.appendingPathComponent("deep.log")))
+                logFile: logDir.appendingPathComponent("deep.log")).applying(profile))
         }
         let audit = try await runAudit((present + freed).map { root.appendingPathComponent($0) })
         return VerifyResult(differences: differences, audit: audit)
