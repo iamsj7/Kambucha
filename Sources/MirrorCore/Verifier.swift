@@ -49,7 +49,7 @@ public struct Verifier: Sendable {
                 logFile: logDir.appendingPathComponent("quick-hash.log")))
         }
         var audit = AuditResult(pending: [], refused: [])
-        if audits(profile) { audit = await runAudit(copied.map { root.appendingPathComponent($0) }) }
+        if audits(profile) { audit = try await runAudit(copied.map { root.appendingPathComponent($0) }) }
         return VerifyResult(differences: differences, audit: audit)
     }
 
@@ -83,14 +83,28 @@ public struct Verifier: Sendable {
                 sizeOnly: false, oneWay: false, cryptCheck: profile.encrypted, context: context,
                 logFile: logDir.appendingPathComponent("deep.log")))
         }
-        let audit = await runAudit((present + freed).map { root.appendingPathComponent($0) })
+        let audit = try await runAudit((present + freed).map { root.appendingPathComponent($0) })
         return VerifyResult(differences: differences, audit: audit)
     }
 
-    /// Audits read many resource values from disk; keep them off the cooperative pool.
-    private func runAudit(_ urls: [URL]) async -> AuditResult {
+    private static let auditQueue = DispatchQueue(label: "mirror.upload-audit", qos: .utility)
+
+    /// Audits read resource values from disk, so they run on a dispatch queue, never the cooperative
+    /// pool, in batches with a cancellation check between each.
+    private func runAudit(_ urls: [URL]) async throws -> AuditResult {
+        var total = AuditResult(pending: [], refused: [])
         let auditor = self.auditor
-        return await Task.detached(priority: .utility) { auditor.audit(urls) }.value
+        var i = 0
+        while i < urls.count {
+            try Task.checkCancellation()
+            let batch = Array(urls[i..<min(i + 200, urls.count)])
+            let r: AuditResult = await withCheckedContinuation { cont in
+                Self.auditQueue.async { cont.resume(returning: auditor.audit(batch)) }
+            }
+            total.pending += r.pending; total.refused += r.refused; total.missing += r.missing
+            i += 200
+        }
+        return total
     }
 
     private func run(_ r: CheckRequest) async throws -> Int {

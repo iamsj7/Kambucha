@@ -20,9 +20,9 @@ public struct ICloudAuditor: UploadAuditing {
     public func audit(_ urls: [URL]) -> AuditResult {
         var result = AuditResult(pending: [], refused: [])
         for original in urls {
-            // lstat tells a vanished path from a refused one, and does not follow links. Probed on a
-            // real iCloud Drive folder: resourceValues on a symlink URL (including a dangling one) reads
-            // the link's own ubiquity state and never its target's, so links are audited like files.
+            // lstat separates a vanished path from a refused one. Probed in iCloud Drive: a symlink to a
+            // non-iCloud file and a dangling symlink each reported isUbiquitousItem and
+            // ubiquitousItemIsUploaded true (the target is not ubiquitous), so values come from the link itself.
             var st = stat()
             guard lstat(original.path, &st) == 0 else { result.missing.append(original.path); continue }
             var url = URL(fileURLWithPath: original.path)

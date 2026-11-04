@@ -91,7 +91,7 @@ private struct Env {
         #expect(rc2.checks.allSatisfy { !$0.oneWay })
     }
 
-    @Test func pendingUploadsStillPass() async throws {
+    @Test func pendingUploadsKeepChecksCleanButNotBackedUp() async throws {
         let e = try Env(); defer { e.cleanup() }
         try e.mirror(["a"])
         let au = FakeAuditor(); au.result = AuditResult(pending: ["a"], refused: [])
