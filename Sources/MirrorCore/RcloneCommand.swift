@@ -13,8 +13,9 @@ public struct DestinationProfile: Equatable, Sendable {
     /// True when the destination can't hold symlinks (exFAT). Links are then read from the source only,
     /// through a `:local,links:` connection string, and stored as `.rclonelink` files.
     public var linksAsFiles: Bool
-    /// False on exFAT. Its 2 second timestamps make "same size, same mtime" match unrelated files, and
-    /// rename tracking then silently gives a new file another file's content (reproduced on a real exFAT image).
+    /// Rename tracking uses the `hash` strategy, only where both sides have a hash. It is off for encrypted
+    /// cloud destinations (no hash) and exFAT. The `modtime` strategy is never used: it trusts size and date
+    /// only, so a same-size file written in the same window is matched wrongly and silently, on any destination.
     public var trackRenames: Bool
     /// True on exFAT. macOS stores extended attributes there as `._*` AppleDouble files, which sync would
     /// otherwise see as extras and delete, tripping `--max-delete`. Filtered on both sides, ahead of the set's filter.
@@ -40,11 +41,13 @@ public struct DestinationProfile: Equatable, Sendable {
         case .googleDrive:
             return DestinationProfile(kind: .googleDrive, encrypted: destination.encrypted, modifyWindow: "1ms",
                                       extraFlags: ["--fast-list", "--drive-stop-on-upload-limit", "--drive-use-trash=false"],
-                                      maxDuration: "25m", fullPassInterval: 7 * day)
+                                      maxDuration: "25m", fullPassInterval: 7 * day,
+                                      trackRenames: !destination.encrypted)
         case .oneDrive:
             return DestinationProfile(kind: .oneDrive, encrypted: destination.encrypted, modifyWindow: "1s",
                                       extraFlags: ["--onedrive-no-versions", "--onedrive-hard-delete"],
-                                      maxDuration: "25m", fullPassInterval: 7 * day)
+                                      maxDuration: "25m", fullPassInterval: 7 * day,
+                                      trackRenames: !destination.encrypted)
         case .externalDrive:
             let symlinks = ExternalVolume.supportsSymlinks(fileSystem: fileSystem ?? "")
             return DestinationProfile(kind: .externalDrive, encrypted: false, modifyWindow: symlinks ? "1ms" : "2s",
@@ -116,7 +119,7 @@ public enum RcloneCommand {
         a += [sourceArgument(r.source, linksAsFiles: r.profile.linksAsFiles), r.destination]
         a += ["--modify-window", r.profile.modifyWindow]
         if case .mirror(let maxDelete) = r.mode {
-            if r.profile.trackRenames { a += ["--track-renames", "--track-renames-strategy", "modtime"] }
+            if r.profile.trackRenames { a += ["--track-renames", "--track-renames-strategy", "hash"] }
             a += ["--max-delete", String(maxDelete)]
         }
         // --links is a plain global flag. A ":local,links:" connection string would stop rclone

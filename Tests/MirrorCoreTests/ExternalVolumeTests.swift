@@ -66,7 +66,7 @@ private func has(_ a: [String], _ f: String, _ v: String) -> Bool {
         let f = a.firstIndex(of: "--filter"), ff = a.firstIndex(of: "--filter-from")
         #expect(f != nil && ff != nil && a[f! + 1] == "- ._*" && f! < ff!)
         let apfs = args(fs: "apfs")
-        #expect(apfs.contains("--track-renames") && !apfs.contains("--filter"))
+        #expect(apfs.contains("--track-renames") && has(apfs, "--track-renames-strategy", "hash") && !apfs.contains("--filter"))
     }
 
     @Test func apfsUsesOneMillisecond() {
