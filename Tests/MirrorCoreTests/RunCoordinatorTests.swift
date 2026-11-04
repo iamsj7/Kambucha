@@ -4067,3 +4067,86 @@ private struct GoneBeforeTidy: RcloneRunning {
         #expect(try h.state.heldDeletions == 2)
     }
 }
+
+/// Throws from the first capture, and passes everything else through.
+private struct ThrowingCapture: RcloneRunning {
+    let wrapping: FakeRclone
+    let error: any Error & Sendable
+    func sync(_ r: SyncRequest) async throws -> RcloneResult { try await wrapping.sync(r) }
+    func check(_ r: CheckRequest) async throws -> RcloneResult { try await wrapping.check(r) }
+    func capture(_ arguments: [String], context: RcloneContext) async throws -> RcloneCapture { throw error }
+}
+
+@Suite struct DriveRoomPruneTests {
+    /// A drive with too little room and one expired archive folder.
+    private func cramped(_ h: Harness, held: Int = 0) throws -> PairID {
+        let (d, v) = try h.useDrive(free: 2_000_000_000)
+        try RootMarker(sets: [h.set.id: h.set.name]).save(backupRoot: v.mountPoint.appendingPathComponent("Mac Backup"))
+        let pair = PairID(set: h.set.id, destination: d.id)
+        try h.prime(pair, kind: .externalDrive)
+        var s = try h.state(pair)
+        s.lastSeenMountID = "m1"
+        s.heldDeletions = held
+        try h.store.save(s, for: pair)
+        h.change("flowapp/a.txt")
+        h.rclone.dry(bytes: 3_000_000_000)
+        h.rclone.archive(stamps: [ArchiveScope.stampString(h.now.addingTimeInterval(-40 * 86_400)) + "/",
+                                  ArchiveScope.stampString(h.now.addingTimeInterval(-86_400)) + "/"])
+        return pair
+    }
+
+    @Test func aHeldPairNeverPrunesForRoom() async throws {
+        let h = try Harness()
+        _ = try cramped(h, held: 300)
+        await h.run()
+        #expect(h.rclone.purged.isEmpty)
+        #expect(try h.active.contains(.driveFull))
+    }
+
+    @Test func neitherDoesAHoldThisRunJustMade() async throws {
+        let h = try Harness()
+        _ = try cramped(h)
+        h.rclone.script(dryDeletions: (0..<500).map { "d\($0)" })
+        h.rclone.dry(bytes: 3_000_000_000)
+        await h.run()
+        #expect(h.rclone.purged.isEmpty)
+        #expect(h.rclone.realSyncs.isEmpty)
+    }
+
+    @Test func whatAPruneForRoomRemovedIsRecorded() async throws {
+        let h = try Harness()
+        _ = try cramped(h)
+        await h.run()
+        #expect(h.rclone.purged.count == 1)
+        #expect(try h.latest()?.archivesPruned == 1)
+        #expect(try h.latest()?.status == .failed)   // still no room
+    }
+
+    @Test func aCancelDuringThatPruneStops() async throws {
+        let h = try Harness()
+        _ = try cramped(h)
+        await h.coordinator(rclone: ThrowingCapture(wrapping: h.rclone, error: CancellationError())).runAll(command: RunCommand())
+        #expect(try h.latest()?.errors == ["Stopped before finishing"])
+        #expect(h.rclone.realSyncs.isEmpty)
+        #expect(try !h.active.contains(.driveFull))
+    }
+
+    @Test func aBadRcloneDuringThatPruneFailsTheAgent() async throws {
+        let h = try Harness()
+        _ = try cramped(h)
+        let ran = await h.coordinator(rclone: ThrowingCapture(wrapping: h.rclone, error: AgentFailure.untrustedHelper)).runAll(command: RunCommand())
+        #expect(!ran)
+        #expect(try h.active.contains(.agentFailed))
+    }
+
+    @Test func aDriveThatLeftBeforeThatPruneIsLeftAlone() async throws {
+        let h = try Harness()
+        let pair = try cramped(h)
+        let volumes = h.volumes
+        h.rclone.onDryRun = { volumes.set([]) }
+        await h.run()
+        #expect(h.rclone.captures.isEmpty)
+        #expect(try h.latest()?.status == .partial)
+        #expect(try h.state(pair).stoppedBy == nil)
+    }
+}

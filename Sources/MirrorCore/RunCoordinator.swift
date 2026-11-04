@@ -558,7 +558,6 @@ public final class RunCoordinator: Sendable {
             deletions += result.summary.deleted.map { Self.inSet($0, slice) }
             planned += Self.touched(by: result.summary, planned: true).map { Self.inSet($0, slice) }
         }
-        try await checkRoom(job, set: set, bytes: bytesToCopy, endpoint: endpoint, context: context)
         let countable = DeletionGate.countable(deletions)
         var decision = DeletionGate.decide(deletions: deletions, totalFiles: state.lastFileCount ?? 0,
                                            policy: set.deletion, approvedDeletions: job.approved)
@@ -583,6 +582,9 @@ public final class RunCoordinator: Sendable {
             tally.notices.append((.deletionsHeld, pair, "\(count) deletions held"))
             keep(.deletionsHeld, pair, set, detail: "\(count) deletions held")   // no posting with a session open
         }
+
+        // After the gate, as a hold this run just made must keep its archive too.
+        try await checkRoom(job, set: set, bytes: bytesToCopy, endpoint: endpoint, context: context, state: state, tally: &tally)
 
         // Saved first, so a kill during the sync can't lose a hold or what it was about to copy.
         owe(planned, state: &state)
@@ -712,13 +714,22 @@ public final class RunCoordinator: Sendable {
             settleReview(found, set: set, state: &state)
         }
         guard !holding else { return }   // the archive may be what undoes whatever is being held
+        try await pruneArchive(job, set: set, endpoint: endpoint, context: context, tally: &tally)
         let archive = archives(endpoint, context, job.destination.kind)
         do {
-            let pruned = try await archive.prune(set: set, now: clock())
-            tally.archivesPruned = pruned
-            if pruned > 0 { Self.log.info("pruned \(pruned) archive folders") }
             let evicted = try await offPool { try archive.evictUploaded(set: set) }
             if evicted > 0 { Self.log.info("evicted \(evicted) archive files") }
+        } catch {
+            Self.log.error("archive eviction failed")
+        }
+    }
+
+    /// A failure is only noted, as the backup doesn't depend on it. What would stop a run stops this too.
+    private func pruneArchive(_ job: Job, set: BackupSet, endpoint: String, context: RcloneContext, tally: inout Tally) async throws {
+        do {
+            let pruned = try await archives(endpoint, context, job.destination.kind).prune(set: set, now: clock())
+            tally.archivesPruned += pruned
+            if pruned > 0 { Self.log.info("pruned \(pruned) archive folders") }
         } catch ArchiveError.authExpired {
             throw ArchiveError.authExpired
         } catch let error as AgentFailure {
@@ -751,12 +762,14 @@ public final class RunCoordinator: Sendable {
 
     /// Spec section 8a. Moves into the archive stay on the volume, so only what's copied takes room. An
     /// archive past its keep period may be what filled the drive, and pruning waits for a finished run, so
-    /// it goes first or the drive would never recover.
-    private func checkRoom(_ job: Job, set: BackupSet, bytes: Int64, endpoint: String, context: RcloneContext) async throws {
+    /// it goes first or the drive would never recover. Never during a hold, as it may be what undoes it.
+    private func checkRoom(_ job: Job, set: BackupSet, bytes: Int64, endpoint: String, context: RcloneContext,
+                           state: SetState, tally: inout Tally) async throws {
         guard var volume = job.volume else { return }
         if !ExternalVolume.fits(bytesToCopy: bytes, archiveBytes: 0, volume: volume) {
-            do { try await archives(endpoint, context, job.destination.kind).prune(set: set, now: clock()) } catch {
-                Self.log.error("archive pruning failed")
+            if state.heldDeletions == 0 {
+                try confirmDrive(job)
+                try await pruneArchive(job, set: set, endpoint: endpoint, context: context, tally: &tally)
             }
             volume = ExternalVolume.find(job.destination, in: volumes.mounted()) ?? volume
             guard ExternalVolume.fits(bytesToCopy: bytes, archiveBytes: 0, volume: volume) else {
