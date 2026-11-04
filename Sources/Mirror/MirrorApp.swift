@@ -15,6 +15,11 @@ struct MirrorApp: App {
             DebugFixtures.snapshotAll(to: URL(fileURLWithPath: dbg[i + 1]))
             exit(0)
         }
+        if let i = dbg.firstIndex(of: "--snapshot-main"), i + 1 < dbg.count {
+            _ = NSApplication.shared
+            DebugFixtures.snapshotMain(to: URL(fileURLWithPath: dbg[i + 1]))
+            exit(0)
+        }
         if let i = dbg.firstIndex(of: "--snapshot-progress"), i + 1 < dbg.count {
             DebugFixtures.snapshotProgress(to: URL(fileURLWithPath: dbg[i + 1]))
             exit(0)
@@ -54,7 +59,6 @@ struct MirrorApp: App {
         }
         .menuBarExtraStyle(.window)
 
-        Window("Mirror", id: "main") { MainWindowPlaceholder() }
-        Window("Review Deletions", id: "review") { ReviewDeletionsPlaceholder() }
+        Window("Mirror", id: "main") { MainWindow(model: model) }
     }
 }
