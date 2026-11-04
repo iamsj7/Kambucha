@@ -78,7 +78,7 @@ struct MenuBarPanel: View {
 
     private func review(_ id: UUID) {
         model.allowDeletes(id)
-        openMirror("review")
+        openMirror("main")
     }
 
     private func openMirror(_ id: String) {
@@ -114,23 +114,5 @@ extension OverallStatus {
         case .paused: "Paused"
         case .notConfigured: "Not Set Up"
         }
-    }
-}
-
-/// Stand-in until Task 17 builds the deletion review sheet.
-struct ReviewDeletionsPlaceholder: View {
-    var body: some View {
-        ContentUnavailableView("Review Deletions", systemImage: "trash.circle",
-                               description: Text("The list of held deletions will appear here."))
-            .frame(minWidth: 360, minHeight: 240)
-    }
-}
-
-/// Stand-in until the main window is built.
-struct MainWindowPlaceholder: View {
-    var body: some View {
-        ContentUnavailableView("Mirror", systemImage: "icloud",
-                               description: Text("Sets, destinations and activity will appear here."))
-            .frame(minWidth: 480, minHeight: 320)
     }
 }

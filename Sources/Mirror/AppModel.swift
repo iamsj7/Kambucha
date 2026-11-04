@@ -20,6 +20,8 @@ private struct Snapshot: Sendable {
     var sets: [BackupSet]
     var status: OverallStatus
     var rows: [SetRow]
+    var destinations: [Destination]
+    var states: [PairID: SetState]
 
     static func load(support: URL) -> Snapshot? {
         let store = ConfigStore(root: support)
@@ -40,7 +42,8 @@ private struct Snapshot: Sendable {
         }
         return Snapshot(sets: sets, status: overall(sets),
                         rows: sets.map { SetRow(id: $0.id, name: $0.name, isPaused: $0.isPaused,
-                                                status: $0.isPaused ? .paused : overall([$0])) })
+                                                status: $0.isPaused ? .paused : overall([$0])) },
+                        destinations: destinations, states: states)
     }
 }
 
@@ -62,7 +65,9 @@ final class AppModel {
     private(set) var sets: [BackupSet] = []
     private(set) var rows: [SetRow] = []
     private(set) var status: OverallStatus = .notConfigured
-    /// Set when the owner chooses Review Deletions; Task 17 replaces the placeholder with the real sheet.
+    private(set) var destinations: [Destination] = []
+    private(set) var states: [PairID: SetState] = [:]
+    /// Set when the owner chooses Review Deletions; the review window shows that set's held deletions.
     var reviewingSet: UUID?
     /// Sticky: cleared only by `dismissError()` or the next owner action. `refresh()` never touches it.
     private(set) var lastError: String?
@@ -71,14 +76,18 @@ final class AppModel {
 
     @ObservationIgnored private let support: URL
     @ObservationIgnored private let store: ConfigStore
+    @ObservationIgnored let services: AppServices
+    @ObservationIgnored let acceptance: PreviewAcceptanceStore
     @ObservationIgnored private nonisolated(unsafe) var watchers: [String: DispatchSourceFileSystemObject] = [:]
     @ObservationIgnored private var generation = 0
     @ObservationIgnored private var process: Process?
     @ObservationIgnored private var panelVisible = false
     @ObservationIgnored private var poller: Task<Void, Never>?
 
-    init(support: URL = MirrorPaths.support) {
+    init(support: URL = MirrorPaths.support, services: AppServices = .live) {
         self.support = support
+        self.services = services
+        acceptance = PreviewAcceptanceStore(root: support)
         store = ConfigStore(root: support)
         if let snap = Snapshot.load(support: support) { apply(snap) }   // first paint is synchronous
         else { status = .attention("Mirror could not read its settings") }
@@ -108,6 +117,7 @@ final class AppModel {
 
     private func apply(_ snap: Snapshot) {
         sets = snap.sets; rows = snap.rows; status = snap.status
+        destinations = snap.destinations; states = snap.states
     }
 
     // MARK: Panel visibility and polling
@@ -138,6 +148,12 @@ final class AppModel {
     /// Runs the agent for one set, or all sets when nil.
     func runNow(_ set: UUID?) {
         lastError = nil
+        // No backup for a set starts until its preview was accepted once (spec section 9).
+        let targets = sets.filter { set == nil ? !$0.isPaused : $0.id == set }
+        if let unaccepted = targets.first(where: { !acceptance.isAccepted($0) }) {
+            lastError = "Preview \"\(unaccepted.name)\" before its first backup. Open it in Mirror and choose Preview Backup."
+            return
+        }
         launchAgent(["--run-now"] + (set.map { [$0.uuidString] } ?? []))
     }
 
@@ -149,10 +165,59 @@ final class AppModel {
         catch { lastError = "Mirror could not save the pause setting." }
     }
 
-    /// Placeholder until the review sheet (Task 17) exists: approving deletions needs the owner to see the list.
+    /// Opens the deletion review. Approving deletions needs the owner to see the list first.
     func allowDeletes(_ set: UUID) { lastError = nil; reviewingSet = set }
 
     func keepHolding() { reviewingSet = nil }
+
+    /// Launches the agent with the count the owner reviewed; it holds again if the list has grown.
+    func allowOnce(arguments: [String]) {
+        lastError = nil
+        reviewingSet = nil
+        launchAgent(arguments)
+    }
+
+    // MARK: Editing sets and destinations
+
+    func set(_ id: UUID) -> BackupSet? { sets.first { $0.id == id } }
+    func destination(_ id: UUID) -> Destination? { destinations.first { $0.id == id } }
+
+    /// Adds a new set or replaces the one with the same id.
+    func save(set updated: BackupSet) {
+        var all = sets
+        if let i = all.firstIndex(where: { $0.id == updated.id }) { all[i] = updated } else { all.append(updated) }
+        persist { try store.saveSets(all) }
+    }
+
+    func removeSet(_ id: UUID) {
+        persist { try store.saveSets(sets.filter { $0.id != id }) }
+        acceptance.forget(id)
+    }
+
+    func save(destination updated: Destination) {
+        var all = destinations
+        if let i = all.firstIndex(where: { $0.id == updated.id }) { all[i] = updated } else { all.append(updated) }
+        persist { try store.saveDestinations(all) }
+    }
+
+    func removeDestination(_ id: UUID) {
+        var updatedSets = sets
+        for i in updatedSets.indices { updatedSets[i].destinationIDs.removeAll { $0 == id } }
+        persist {
+            try store.saveDestinations(destinations.filter { $0.id != id })
+            try store.saveSets(updatedSets)
+        }
+    }
+
+    func report(_ message: String) { lastError = message }
+
+    private func persist(_ write: () throws -> Void) {
+        lastError = nil
+        do { try write() } catch { lastError = "Mirror could not save your changes." }
+        // Apply at once so the screen the owner is on reflects the change before the file watcher fires.
+        if let snap = Snapshot.load(support: support) { apply(snap) }
+        refresh()
+    }
 
     /// The first set that has deletions held, for the Review Deletions action.
     var heldSet: SetRow? { rows.first { if case .held = $0.status { true } else { false } } }
