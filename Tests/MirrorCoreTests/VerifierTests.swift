@@ -58,6 +58,21 @@ private struct Env {
 }
 
 @Suite struct VerifierTests {
+    /// Eviction can happen between two reads, so one read decides each file.
+    @Test func eachFileIsHashedOrSkippedNeverBothOrNeither() async throws {
+        let e = try Env(); defer { e.cleanup() }
+        final class Flip: @unchecked Sendable {
+            let lock = NSLock(); var reads = 0
+            func read() -> Bool { lock.withLock { reads += 1; return reads % 2 == 0 } }
+        }
+        let flip = Flip(), rclone = FakeRclone()
+        let v = Verifier(rclone: rclone, auditor: FakeAuditor(), isDataless: { _ in flip.read() })
+        let result = try await v.quick(source: e.src, destination: e.dst.path, profile: profile(.iCloudFolder), context: ctx(),
+                                       filter: e.filter, copied: ["a", "b", "c", "d"], oneWay: false, logDir: e.logs)
+        #expect(flip.reads == 4)
+        #expect(Set((rclone.lists.last ?? []) + result.skippedFreed) == ["a", "b", "c", "d"])
+    }
+
     @Test func aLinkIsAuditedByItsNameInTheMirror() async throws {
         let e = try Env(); defer { e.cleanup() }
         let rclone = FakeRclone(), auditor = FakeAuditor()

@@ -28,6 +28,10 @@ public final class RunCoordinator: Sendable {
     static let freedSample = 20
     /// Past this the list stops being cheap to save at every step, so a flag stands in for it.
     static let maxOwed = 5_000
+    /// Evicted owed files survive an overflow, so they have a bound of their own.
+    static let maxFreed = 5_000
+    /// Each is a real download, so a long list is worked through over several wake-ups.
+    static let maxDownloadsPerRun = 200
     /// Finder's droppings don't make a source any less empty.
     private static let noise: Set<String> = [".DS_Store", ".localized"]
 
@@ -46,6 +50,7 @@ public final class RunCoordinator: Sendable {
     private let mountWakeWindow: TimeInterval
     private let priority: @Sendable (Bool) -> Void
     private let lowPower: @Sendable () -> Bool
+    private let downloader: any ICloudDownloading
 
     public init(store: ConfigStore, records: RunRecordStore, problems: ProblemCenter, rclone: any RcloneRunning,
                 feed: any ChangeFeeding, verifier: Verifier, guard pathGuard: PathGuard, detector: StackDetector,
@@ -55,7 +60,8 @@ public final class RunCoordinator: Sendable {
                 archives: (@Sendable (String, RcloneContext, DestinationKind) -> ArchiveManager)? = nil,
                 progress: RunProgress? = nil, volumes: any VolumeLocating = SystemVolumes(),
                 mountWakeWindow: TimeInterval = 0, priority: @escaping @Sendable (Bool) -> Void = { _ in },
-                lowPower: @escaping @Sendable () -> Bool = { ProcessInfo.processInfo.isLowPowerModeEnabled }) {
+                lowPower: @escaping @Sendable () -> Bool = { ProcessInfo.processInfo.isLowPowerModeEnabled },
+                downloader: any ICloudDownloading = ICloudDownloader()) {
         self.priority = priority; self.lowPower = lowPower
         self.volumes = volumes; self.mountWakeWindow = mountWakeWindow
         self.archives = archives ?? { ArchiveManager(rclone: rclone, endpoint: $0, context: $1, kind: $2) }
@@ -64,7 +70,7 @@ public final class RunCoordinator: Sendable {
         self.store = store; self.records = records; self.problems = problems; self.rclone = rclone
         self.feed = feed; self.verifier = verifier; self.pathGuard = pathGuard; self.detector = detector
         self.filters = filters; self.clock = clock; self.sessions = sessions; self.remote = remote; self.paths = paths
-        self.helperCheck = helperCheck
+        self.helperCheck = helperCheck; self.downloader = downloader
     }
 
     /// Another run holding the lock means leave quietly: no state, record or pid file is touched.
@@ -264,6 +270,7 @@ public final class RunCoordinator: Sendable {
         case iCloudSignedOut
         case driveGone
         case driveFull(needed: Int64, free: Int64)
+        case markerNotLocal
     }
 
     /// How one pair's run leaves the rest. `stop` is a cancelled run. `agentFailed` also fails the agent.
@@ -370,6 +377,9 @@ public final class RunCoordinator: Sendable {
         }
         tally.pending = state.pendingUploads
         tally.refused = state.refusedSince.count
+        if state.waitingForDownload > 0, tally.status != .verificationFailed {
+            tally.verification = "Waiting for iCloud to download \(state.waitingForDownload) files to verify"
+        }
         // Saved ahead of the record, so a kill between them can't leave a stop no one was told of.
         for notice in tally.notices { keep(notice.problem, notice.pair, set, detail: notice.detail) }
         record()
@@ -518,7 +528,6 @@ public final class RunCoordinator: Sendable {
         let slices = try makeSlices(job, set: set, scope: scope, projects: projects, endpoint: endpoint, stamp: stamp, runDir: runDir)
         // What earlier runs left unproven. Kept apart, as `owe` may give the saved list up to the flag.
         let carried = state.verifyOwed
-        let flaggedBefore = state.hashWholeSet
         let previousPass = state.lastFullPass
 
         func request(_ s: Slice, mode: SyncMode, dryRun: Bool) -> SyncRequest {
@@ -567,7 +576,7 @@ public final class RunCoordinator: Sendable {
         }
 
         // Saved first, so a kill during the sync can't lose a hold or what it was about to copy.
-        owe(planned, state: &state)
+        owe(planned, job, set: set, state: &state)
         try persist(state, pair)
 
         progress.enter(.transferring, pair: pair)
@@ -578,7 +587,7 @@ public final class RunCoordinator: Sendable {
             Self.add(result.summary, to: &tally.summary)
             perSlice.append(result.summary)
             // Whatever came of it: a failed sync can still have copied files.
-            owe(Self.touched(by: result.summary).map { Self.inSet($0, slice) }, state: &state)
+            owe(Self.touched(by: result.summary).map { Self.inSet($0, slice) }, job, set: set, state: &state)
             try persist(state, pair)
             switch result.outcome {
             case .success:
@@ -604,51 +613,70 @@ public final class RunCoordinator: Sendable {
         var verified = VerifyResult(differences: 0, audit: AuditResult(pending: [], refused: []))
         let wholePass = plan.isDailyPass && scope == .wholeSet
         let matcher = FilterMatcher(lines: filters.lines(for: set, projects: projects, scope: nil))
-        var listOverflowed = false
+        // A deep check hashes every file on disk, so a Quick hash beside it would do the work twice.
+        let deepDue = plan.isDeepDue && plan.isDailyPass && !holding
+        let deepFollows = scope == .wholeSet && (state.hashWholeSet || deepDue)
+        var awaitingDeep: (slice: Slice, result: VerifyResult, names: [String])?
         for (slice, summary) in zip(slices, perSlice) {
             // Carried files that have since left the source, or the rules, have nothing to prove.
             let owed = Self.within(slice, carried).filter {
-                Self.existsInSource($0, slice) && !matcher.isExcluded(Self.inSet($0, slice))
+                Self.existsInSource($0, slice.source) && !matcher.isExcluded(Self.inSet($0, slice))
             }
             let names = Array(Set(Self.touched(by: summary) + owed)).sorted()
             try confirmDrive(job)
             let result = try await verifier.quick(source: slice.source, destination: slice.destination, profile: job.profile,
                                                   context: context, filter: slice.filter, copied: names, oneWay: holding,
-                                                  logDir: slice.logDir, auditWholeMirror: wholePass)
+                                                  logDir: slice.logDir, auditWholeMirror: wholePass, hashCopied: !deepFollows)
             Self.merge(result, of: slice, into: &verified)
             guard result.checksClean else { continue }   // a mismatch stays owed, or the next run would call it clean
-            if prove(slice, result, mirror: mirrorRoot(job), state: &state) { listOverflowed = true }
+            // With a deep check to come nothing has been hashed yet, so nothing is proven yet either.
+            if deepFollows { awaitingDeep = (slice, result, names); continue }
+            prove(slice, result, job, set: set, state: &state)
             try persist(state, pair)
         }
         tally.filesChecked = verified.matchingFiles
         var deepRan = false
-        if let slice = slices.first, scope == .wholeSet, flaggedBefore || (plan.isDeepDue && plan.isDailyPass && !holding) {
-            // Oldest first, so a long list still gets through them. They're sampled, not downloaded wholesale.
-            let due = state.freedSince.sorted { ($0.value, $0.key) < ($1.value, $1.key) }.map(\.key).prefix(Self.freedSample)
+        if let slice = slices.first, scope == .wholeSet, state.hashWholeSet || deepDue {
             try confirmDrive(job)
             let deep = try await verifier.deep(source: slice.source, destination: slice.destination, profile: job.profile,
-                                               context: context, filter: slice.filter,
-                                               sampleFreed: Self.freedSample - due.count, logDir: slice.logDir,
-                                               oneWay: holding, mustHash: Array(due))
+                                               context: context, filter: slice.filter, sampleFreed: Self.freedSample,
+                                               logDir: slice.logDir, oneWay: holding)
             verified.differences += deep.differences
             verified.checksClean = verified.checksClean && deep.checksClean
             verified.differingPaths += deep.differingPaths
-            if deep.checksClean {
+            if verified.checksClean {
+                // Lowered first, so whatever the steps below can't hold raises it again and it stays up.
+                let flagged = state.hashWholeSet
+                state.hashWholeSet = false
+                if let awaitingDeep {
+                    var result = awaitingDeep.result
+                    // Nothing clears unless a hash of that file passed, so what the deep check left out stays.
+                    let hashed = deep.hashedPaths
+                    result.skippedFreed += awaitingDeep.names.filter { name in
+                        !result.skippedFreed.contains(name) && hashed.map { !$0.contains(Self.mirrorName(name)) } ?? false
+                    }
+                    prove(awaitingDeep.slice, result, job, set: set, state: &state)
+                }
                 track(deep.audit, mirror: mirrorRoot(job), state: &state)
-                state.verifyOwed.removeAll(where: due.contains)
-                for path in due { state.freedSince[path] = nil }
+                if flagged {
+                    // The flag may have stood for any of these, and no hash reached them.
+                    let live = deep.unhashedFreed.filter { Self.existsInSource($0, set.source) && !matcher.isExcluded($0) }
+                    owe(keepFreed(live, state: &state), job, set: set, state: &state)
+                }
             }
             flagFreed(state: &state)
             deepRan = true
         }
         guard verified.checksClean else {
             tally.verification = "Quick check found \(verified.differences) differences"
+            // A deep check can name files no earlier run owed. What's gone from the source is the sync's to remove.
+            let named = Set(verified.differingPaths).filter { Self.existsInSource($0, set.source) }
+            owe(Array(named), job, set: set, state: &state)
             if await changedDuringRun(set, verified, since: batch.latestEventID) { throw Stop.changedDuringRun }
+            state.mismatched = Set(state.mismatched).union(named).sorted()
             throw Stop.verificationFailed(differences: verified.differences)
         }
         tally.verification = deepRan ? "Quick and deep checks passed" : "Quick check passed"
-        // Every file this run touched was just hashed. Only what an earlier run left behind needs the deep check.
-        if (!flaggedBefore || deepRan), !listOverflowed { state.hashWholeSet = false }
 
         try await reconcileUploads(job, set: set, state: &state, tally: &tally)
         finish(job, plan: plan, scope: scope, batch: batch, verified: verified, holding: holding, deepRan: deepRan, state: &state)
@@ -737,7 +765,7 @@ public final class RunCoordinator: Sendable {
 
     /// Spec section 9: secrets FSEvents saw inside excluded folders, spotted by name at no cost.
     private func secretsChanged(_ batch: ChangeBatch, set: BackupSet, matcher: FilterMatcher) -> [ReviewItem] {
-        let inExcluded = ScopeMapper.relative(batch.paths, root: set.source).filter { path in
+        let inExcluded = ScopeMapper.relative(batch.paths, to: set.source).filter { path in
             let folder = (path as NSString).deletingLastPathComponent
             return !folder.isEmpty && matcher.isExcluded(folder + "/") && Self.exists(set.source.appendingPathComponent(path))
         }
@@ -777,42 +805,64 @@ public final class RunCoordinator: Sendable {
         }
     }
 
-    /// Adds to what's owed, even with the flag set: the flag can clear in this same run, and what
-    /// it stood for mustn't go with it. Past the bound, the flag replaces the list. True then.
-    @discardableResult
-    private func owe(_ paths: [String], state: inout SetState) -> Bool {
-        guard !paths.isEmpty else { return false }
+    /// Adds to what's owed. Past the bound the flag takes over from the list, except for files only
+    /// the list can speak for: an evicted file, which a whole-set check can't hash, and a recorded
+    /// mismatch. The flag is the record of an overflow, so no caller has to carry one.
+    private func owe(_ paths: [String], _ job: Job, set: BackupSet, state: inout SetState) {
+        guard !paths.isEmpty else { return }
         let all = Set(state.verifyOwed).union(paths)
         guard all.count > Self.maxOwed else {
             state.verifyOwed = all.sorted()
-            return false
+            return
         }
         state.hashWholeSet = true
-        state.verifyOwed = []
-        state.freedSince = [:]
-        return true
+        if job.destination.kind == .iCloudFolder {
+            let mirror = mirrorRoot(job)
+            _ = keepFreed(all.sorted().filter { verifier.isFreed(mirror.appendingPathComponent($0)) }, state: &state)
+        }
+        state.verifyOwed = all.intersection(Set(state.freedSince.keys).union(state.mismatched)).sorted()
+    }
+
+    /// Enters evicted files in their list and returns those it held. Past the bound the flag stands
+    /// in for the rest, and the next deep check names them again.
+    private func keepFreed(_ paths: [String], state: inout SetState) -> [String] {
+        let now = clock()
+        var kept: [String] = []
+        for path in paths {
+            if state.freedSince[path] != nil || state.freedSince.count < Self.maxFreed {
+                state.freedSince[path] = state.freedSince[path] ?? now
+                kept.append(path)
+            } else {
+                state.hashWholeSet = true
+            }
+        }
+        return kept
     }
 
     /// A slice passed its checks: what it owed is proven, and its audit carries on in the upload
-    /// tracking. Two things prove nothing and stay owed: a file the audit couldn't find, and one
-    /// iCloud evicted, which was never hashed. True if that outgrew the list.
-    private func prove(_ slice: Slice, _ result: VerifyResult, mirror: URL, state: inout SetState) -> Bool {
+    /// tracking. What wasn't hashed proves nothing and stays owed, as does a file the audit couldn't
+    /// find. Only one that's really evicted waits for iCloud. The others can be hashed next run.
+    private func prove(_ slice: Slice, _ result: VerifyResult, _ job: Job, set: BackupSet, state: inout SetState) {
+        let mirror = mirrorRoot(job)
         let prefix = slice.folder.map { $0 + "/" } ?? ""
+        let unproven = result.skippedFreed.map { Self.inSet($0, slice) }
+        let unhashed = Set(unproven)
         state.verifyOwed.removeAll { $0.hasPrefix(prefix) }
+        state.mismatched.removeAll { $0.hasPrefix(prefix) && !unhashed.contains($0) }
         track(result.audit, mirror: mirror, state: &state)
         let root = mirror.path + "/"
         let lost = result.audit.missing.map { $0.hasPrefix(root) ? String($0.dropFirst(root.count)) : $0 }
-        let missing = Self.within(slice, lost).filter { Self.existsInSource($0, slice) }.map { Self.inSet($0, slice) }
-        let freed = result.skippedFreed.map { Self.inSet($0, slice) }
-        let overflowed = owe(missing + freed, state: &state)
-        let now = clock()
-        if !overflowed { for path in freed where state.freedSince[path] == nil { state.freedSince[path] = now } }
+        let missing = Self.within(slice, lost).filter { Self.existsInSource($0, slice.source) }.map { Self.inSet($0, slice) }
+
+        let evicted = unproven.filter { job.destination.kind == .iCloudFolder && verifier.isFreed(mirror.appendingPathComponent($0)) }
+        let kept = keepFreed(evicted, state: &state)
+        let onDisk = unproven.filter { !Set(evicted).contains($0) }
+        owe(missing + kept + onDisk, job, set: set, state: &state)
         let owed = Set(state.verifyOwed)
         state.freedSince = state.freedSince.filter { owed.contains($0.key) }
-        return overflowed
     }
 
-    /// One flag read per evicted file, no walk. One that came back is hashed by the next run.
+    /// One flag read per evicted file, no walk. One that came back is hashed by this or the next run.
     private func refreshFreed(_ job: Job, set: BackupSet, state: inout SetState) {
         guard job.destination.kind == .iCloudFolder else { return }
         let mirror = mirrorRoot(job)
@@ -820,6 +870,19 @@ public final class RunCoordinator: Sendable {
             state.freedSince[path] = nil
         }
         state.reviewItems.removeAll { $0.kind == .unprovenFreed && state.freedSince[$0.path] == nil }
+        requestDownloads(mirror: mirror, state: state)
+    }
+
+    /// Owed files only, never the mirror at large: eviction is what keeps it from using disk. Asking
+    /// again is harmless, so a refusal is left for the next wake-up. A file that arrives is hashed by
+    /// the run after, and clears only if that hash passes.
+    private func requestDownloads(mirror: URL, state: SetState) {
+        let oldest = state.freedSince.sorted { ($0.value, $0.key) < ($1.value, $1.key) }.prefix(Self.maxDownloadsPerRun)
+        for path in oldest.map(\.key) {
+            do { try downloader.requestDownload(of: mirror.appendingPathComponent(path)) } catch {
+                Self.log.error("iCloud refused a download request")
+            }
+        }
     }
 
     /// Whatever a deep check couldn't prove has outlasted it, so the owner hears about it.
@@ -865,8 +928,8 @@ public final class RunCoordinator: Sendable {
         }
         if deepRan { state.lastDeepCheck = now }
         var solved: [Problem] = [.repeatedFailures, .signInExpired, .driveOverdue]
-        // An evicted file passed through unhashed, so a mismatch reported on it still stands.
-        if state.freedSince.isEmpty { solved.append(.verificationFailed) }
+        // A mismatch stands until that file's own hash passes, however clean the rest of the run was.
+        if state.mismatched.isEmpty { solved.append(.verificationFailed) }
         if !holding {
             state.heldDeletions = 0
             solved.append(.deletionsHeld)
@@ -913,7 +976,7 @@ public final class RunCoordinator: Sendable {
         let differing = verified.differingPaths
         guard !differing.isEmpty, differing.count >= verified.differences,
               let later = try? await feed.changes(in: set.source, since: since) else { return false }
-        return differing.allSatisfy { path in later.paths.contains { $0.hasSuffix("/" + path) } }
+        return Set(differing).isSubset(of: ScopeMapper.relative(later.paths, to: set.source))
     }
 
     // MARK: Claiming a destination
@@ -929,6 +992,17 @@ public final class RunCoordinator: Sendable {
                               state: inout SetState) async throws {
         let set = job.set
         let path = Self.join(endpoint, RootMarker.fileName)
+        // Reading an evicted marker would wait on a download, and this runs at every wake-up.
+        if job.destination.kind == .iCloudFolder, verifier.isFreed(URL(fileURLWithPath: path)) {
+            try await requireICloud(job, at: URL(fileURLWithPath: path))
+            guard Self.hasRun(state) else {
+                try? downloader.requestDownload(of: URL(fileURLWithPath: path))
+                throw Stop.markerNotLocal
+            }
+            clear([.destinationMissing, .signInExpired, .iCloudUnavailable], job.pair)
+            state.stoppedBy = nil
+            return
+        }
         var marker: RootMarker?
         if let data = try await files.read(path, context: context) {
             guard let parsed = try? JSONDecoder().decode(RootMarker.self, from: data) else { throw GuardFailure.destinationUnclaimed }
@@ -937,9 +1011,7 @@ public final class RunCoordinator: Sendable {
             try await requireICloud(job, at: URL(fileURLWithPath: path))
         }
         if marker?.claims(set.id) != true {
-            guard state.lastFinished == nil, state.lastEventID == nil, state.lastFullPass == nil else {
-                throw GuardFailure.destinationUnclaimed
-            }
+            guard !Self.hasRun(state) else { throw GuardFailure.destinationUnclaimed }
             let others = try store.loadSets().filter { $0.id != set.id }
             try job.pathGuard.validateNewSet(set, existing: others)
             if marker == nil, let entries = try await files.list(endpoint, context: context),
@@ -965,12 +1037,17 @@ public final class RunCoordinator: Sendable {
         state.stoppedBy = nil
     }
 
+    private static func hasRun(_ state: SetState) -> Bool {
+        state.lastFinished != nil || state.lastEventID != nil || state.lastFullPass != nil
+    }
+
     /// One resource read. Measured in a real iCloud Drive: the folder and a marker are ubiquitous from
     /// the moment they're written, so "not ubiquitous" means iCloud has let go of this folder. The
     /// agent has no iCloud entitlement, so `ubiquityIdentityToken` can't be relied on here.
     private func requireICloud(_ job: Job, at url: URL) async throws {
         guard job.destination.kind == .iCloudFolder else { return }
-        if try await !verifier.audit([url]).refused.isEmpty { throw Stop.iCloudSignedOut }
+        // Nil is a failed read, which proves nothing. Only a clear "no" stops the pair.
+        if await verifier.ubiquity(of: url) == false { throw Stop.iCloudSignedOut }
     }
 
     // MARK: Projects
@@ -1157,6 +1234,9 @@ public final class RunCoordinator: Sendable {
             let (want, have) = (Self.size(needed), Self.size(free))
             stop(.driveFull, "The drive doesn't have room for this backup",
                  detail: "\(job.destination.name) needs \(want) free and has \(have)")
+        case Stop.markerNotLocal:
+            // Nothing is wrong: a new pair needs the marker's contents, and iCloud is fetching them.
+            tally.status = .skipped; tally.scope = "waiting for iCloud to download the marker"
         case Stop.stateNotSaved:
             fail("State could not be saved", job, state: &state, tally: &tally)
         case VerifyError.mirrorUnreadable:
@@ -1274,10 +1354,14 @@ public final class RunCoordinator: Sendable {
         return lstat(url.path, &st) == 0
     }
 
+    /// What a local mirror calls a path from rclone's log.
+    private static func mirrorName(_ path: String) -> String {
+        path.hasSuffix(".rclonelink") ? String(path.dropLast(".rclonelink".count)) : path
+    }
+
     /// Rclone's `x.rclonelink` is a link called `x` in the source.
-    private static func existsInSource(_ path: String, _ slice: Slice) -> Bool {
-        let name = path.hasSuffix(".rclonelink") ? String(path.dropLast(".rclonelink".count)) : path
-        return exists(slice.source.appendingPathComponent(name))
+    private static func existsInSource(_ path: String, _ source: URL) -> Bool {
+        exists(source.appendingPathComponent(mirrorName(path)))
     }
 
     private static func describe(_ scope: RunScope) -> String {

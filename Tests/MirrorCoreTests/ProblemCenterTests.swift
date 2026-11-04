@@ -162,7 +162,8 @@ private struct StuckNotifier: Notifying {
         let pair = PairID(set: UUID(), destination: UUID())
         let started = Date()
         try await center.raise(.uploadStalled, pair: pair, setName: "x", detail: "")
-        #expect(Date().timeIntervalSince(started) < 5)
+        // Only tells a return from a hang: resuming here needs the pool, which the suite keeps busy.
+        #expect(Date().timeIntervalSince(started) < 60)
         #expect(try center.active().first?.notified == false)
         try await center.retryPending()
         #expect(try center.active().first?.notified == false)

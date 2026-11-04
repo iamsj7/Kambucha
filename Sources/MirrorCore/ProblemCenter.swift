@@ -146,10 +146,9 @@ public struct ProblemCenter: Sendable {
         return await withCheckedContinuation { continuation in
             answer.attach(continuation)
             Task { answer.give(await post(notifier)) }
-            Task {
-                try? await Task.sleep(for: timeout)
-                answer.give(false)
-            }
+            // A dispatch timer, not a task: a timeout mustn't wait for the pool that may be what's stuck.
+            let seconds = Double(timeout.components.seconds) + Double(timeout.components.attoseconds) / 1e18
+            DispatchQueue.global().asyncAfter(deadline: .now() + seconds) { answer.give(false) }
         }
     }
 

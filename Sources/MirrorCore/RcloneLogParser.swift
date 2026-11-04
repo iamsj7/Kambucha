@@ -165,6 +165,12 @@ public enum RcloneLogParser {
         return text.contains("userRateLimitExceeded") || text.contains("User rate limit exceeded")
     }
 
+    /// Rclone's own wrap-up, which repeats failures rather than adding one.
+    private static func isRunSummary(_ line: Line) -> Bool {
+        guard line.object?.isEmpty ?? true, let msg = line.msg else { return false }
+        return ["Attempt ", "Fatal error received", "Can't retry", "Not deleting", "Failed to sync"].contains(where: msg.hasPrefix)
+    }
+
     private static func isAuthError(_ msg: String, removing object: String?) -> Bool {
         var text = msg
         if let object, !object.isEmpty { text = text.replacingOccurrences(of: object, with: "") }
@@ -185,7 +191,9 @@ public enum RcloneLogParser {
         let errorLines = lines(log).filter(\.isError)
         if errorLines.contains(where: { $0.msg == "Got fatal error on delete: --max-delete threshold reached" }) { return .safetyStop }
         if errorLines.contains(where: { line in line.msg.map { isAuthError($0, removing: line.object) } ?? false }) { return .authExpired }
-        if errorLines.contains(where: { line in line.msg.map { isUploadLimit($0, removing: line.object) } ?? false }) { return .partial }
+        // Only when the limit is all that went wrong: a real failure beside it must still count.
+        func limited(_ line: Line) -> Bool { line.msg.map { isUploadLimit($0, removing: line.object) } ?? false }
+        if errorLines.contains(where: limited), errorLines.allSatisfy({ limited($0) || isRunSummary($0) }) { return .partial }
         return outcome(exitCode: exitCode)
     }
 

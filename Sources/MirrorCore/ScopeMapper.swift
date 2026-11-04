@@ -31,10 +31,10 @@ public struct ScopeMapper {
         return .projects(projects.sorted())
     }
 
-    /// `paths` relative to `root`. Any that aren't below it are left out.
-    public static func relative(_ paths: [String], root: URL) -> [String] {
+    /// `paths` relative to `root`, however FSEvents spelled them. Any outside it are left out.
+    public static func relative(_ paths: [String], to root: URL) -> [String] {
         let prefixes = rootPrefixes(root)
-        return paths.compactMap { relative($0, prefixes: prefixes) }.filter { !$0.isEmpty }
+        return paths.compactMap { relative($0, prefixes: prefixes) }
     }
 
     private static func rootPrefixes(_ root: URL) -> [String] {

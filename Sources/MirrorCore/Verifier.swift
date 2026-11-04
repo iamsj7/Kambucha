@@ -12,6 +12,10 @@ public struct VerifyResult: Equatable, Sendable {
     public var differingPaths: [String] = []
     /// Asked to be hashed, but evicted, so left unproven. Only the Quick check skips these.
     public var skippedFreed: [String] = []
+    /// What a deep check's hash list held. Nil when it compared everything, as on a cloud destination.
+    public var hashedPaths: Set<String>?
+    /// Evicted files a deep check left out of its sample, so never hashed.
+    public var unhashedFreed: [String] = []
     /// The only value that may drive "Backed Up": clean checks and nothing pending, refused or missing.
     public var backedUp: Bool {
         checksClean && audit.pending.isEmpty && audit.refused.isEmpty && audit.missing.isEmpty
@@ -40,22 +44,22 @@ public struct Verifier: Sendable {
     private func audits(_ p: DestinationProfile) -> Bool { p.kind == .iCloudFolder }
 
     /// `auditWholeMirror` is for the daily pass: every file is audited, not just those copied.
+    /// `hashCopied` is false when a deep check follows and will hash them anyway.
     public func quick(source: URL, destination: String, profile: DestinationProfile, context: RcloneContext,
                       filter: URL, copied: [String], oneWay: Bool, logDir: URL,
-                      auditWholeMirror: Bool = false) async throws -> VerifyResult {
+                      auditWholeMirror: Bool = false, hashCopied: Bool = true) async throws -> VerifyResult {
         let size = try await run(CheckRequest(
             source: source, destination: destination, filterFile: filter, filesFrom: nil, sizeOnly: true,
             oneWay: oneWay, cryptCheck: false, context: context, logFile: logDir.appendingPathComponent("quick-size.log")).applying(profile))
         var differences = size.differences
         var differing = size.flagged
-        var toHash = copied
         let root = URL(fileURLWithPath: destination)
-        var skipped: [String] = []
-        if audits(profile) {
-            toHash = copied.filter { !isDataless(root.appendingPathComponent($0)) }
-            skipped = copied.filter { isDataless(root.appendingPathComponent($0)) }
+        // One read decides each file, as iCloud can evict between two.
+        var toHash: [String] = [], skipped: [String] = []
+        for path in copied {
+            if audits(profile), isDataless(root.appendingPathComponent(path)) { skipped.append(path) } else { toHash.append(path) }
         }
-        if !toHash.isEmpty {
+        if hashCopied, !toHash.isEmpty {
             let list = try writeList(toHash, to: logDir.appendingPathComponent("quick-copied.list"))
             let hash = try await run(CheckRequest(
                 source: source, destination: destination, filterFile: filter, filesFrom: list, sizeOnly: false,
@@ -82,14 +86,20 @@ public struct Verifier: Sendable {
     /// Re-reads files already known to be pending or refused.
     public func audit(_ urls: [URL]) async throws -> AuditResult { try await runAudit(urls) }
 
+    /// Off the cooperative pool, like the audit it belongs with.
+    public func ubiquity(of url: URL) async -> Bool? {
+        let auditor = self.auditor
+        return await withCheckedContinuation { continuation in
+            Self.auditQueue.async { continuation.resume(returning: auditor.ubiquity(of: url)) }
+        }
+    }
+
     /// True when iCloud has evicted this file, so hashing it would download it.
     public func isFreed(_ url: URL) -> Bool { isDataless(url) }
 
-    /// `oneWay` is for a held set, whose mirror keeps extras on purpose. `mustHash` names evicted files
-    /// to include whatever the sample picks, as nothing else can ever prove them.
+    /// `oneWay` is for a held set, whose mirror keeps extras on purpose.
     public func deep(source: URL, destination: String, profile: DestinationProfile, context: RcloneContext,
-                     filter: URL, sampleFreed: Int, logDir: URL, oneWay: Bool = false,
-                     mustHash: [String] = []) async throws -> VerifyResult {
+                     filter: URL, sampleFreed: Int, logDir: URL, oneWay: Bool = false) async throws -> VerifyResult {
         guard audits(profile) else {
             let check = try await run(CheckRequest(
                 source: source, destination: destination, filterFile: filter, filesFrom: nil, sizeOnly: false,
@@ -113,8 +123,7 @@ public struct Verifier: Sendable {
         for rel in all {
             if isDataless(root.appendingPathComponent(rel)) { freed.append(rel) } else { present.append(rel) }
         }
-        let required = Set(mustHash).intersection(freed)
-        let sampled = Array(required) + freed.filter { !required.contains($0) }.shuffled().prefix(max(0, sampleFreed))
+        let sampled = Array(freed.shuffled().prefix(max(0, sampleFreed)))
         let list = present + sampled
         if !list.isEmpty {
             // No filter alongside a file list: rclone cannot combine them.
@@ -129,6 +138,8 @@ public struct Verifier: Sendable {
         let audit = try await runAudit((present + freed).map { root.appendingPathComponent($0) })
         var result = VerifyResult(differences: differences, audit: audit)
         result.differingPaths = differing
+        result.hashedPaths = Set(list)
+        result.unhashedFreed = Array(Set(freed).subtracting(sampled)).sorted()
         return result
     }
 
