@@ -88,6 +88,28 @@ private func fixture(_ name: String) throws -> Data {
         #expect(RcloneLogParser.outcome(exitCode: 1, log: Data(info.utf8)) == .permanent)
     }
 
+    @Test func pathInsideErrorMessageIsNotAuthExpired() {
+        let line = jsonLine(level: "error", msg: "Failed to copy: open /x/token expired.txt: permission denied")
+        #expect(RcloneLogParser.outcome(exitCode: 5, log: Data(line.utf8)) == .transient)
+    }
+
+    @Test func invalidGrantFileNameInMessageIsNotAuthExpired() {
+        let bare = jsonLine(level: "error", msg: "Failed to copy: open /x/invalid_grant.txt: permission denied")
+        #expect(RcloneLogParser.outcome(exitCode: 5, log: Data(bare.utf8)) == .transient)
+        // The object's value is removed from msg before matching, even when it looks like an auth shape.
+        let name = "/x/couldn't fetch token.txt"
+        let withObject = jsonLine(level: "error", msg: "Failed to copy: open \(name): permission denied", object: name)
+        #expect(RcloneLogParser.outcome(exitCode: 5, log: Data(withObject.utf8)) == .transient)
+    }
+
+    @Test func realOAuthErrorIsAuthExpired() {
+        let msg = "Failed to create file system for \"gdrive:\": couldn't fetch token: oauth2: cannot fetch token: 400 Bad Request\nResponse: {\"error\": \"invalid_grant\", \"error_description\": \"Token has been expired or revoked.\"}"
+        let line = jsonLine(level: "error", msg: msg)
+        #expect(RcloneLogParser.outcome(exitCode: 1, log: Data(line.utf8)) == .authExpired)
+        let direct = jsonLine(level: "error", msg: "oauth2: cannot fetch token: 400 Bad Request\nResponse: {\"error\":\"invalid_grant\"}")
+        #expect(RcloneLogParser.outcome(exitCode: 6, log: Data(direct.utf8)) == .authExpired)
+    }
+
     @Test func fileNamesCannotForgeSafetyStop() {
         let name = "--max-delete threshold reached"
         let log = jsonLine(level: "info", msg: "Copied (new)", object: name)
