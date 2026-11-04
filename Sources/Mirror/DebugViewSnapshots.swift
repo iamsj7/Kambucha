@@ -24,15 +24,19 @@ enum DebugViewSnapshots {
     }
 
     @MainActor private final class FakeSystem: OnboardingSystem {
-        func fullDiskAccess() async -> AgentAccess.Status { .confirmed }
-        func accessReport() -> AccessReport? { nil }
-        func checkFullDiskAccessNow() async -> AccessConfirmation.Outcome { .confirmed }
-        func agentStatus() -> SMAppService.Status { .requiresApproval }
+        var access = AgentAccess.Status.confirmed
+        var report: AccessReport?
+        var agent = SMAppService.Status.requiresApproval
+        func fullDiskAccess() async -> AgentAccess.Status { access }
+        func accessReport() -> AccessReport? { report }
+        func checkFullDiskAccessNow() async -> AccessConfirmation.Outcome { access == .confirmed ? .confirmed : .notConfirmed }
+        func agentStatus() -> SMAppService.Status { agent }
         func enableAgent() throws {}
         func enableOpenAtLogin() throws {}
         func notificationAccess() async -> NotificationAccess { .notDetermined }
         func requestNotifications() async -> NotificationAccess { .allowed }
         func openFullDiskAccessPane() {}
+        func openFilesAndFoldersPane() {}
         func openLoginItemsSettings() {}
         func openNotificationSettings() {}
     }
@@ -113,6 +117,16 @@ enum DebugViewSnapshots {
         let onboarding = OnboardingModel(system: FakeSystem(), store: ConfigStore(root: onboardRoot))
         Task { await onboarding.refresh() }; settle(0.4)
         write(OnboardingView(model: onboarding), size: CGSize(width: 600, height: 560), name: "onboarding", to: dir)
+
+        // Onboarding: a check that found folders readable and no Full Disk Access, then one that couldn't read them.
+        for (name, folders) in [("onboarding-partial", true), ("onboarding-folders", false)] {
+            let system = FakeSystem()
+            system.agent = .enabled; system.access = .failing
+            system.report = AccessReport(folders: folders, fullDiskAccess: false, checkedAt: Date().addingTimeInterval(60))
+            let model = OnboardingModel(system: system, store: ConfigStore(root: onboardRoot.appendingPathComponent(name)))
+            Task { await model.refresh(); await model.checkAccessNow() }; settle(0.4)
+            write(OnboardingView(model: model), size: CGSize(width: 600, height: 620), name: name, to: dir)
+        }
 
         // Settings
         let settingsRoot = FileManager.default.temporaryDirectory.appendingPathComponent("mirror-settings-\(UUID().uuidString)")

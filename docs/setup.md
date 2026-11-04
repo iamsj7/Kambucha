@@ -41,7 +41,11 @@ Mirror's first-run screen has four steps, in this order, and stays until each is
 
 When the last step is done, Mirror turns on Open Mirror at login, so the menu bar icon is there after a restart. Backups run whether or not it is on. To turn it off, choose Settings in the menu bar panel. After the first run the window no longer opens by itself: choose Open Mirror from the menu bar.
 
-The background helper is inside the app, so this one permission covers both. Mirror checks it by having the helper, started by macOS, read a file that only Full Disk Access can open. Reading Documents and iCloud Drive is not enough, because macOS can allow those on their own.
+The background helper is inside the app, and this permission should cover it too, but macOS may treat the two separately, so switching on Mirror may not be enough. Mirror checks by having the helper, started by macOS, read a file that only Full Disk Access can open. Reading Documents and iCloud Drive is not enough, because macOS can allow those on their own.
+
+If the check finds the helper can read Documents and iCloud Drive but has no Full Disk Access, Mirror offers Continue Without Full Disk Access. Backups of those two places still work. Folders anywhere else, and external drives, may ask for permission or fail. Mirror keeps checking on every scheduled run and shows a warning in the main window until a check passes.
+
+If the helper can't read Documents or iCloud Drive at all, there is no such offer. Check that iCloud Drive is on, then open System Settings, Privacy & Security, Files & Folders, and switch on Documents and iCloud Drive for Mirror. Then choose Check Again.
 
 If Full Disk Access is ever lost, Mirror sends a notification and shows "Needs Attention", and the main window shows a warning with a button to open the setting. Switch it back on in the same place. A long upload never counts as losing it.
 

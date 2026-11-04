@@ -25,6 +25,7 @@ private final class FakeSystem: OnboardingSystem {
     func notificationAccess() async -> NotificationAccess { notes }
     func requestNotifications() async -> NotificationAccess { notes = .allowed; return notes }
     private(set) var opened: [String] = []
+    func openFilesAndFoldersPane() { opened.append("files") }
     func openFullDiskAccessPane() { opened.append("fda") }
     func openLoginItemsSettings() { opened.append("login") }
     func openNotificationSettings() { opened.append("notes") }
@@ -197,6 +198,113 @@ struct OnboardingModelTests {
                                     pathGuard: PathGuard(iCloudDrive: icloud, backupRoot: MirrorPaths.backupRoot(iCloudDrive: icloud)))
         await again.refresh()
         #expect(again.isComplete)
+    }
+
+    // MARK: Going on without Full Disk Access
+
+    private func partial(_ age: TimeInterval = 0, folders: Bool = true) -> AccessReport {
+        AccessReport(folders: folders, fullDiskAccess: false, checkedAt: Date().addingTimeInterval(-age))
+    }
+
+    private func checkedPartial(_ sys: FakeSystem) async -> (OnboardingModel, URL) {
+        sys.agent = .enabled; sys.report = partial()
+        let (m, root) = make(sys)
+        await m.refresh()
+        await m.checkAccessNow()
+        return (m, root)
+    }
+
+    @Test func aFreshPartialReportFromARealCheckOffersToContinue() async {
+        let (m, _) = await checkedPartial(FakeSystem())
+        #expect(m.canContinueWithoutAccess)
+    }
+
+    @Test func aReportAloneOffersNothingWithoutACheck() async {
+        let sys = FakeSystem(); sys.agent = .enabled; sys.report = partial()
+        let (m, _) = make(sys)
+        await m.refresh()
+        #expect(!m.canContinueWithoutAccess)
+    }
+
+    @Test func anOldReportOffersNothingAfterACheck() async {
+        let sys = FakeSystem(); sys.agent = .enabled; sys.report = partial(600)
+        let (m, _) = make(sys)
+        await m.checkAccessNow()
+        #expect(!m.canContinueWithoutAccess)
+    }
+
+    @Test func aFailedKickNoReportOrUnreadableFoldersOfferNothing() async {
+        let kick = FakeSystem(); kick.agent = .enabled; kick.report = partial(); kick.kickOutcome = .kickFailed
+        let (a, _) = make(kick)
+        await a.checkAccessNow()
+        #expect(!a.canContinueWithoutAccess)
+
+        let none = FakeSystem(); none.agent = .enabled
+        let (b, _) = make(none)
+        await b.checkAccessNow()
+        #expect(!b.canContinueWithoutAccess)
+
+        let blocked = FakeSystem(); blocked.agent = .enabled; blocked.report = partial(folders: false)
+        let (c, _) = make(blocked)
+        await c.checkAccessNow()
+        #expect(!c.canContinueWithoutAccess)
+    }
+
+    @Test func continuingWithoutTheOfferDoesNothing() async {
+        let (m, root) = make(FakeSystem())
+        m.continueWithoutFullDiskAccess()
+        #expect(!m.isDone(.fullDiskAccess) && !ConfigStore(root: root).continuedWithoutFullDiskAccess)
+    }
+
+    @Test func continuingFinishesTheStepAcrossLaunchesAndKeepsWarning() async throws {
+        let sys = FakeSystem()
+        let (m, root) = await checkedPartial(sys)
+        m.continueWithoutFullDiskAccess()
+        #expect(m.isDone(.fullDiskAccess) && m.continuedWithoutAccess)
+        await m.refresh()
+        #expect(m.isDone(.fullDiskAccess) && m.accessWarning)
+        let icloud = root.appendingPathComponent("iCloud")
+        let again = OnboardingModel(system: sys, store: ConfigStore(root: root), settings: SettingsStore(root: root),
+                                    pathGuard: PathGuard(iCloudDrive: icloud, backupRoot: MirrorPaths.backupRoot(iCloudDrive: icloud)))
+        await again.refresh()
+        #expect(again.isDone(.fullDiskAccess) && again.accessWarning)
+    }
+
+    @Test func aPassingReportEndsTheWarningAndTheMarker() async {
+        let sys = FakeSystem()
+        let (m, root) = await checkedPartial(sys)
+        m.continueWithoutFullDiskAccess()
+        await m.refresh()
+        #expect(m.accessWarning)
+        sys.fda = true; sys.report = AccessReport(folders: true, fullDiskAccess: true, checkedAt: Date())
+        await m.refresh()
+        #expect(!m.accessWarning && !m.continuedWithoutAccess && m.isDone(.fullDiskAccess))
+        #expect(!ConfigStore(root: root).continuedWithoutFullDiskAccess)
+    }
+
+    @Test func aReportThatStopsBeingPartialWithdrawsTheOffer() async {
+        let sys = FakeSystem()
+        let (m, _) = await checkedPartial(sys)
+        sys.report = partial(folders: false)
+        await m.refresh()
+        #expect(!m.canContinueWithoutAccess)
+    }
+
+    @Test func unreadableFoldersGetTheirOwnFix() async {
+        let sys = FakeSystem(); sys.agent = .enabled; sys.report = partial(folders: false)
+        let (m, _) = make(sys)
+        await m.refresh()
+        #expect(m.foldersBlocked)
+        #expect(m.accessStepText.contains("Files & Folders"))
+        #expect(!m.accessStepText.contains("switch on Mirror in the list"))
+        m.openFilesAndFolders()
+        #expect(sys.opened == ["files"])
+    }
+
+    @Test func theOfferSaysWhatIsLimited() async {
+        let (m, _) = await checkedPartial(FakeSystem())
+        #expect(m.accessStepText.contains("external drives"))
+        #expect(OnboardingModel.continueMessage.contains("outside Documents and iCloud Drive"))
     }
 
     @Test func readingFoldersWithoutFullDiskAccessIsSaidApart() async {

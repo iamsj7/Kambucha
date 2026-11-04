@@ -20,6 +20,7 @@ protocol OnboardingSystem {
     func notificationAccess() async -> NotificationAccess
     func requestNotifications() async -> NotificationAccess
     func openFullDiskAccessPane()
+    func openFilesAndFoldersPane()
     func openLoginItemsSettings()
     func openNotificationSettings()
 }
@@ -50,6 +51,7 @@ struct LiveOnboardingSystem: OnboardingSystem {
     }
 
     func openFullDiskAccessPane() { open("x-apple.systempreferences:com.apple.preference.security?Privacy_AllFiles") }
+    func openFilesAndFoldersPane() { open("x-apple.systempreferences:com.apple.preference.security?Privacy_FilesAndFolders") }
     func openLoginItemsSettings() { AgentRegistration.openLoginItemsSettings() }
     func openNotificationSettings() { open("x-apple.systempreferences:com.apple.Notifications-Settings.extension") }
     private func open(_ s: String) { if let u = URL(string: s) { NSWorkspace.shared.open(u) } }
@@ -171,7 +173,14 @@ final class OnboardingModel {
     private(set) var kickFailed = false
     /// The helper can read Documents and iCloud Drive, but not what only Full Disk Access opens.
     private(set) var accessIsPartial = false
-    /// A finished owner's helper failed its last check. They're told, and left where they are.
+    /// The helper's last report couldn't list Documents or iCloud Drive, which Full Disk Access isn't the fix for.
+    private(set) var foldersBlocked = false
+    /// A real check just came back with folders readable and Full Disk Access not. macOS may never give the helper
+    /// that access, so the owner must not be stuck here. Nothing else earns this offer.
+    private(set) var canContinueWithoutAccess = false
+    /// The owner took that offer, and no report has passed since.
+    private(set) var continuedWithoutAccess = false
+    /// A finished owner's helper failed its last check, or an owner went on without the access. They're told, and left where they are.
     private(set) var accessWarning = false
     /// The set just added here. The window goes straight to its preview, since nothing backs up until that's accepted.
     private(set) var setAwaitingPreview: UUID?
@@ -201,11 +210,18 @@ final class OnboardingModel {
     func refresh() async {
         var d: Set<OnboardingStep> = []
         let disk = await system.fullDiskAccess()
-        if disk == .confirmed { clearCheckFailure() }
+        if disk == .confirmed {
+            clearCheckFailure()
+            store.clearContinuedWithoutFullDiskAccess()
+        }
         let finished = store.onboardingFinished
-        if disk == .confirmed || finished { d.insert(.fullDiskAccess) }
-        accessWarning = finished && disk == .failing
-        accessIsPartial = system.accessReport().map { $0.folders && !$0.fullDiskAccess } ?? false
+        continuedWithoutAccess = store.continuedWithoutFullDiskAccess
+        if disk == .confirmed || finished || continuedWithoutAccess { d.insert(.fullDiskAccess) }
+        accessWarning = (finished && disk == .failing) || continuedWithoutAccess
+        let report = system.accessReport()
+        accessIsPartial = report.map { $0.folders && !$0.fullDiskAccess } ?? false
+        foldersBlocked = report.map { !$0.folders } ?? false
+        if !accessIsPartial { canContinueWithoutAccess = false }
         let status = system.agentStatus()
         agentNeedsApproval = status == .requiresApproval
         if status == .enabled { d.insert(.agent) }
@@ -232,9 +248,15 @@ final class OnboardingModel {
             return
         }
         isChecking = true
+        let started = Date()
         let outcome = await system.checkFullDiskAccessNow()
         isChecking = false
         clearCheckFailure()
+        let report = system.accessReport()
+        accessIsPartial = report.map { $0.folders && !$0.fullDiskAccess } ?? false
+        foldersBlocked = report.map { !$0.folders } ?? false
+        canContinueWithoutAccess = outcome == .notConfirmed && accessIsPartial
+            && report.map { $0.checkedAt >= started.addingTimeInterval(-1) } == true
         checkFailed = outcome != .confirmed
         kickFailed = outcome == .kickFailed
         switch outcome {
@@ -250,6 +272,32 @@ final class OnboardingModel {
         if kickFailed { message = nil }
         kickFailed = false
         checkFailed = false
+        canContinueWithoutAccess = false
+    }
+
+    static let continueMessage = "Backups of Documents and iCloud Drive still work. Folders outside Documents and iCloud Drive, and external drives, may ask for permission or fail. Mirror keeps checking and shows a warning until Full Disk Access is on."
+
+    /// Only ever from the offer above. The step counts as done, and every run goes on checking.
+    func continueWithoutFullDiskAccess() {
+        guard canContinueWithoutAccess else { return }
+        do { try store.noteContinuedWithoutFullDiskAccess() } catch {
+            message = "Mirror couldn't save that choice. Try again."
+            return
+        }
+        canContinueWithoutAccess = false
+        continuedWithoutAccess = true
+        accessWarning = true
+        done.insert(.fullDiskAccess)
+    }
+
+    var accessStepText: String {
+        if foldersBlocked {
+            return "The background helper can't read Documents or iCloud Drive, and Full Disk Access isn't the first thing to fix. Check that iCloud Drive is on. Then open Files & Folders in Privacy & Security, switch on Documents and iCloud Drive for Mirror, and choose Check Again."
+        }
+        if accessIsPartial {
+            return "Mirror can read Documents and iCloud Drive, but the background helper doesn't have Full Disk Access yet. Without it, folders outside those two, and external drives, may ask for permission or fail. Switch on Mirror in the list, then choose Check Again. macOS may not pass this on to the helper, so if that doesn't help you can continue without it."
+        }
+        return (checkFailed ? "Not confirmed yet. " : "") + "This comes after turning on background backups, because the background helper is what needs the access and Mirror checks through it. Click the button, switch on Mirror in the list, then choose Check Again."
     }
 
     /// The one automatic check, once the helper is on and Full Disk Access isn't confirmed yet.
@@ -260,6 +308,7 @@ final class OnboardingModel {
     }
 
     func openFullDiskAccess() { system.openFullDiskAccessPane() }
+    func openFilesAndFolders() { system.openFilesAndFoldersPane() }
     func openLoginItems() { system.openLoginItemsSettings() }
     func openNotificationSettings() { system.openNotificationSettings() }
 
@@ -353,6 +402,7 @@ struct OnboardingView: View {
 private struct StepRow: View {
     let step: OnboardingStep
     let model: OnboardingModel
+    @State private var confirmingContinue = false
 
     var body: some View {
         let done = model.isDone(step)
@@ -376,8 +426,7 @@ private struct StepRow: View {
     private var explanation: String {
         switch step {
         case .fullDiskAccess:
-            (model.accessIsPartial ? "Mirror can read Documents and iCloud Drive, but Full Disk Access isn't on yet. "
-                : model.checkFailed ? "Not confirmed yet. " : "") + "This comes after turning on background backups, because the background helper is what needs the access and Mirror checks through it. Click the button, switch on Mirror in the list, then choose Check Again."
+            model.accessStepText
         case .agent:
             model.agentNeedsApproval
                 ? "macOS needs your approval. Switch on Mirror in Login Items, then come back."
@@ -393,7 +442,8 @@ private struct StepRow: View {
 
     private var doneText: String {
         switch step {
-        case .fullDiskAccess: "The background helper has Full Disk Access."
+        case .fullDiskAccess:
+            model.continuedWithoutAccess ? "Continuing without it. Mirror keeps checking." : "The background helper has Full Disk Access."
         case .agent: "Backups will run in the background."
         case .notifications: "You'll hear about problems."
         case .firstSet: "Your first set is ready."
@@ -404,9 +454,21 @@ private struct StepRow: View {
         switch step {
         case .fullDiskAccess:
             HStack {
-                Button("Open Full Disk Access Settings") { model.openFullDiskAccess() }.buttonStyle(.borderedProminent)
+                if model.foldersBlocked {
+                    Button("Open Files & Folders Settings") { model.openFilesAndFolders() }.buttonStyle(.borderedProminent)
+                } else {
+                    Button("Open Full Disk Access Settings") { model.openFullDiskAccess() }.buttonStyle(.borderedProminent)
+                }
                 Button("Check Again") { Task { await model.checkAccessNow() } }.disabled(model.isChecking)
                 if model.isChecking { ProgressView().controlSize(.small).accessibilityLabel("Checking") }
+            }
+            if model.canContinueWithoutAccess {
+                Button("Continue Without Full Disk Access…") { confirmingContinue = true }
+                    .accessibilityHint("Finishes this step without the access. Mirror keeps checking")
+                    .confirmationDialog("Continue without Full Disk Access?", isPresented: $confirmingContinue, titleVisibility: .visible) {
+                        Button("Continue Without It") { model.continueWithoutFullDiskAccess() }
+                        Button("Cancel", role: .cancel) {}
+                    } message: { Text(OnboardingModel.continueMessage) }
             }
         case .agent:
             if model.agentNeedsApproval {
