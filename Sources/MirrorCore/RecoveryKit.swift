@@ -113,7 +113,7 @@ public struct RecoveryKit: Codable, Equatable, Sendable, CustomStringConvertible
         if let clientID { client += " client_id=\(Self.quoted(clientID))" }
         if let clientSecret { client += " client_secret=\(Self.quoted(clientSecret))" }
         switch kind {
-        case .iCloudFolder:
+        case .iCloudFolder, .externalDrive:
             return "No sign-in is needed for this destination."
         case .googleDrive:
             return "rclone config create \(remote) drive scope=drive.file\(client)\n\n"

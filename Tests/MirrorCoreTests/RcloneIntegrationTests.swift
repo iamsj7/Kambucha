@@ -34,12 +34,13 @@ private final class Sandbox {
     func exists(_ base: URL, _ name: String) -> Bool { FileManager.default.fileExists(atPath: base.appendingPathComponent(name).path) }
 
     func request(source: URL? = nil, destination: URL? = nil, mode: SyncMode = .mirror(maxDelete: 100),
-                 dryRun: Bool = false) -> SyncRequest {
+                 dryRun: Bool = false,
+                 profile: DestinationProfile = .profile(for: Destination(name: "t", kind: .iCloudFolder))) -> SyncRequest {
         runs += 1
         return SyncRequest(source: source ?? src, destination: (destination ?? dst).path,
                            backupDir: archive.appendingPathComponent("run\(runs)").path,
                            filterFile: filter, logFile: root.appendingPathComponent("run\(runs).log"),
-                           mode: mode, profile: .profile(for: Destination(name: "t", kind: .iCloudFolder)),
+                           mode: mode, profile: profile,
                            context: RcloneContext(configPath: "/dev/null", environment: [:]), dryRun: dryRun)
     }
     func rawLog(_ r: SyncRequest) -> String { (try? String(contentsOf: r.logFile, encoding: .utf8)) ?? "" }
@@ -76,6 +77,41 @@ private final class Sandbox {
         #expect(res.summary.copied.isEmpty)
         #expect(res.summary.deleted.isEmpty)
         #expect(sb.exists(sb.dst, "new.txt") && !sb.exists(sb.dst, "old.txt"))
+    }
+
+    /// Two same-size files with identical timestamps, one deleted and one created under a new name. The
+    /// `modtime` strategy gave the new file the deleted file's content (reproduced with real rclone at 1ms and 2s).
+    @Test(arguments: [
+        ("iCloud", Destination(name: "t", kind: .iCloudFolder), nil as String?),
+        ("Google plain", Destination(name: "t", kind: .googleDrive, encrypted: false), nil),
+        ("Google crypt", Destination(name: "t", kind: .googleDrive, encrypted: true), nil),
+        ("OneDrive plain", Destination(name: "t", kind: .oneDrive, encrypted: false), nil),
+        ("OneDrive crypt", Destination(name: "t", kind: .oneDrive, encrypted: true), nil),
+        ("drive APFS", Destination(name: "t", kind: .externalDrive, volumeUUID: "U"), "apfs"),
+        ("drive HFS+", Destination(name: "t", kind: .externalDrive, volumeUUID: "U"), "hfs"),
+        ("drive exFAT", Destination(name: "t", kind: .externalDrive, volumeUUID: "U"), "exfat"),
+    ])
+    func renameNeverCopiesWrongContent(_ name: String, _ dest: Destination, _ fs: String?) async throws {
+        let sb = try Sandbox()
+        let profile = DestinationProfile.profile(for: dest, fileSystem: fs)
+        let stamp = Date(timeIntervalSince1970: 1_700_000_000)
+        func put(_ n: String, _ text: String) throws {
+            try sb.write(n, text)
+            try FileManager.default.setAttributes([.modificationDate: stamp],
+                                                  ofItemAtPath: sb.src.appendingPathComponent(n).path)
+        }
+        try put("a.txt", "AAAA"); try put("b.txt", "BBBB")
+        var res = try await runner.sync(sb.request(profile: profile))
+        #expect(res.outcome == .success, "\(name)")
+        try FileManager.default.removeItem(at: sb.src.appendingPathComponent("a.txt"))
+        try put("c.txt", "CCCC")
+        let req = sb.request(profile: profile)
+        #expect(!RcloneCommand.arguments(req).contains("modtime"), "\(name)")
+        res = try await runner.sync(req)
+        #expect(res.outcome == .success, "\(name)")
+        #expect(sb.read(sb.dst, "c.txt") == "CCCC", "\(name)")
+        #expect(sb.read(sb.dst, "b.txt") == "BBBB", "\(name)")
+        #expect(!sb.exists(sb.dst, "a.txt"), "\(name)")
     }
 
     @Test func archiveReceivesOverwrittenAndDeleted() async throws {

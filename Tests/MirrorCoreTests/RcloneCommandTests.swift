@@ -28,7 +28,8 @@ private func has(_ args: [String], _ flag: String, _ value: String? = nil) -> Bo
         #expect(a.first == "sync")
         #expect(has(a, "--modify-window", "1ms"))
         #expect(has(a, "--track-renames"))
-        #expect(has(a, "--track-renames-strategy", "modtime"))
+        #expect(has(a, "--track-renames-strategy", "hash"))
+        #expect(!a.contains("modtime"))
         #expect(has(a, "--links"))
         #expect(has(a, "--backup-dir", "/arch/ts"))
         #expect(has(a, "--filter-from", "/tmp/f.filter"))
@@ -63,6 +64,25 @@ private func has(_ args: [String], _ flag: String, _ value: String? = nil) -> Bo
         #expect(has(o, "--modify-window", "1s"))
         #expect(o.contains("--onedrive-no-versions") && o.contains("--onedrive-hard-delete"))
         #expect(has(o, "--max-duration", "25m") && has(o, "--cutoff-mode", "soft"))
+        // Rename tracking: hash strategy only where both sides have a hash; never modtime.
+        for (d, fs, expected) in [(Destination(name: "x", kind: .iCloudFolder), nil as String?, true),
+                                  (Destination(name: "x", kind: .googleDrive, encrypted: false), nil, true),
+                                  (Destination(name: "x", kind: .googleDrive), nil, false),
+                                  (Destination(name: "x", kind: .oneDrive, encrypted: false), nil, true),
+                                  (Destination(name: "x", kind: .oneDrive), nil, false),
+                                  (Destination(name: "x", kind: .externalDrive), "apfs", true),
+                                  (Destination(name: "x", kind: .externalDrive), "hfs", true),
+                                  (Destination(name: "x", kind: .externalDrive), "exfat", false)] {
+            let p = DestinationProfile.profile(for: d, fileSystem: fs)
+            #expect(p.trackRenames == expected, "\(d.kind) \(d.encrypted) \(fs ?? "")")
+            let sync = SyncRequest(source: URL(fileURLWithPath: "/s"), destination: "/d", backupDir: "/b",
+                                   filterFile: URL(fileURLWithPath: "/f"), logFile: URL(fileURLWithPath: "/l"),
+                                   mode: .mirror(maxDelete: 5), profile: p, context: ctx())
+            let a = RcloneCommand.arguments(sync)
+            #expect(a.contains("--track-renames") == expected)
+            #expect(!a.contains("modtime"))
+            if expected { #expect(has(a, "--track-renames-strategy", "hash")) }
+        }
         #expect(DestinationProfile.profile(for: Destination(name: "x", kind: .iCloudFolder)).fullPassInterval == 86_400)
         #expect(DestinationProfile.profile(for: Destination(name: "x", kind: .googleDrive)).fullPassInterval == 7 * 86_400)
         #expect(DestinationProfile.profile(for: Destination(name: "x", kind: .oneDrive)).fullPassInterval == 7 * 86_400)

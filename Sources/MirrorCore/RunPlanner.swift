@@ -57,6 +57,7 @@ public struct RunPlanner {
         switch kind {
         case .iCloudFolder: 0
         case .googleDrive, .oneDrive: 1
+        case .externalDrive: 2
         }
     }
 }

@@ -237,7 +237,7 @@ public final class RunCoordinator: Sendable {
     private static func isLocal(_ kind: DestinationKind) -> Bool {
         switch kind {
         case .iCloudFolder: true
-        case .googleDrive, .oneDrive: false
+        case .googleDrive, .oneDrive, .externalDrive: false
         }
     }
 

@@ -15,7 +15,8 @@ struct AddDestinationFlow: View {
     @State private var clientSecret = ""
     @State private var encrypted = true
     @State private var confirmedOff = false
-    @State private var volumes: [ConnectedVolume] = []
+    @State private var volumes: [ExternalDriveSetup.Choice] = []
+    @State private var confirmingInternal = false
     @State private var volumeID: String?
     @State private var working = false
     @State private var error: String?
@@ -25,15 +26,15 @@ struct AddDestinationFlow: View {
     @State private var pasting = false
 
     private var kind: DestinationKind? {
-        switch choice { case .iCloud: .iCloudFolder; case .googleDrive: .googleDrive; case .oneDrive: .oneDrive; case .externalDrive: nil }
+        switch choice { case .iCloud: .iCloudFolder; case .googleDrive: .googleDrive; case .oneDrive: .oneDrive; case .externalDrive: .externalDrive }
     }
-    private var selectedVolume: ConnectedVolume? { volumes.first { $0.id == volumeID } }
+    private var selectedVolume: VolumeInfo? { volumes.first { $0.id == volumeID }?.volume }
 
     private var canContinue: Bool {
         if working { return false }
         switch choice {
         case .iCloud: return true
-        case .externalDrive: return false   // until the external drive kind exists (Task 21)
+        case .externalDrive: return selectedVolume != nil
         case .googleDrive: return !clientID.trimmingCharacters(in: .whitespaces).isEmpty && !clientSecret.isEmpty && encryptionSettled
         case .oneDrive: return encryptionSettled
         }
@@ -104,10 +105,15 @@ struct AddDestinationFlow: View {
         }
         .frame(minWidth: 520, minHeight: 600)
         .onDisappear { clientSecret = "" }
+        .onAppear { if choice == .externalDrive { refreshVolumes() } }
+        .confirmationDialog(ExternalDriveSetup.internalConfirmationTitle, isPresented: $confirmingInternal, titleVisibility: .visible) {
+            Button("Use This Disk") { save(internalConfirmed: true) }
+            Button("Cancel", role: .cancel) {}
+        } message: { Text(ExternalDriveSetup.internalConfirmationMessage) }
         .onChange(of: choice) { _, new in
             error = nil
             if let k = kind { encrypted = DestinationRules.encryptionDefault(k); confirmedOff = false }
-            if new == .externalDrive { volumes = model.services.volumes.connectedVolumes() }
+            if new == .externalDrive { refreshVolumes() }
         }
         // Done and Later both end the flow: the destination is saved and shows "Save your Recovery Kit"
         // until confirmed, so there is nothing left here that Sign In could collide with.
@@ -135,6 +141,11 @@ struct AddDestinationFlow: View {
         }
     }
 
+    private func refreshVolumes() {
+        volumes = ExternalDriveSetup.choices(from: model.services.volumes)
+        if let id = volumeID, !volumes.contains(where: { $0.id == id && $0.selectable }) { volumeID = nil }
+    }
+
     @ViewBuilder private var externalSection: some View {
         Section {
             if volumes.isEmpty {
@@ -142,21 +153,34 @@ struct AddDestinationFlow: View {
             }
             ForEach(volumes) { v in
                 Button { volumeID = v.id } label: {
-                    HStack {
-                        Label("\(v.name), \(v.filesystem)", systemImage: volumeID == v.id ? "checkmark.circle.fill" : "externaldrive")
+                    HStack(alignment: .firstTextBaseline) {
+                        Label {
+                            VStack(alignment: .leading, spacing: 2) {
+                                Text(v.formatName.isEmpty ? v.name : "\(v.name), \(v.formatName)")
+                                if let reason = v.unavailableReason { Text(reason).font(.callout).foregroundStyle(.secondary) }
+                            }
+                        } icon: {
+                            Image(systemName: volumeID == v.id ? "checkmark.circle.fill" : "externaldrive")
+                        }
                         Spacer()
                         if let free = v.freeBytes { Text("\(free.formatted(.byteCount(style: .file))) free").foregroundStyle(.secondary) }
                     }
                     .contentShape(Rectangle())
                 }
                 .buttonStyle(.plain)
+                .disabled(!v.selectable)
                 .accessibilityAddTraits(volumeID == v.id ? [.isButton, .isSelected] : .isButton)
             }
-            if let v = selectedVolume, let warn = DestinationRules.filesystemWarning(v.filesystem) {
-                Label(warn, systemImage: "exclamationmark.triangle")
+            if let v = selectedVolume {
+                if let warn = DestinationRules.filesystemWarning(v.fileSystem) {
+                    Label(warn, systemImage: "exclamationmark.triangle")
+                }
+                if ExternalDriveSetup.needsInternalConfirmation(v) {
+                    Label(ExternalDriveSetup.internalConfirmationTitle, systemImage: "internaldrive")
+                }
             }
         } header: { Text("Connected Drives") } footer: {
-            Text("Mirror doesn't encrypt external drives. Use a drive with its own password protection. A locked drive counts as not connected. Adding external drives isn't available in this build yet.")
+            Text("Mirror doesn't encrypt external drives. Use a drive with its own password protection. A locked drive counts as not connected.")
         }
     }
 
@@ -165,13 +189,14 @@ struct AddDestinationFlow: View {
     private func start() {
         error = nil
         let finalName = name.trimmingCharacters(in: .whitespaces).isEmpty ? defaultName : name.trimmingCharacters(in: .whitespaces)
-        guard let kind else {
-            // Needs the external drive destination kind and the volume service (Task 21).
-            error = "External drive destinations aren't available in this build yet."
-            return
-        }
+        guard let kind else { return }
         if model.destinations.contains(where: { $0.name.caseInsensitiveCompare(finalName) == .orderedSame }) {
             error = "A destination called \"\(finalName)\" already exists."
+            return
+        }
+        if kind == .externalDrive {
+            if let v = selectedVolume, ExternalDriveSetup.needsInternalConfirmation(v) { confirmingInternal = true }
+            else { save(internalConfirmed: false) }
             return
         }
         let d = Destination(name: finalName, kind: kind, encrypted: DestinationRules.encryptionOffered(kind) ? encrypted : false)
@@ -196,5 +221,17 @@ struct AddDestinationFlow: View {
                 else { model.removeDestination(d.id); pending = nil }
             }
         }
+    }
+
+    private func save(internalConfirmed: Bool) {
+        guard let v = selectedVolume else { return }
+        let trimmed = name.trimmingCharacters(in: .whitespaces)
+        let finalName = trimmed.isEmpty ? defaultName : trimmed
+        if model.destinations.contains(where: { $0.name.caseInsensitiveCompare(finalName) == .orderedSame }) {
+            error = "A destination called \"\(finalName)\" already exists."
+            return
+        }
+        let d = ExternalDriveSetup.destination(name: finalName, volume: v, internalConfirmed: internalConfirmed)
+        model.save(destination: d); added(d.id); dismiss()
     }
 }
