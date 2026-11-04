@@ -11,8 +11,14 @@ public struct RcloneRunner: RcloneRunning {
     public let binary: URL
     /// Seconds between SIGTERM and SIGKILL when a run is cancelled.
     let killGrace: TimeInterval
-    public init(binary: URL) { self.init(binary: binary, killGrace: 5) }
-    init(binary: URL, killGrace: TimeInterval) { self.binary = binary; self.killGrace = killGrace }
+    /// Called with each live stats record while rclone runs (about every 2 seconds). Off the main thread.
+    let onStats: (@Sendable (RcloneStats) -> Void)?
+    public init(binary: URL, onStats: (@Sendable (RcloneStats) -> Void)? = nil) {
+        self.init(binary: binary, killGrace: 5, onStats: onStats)
+    }
+    init(binary: URL, killGrace: TimeInterval, onStats: (@Sendable (RcloneStats) -> Void)? = nil) {
+        self.binary = binary; self.killGrace = killGrace; self.onStats = onStats
+    }
 
     public func sync(_ r: SyncRequest) async throws -> RcloneResult {
         try await run(RcloneCommand.arguments(r), context: r.context, logFile: r.logFile, isCheck: false)
@@ -58,6 +64,11 @@ public struct RcloneRunner: RcloneRunning {
         let stderrTask = Task.detached { () -> Data in
             (try? stderrPipe.fileHandleForReading.readToEnd()) ?? Data()
         }
+        // Live progress: follow the log file while rclone runs. Only when someone is listening.
+        let tail = onStats.map { handler in
+            Task.detached { await LogTail.follow(logFile, handler: handler) }
+        }
+        defer { tail?.cancel() }
         let exitCode: Int32
         do {
             exitCode = try await withTaskCancellationHandler {
@@ -91,6 +102,32 @@ public struct RcloneRunner: RcloneRunning {
         // A check that finds differences exits 1; that is a finding, not a failed run.
         if isCheck, exitCode == 1, summary.differences > 0, outcome == .permanent { outcome = .success }
         return RcloneResult(exitCode: exitCode, summary: summary, outcome: outcome)
+    }
+}
+
+/// Polls a growing JSON log once a second and reports each complete stats line. The final read after
+/// cancellation catches anything written just before the process exited.
+enum LogTail {
+    static func follow(_ file: URL, handler: @Sendable (RcloneStats) -> Void) async {
+        var offset: UInt64 = 0
+        var carry = Data()
+        func drain() {
+            guard let h = try? FileHandle(forReadingFrom: file) else { return }
+            defer { try? h.close() }
+            guard (try? h.seek(toOffset: offset)) != nil, let chunk = try? h.readToEnd(), !chunk.isEmpty else { return }
+            offset += UInt64(chunk.count)
+            carry.append(chunk)
+            while let nl = carry.firstIndex(of: UInt8(ascii: "\n")) {
+                let line = carry[carry.startIndex..<nl]
+                carry = Data(carry[carry.index(after: nl)...])
+                if let s = RcloneLogParser.stats(line: Data(line)) { handler(s) }
+            }
+        }
+        while !Task.isCancelled {
+            drain()
+            try? await Task.sleep(for: .seconds(1))
+        }
+        drain()
     }
 }
 

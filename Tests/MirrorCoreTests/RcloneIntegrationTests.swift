@@ -212,4 +212,16 @@ private final class Sandbox {
         let runner = RcloneRunner(binary: URL(fileURLWithPath: "/nonexistent/rclone"))
         await #expect(throws: (any Error).self) { try await runner.sync(sb.request()) }
     }
+
+    @Test func liveStatsReachTheListener() async throws {
+        let sb = try Sandbox()
+        try sb.write("a.txt", "hello world")
+        let box = StatsBox()
+        let live = RcloneRunner(binary: rcloneBinary) { box.add($0) }
+        let result = try await live.sync(sb.request())
+        #expect(result.outcome == .success)
+        try await Task.sleep(for: .milliseconds(500))   // the tail's final read runs just after exit
+        let last = try #require(box.all.last)
+        #expect(last.bytes == 11 && last.filesDone == 1)
+    }
 }

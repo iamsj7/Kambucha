@@ -5,6 +5,7 @@ import MirrorCore
 struct MenuBarPanel: View {
     @Bindable var model: AppModel
     @Environment(\.openWindow) private var openWindow
+    @State private var network = NetworkStatus()
 
     private var busy: Bool { if case .running = model.status { true } else { false } }
     private var canBackUp: Bool {
@@ -22,6 +23,12 @@ struct MenuBarPanel: View {
                 Divider()
                 VStack(alignment: .leading, spacing: 8) {
                     ForEach(model.rows) { SetRowView(row: $0) }
+                }
+            }
+            if busy && !model.progress.isEmpty {
+                VStack(alignment: .leading, spacing: 8) {
+                    ForEach(model.progress) { ProgressRow(label: $0.label, progress: $0.progress) }
+                    NetworkUploadRow(network: network)
                 }
             }
             if let heldRow {
@@ -59,8 +66,8 @@ struct MenuBarPanel: View {
         }
         .padding()
         .frame(width: 320)
-        .onAppear { model.panelAppeared() }
-        .onDisappear { model.panelDisappeared() }
+        .onAppear { model.panelAppeared(); network.start() }
+        .onDisappear { model.panelDisappeared(); network.stop() }
     }
 
     private var header: some View {
