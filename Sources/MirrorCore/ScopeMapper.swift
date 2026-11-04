@@ -18,10 +18,12 @@ public struct ScopeMapper {
         for path in batch.paths {
             guard let rel = Self.relative(path, prefixes: prefixes) else { return .wholeSet }
             let parts = rel.split(separator: "/").map(String.init)
-            // The root itself, a root-level entry, or a top-level folder itself (created, deleted,
-            // renamed) cannot be pinned to one project.
-            if parts.count < 2 { return .wholeSet }
+            // The root itself always widens.
+            if parts.isEmpty { return .wholeSet }
             if isExcluded(rel) { continue }
+            // A root-level entry, or a top-level folder itself (created, deleted, renamed),
+            // cannot be pinned to one project.
+            if parts.count < 2 { return .wholeSet }
             projects.insert(parts[0])
         }
         if projects.isEmpty { return .nothing }

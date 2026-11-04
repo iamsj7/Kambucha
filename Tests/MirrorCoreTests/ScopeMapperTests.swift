@@ -34,4 +34,28 @@ struct ScopeMapperTests {
     @Test func outsideRootWidens() {
         #expect(scope(ChangeBatch(paths: ["/elsewhere/a/b"], mustRescan: false, latestEventID: 1)) == .wholeSet)
     }
+
+    @Test func excludedRootFileDoesNotWiden() {
+        let b = ChangeBatch(paths: ["/Users/x/Projects/.DS_Store"], mustRescan: false, latestEventID: 1)
+        let m = ScopeMapper().scope(for: b, root: root, isExcluded: { $0 == ".DS_Store" })
+        #expect(m == .nothing)
+        #expect(scope(batch(["notes.txt"])) == .wholeSet)
+    }
+    @Test func siblingPrefixIsOutsideRoot() {
+        let r = URL(fileURLWithPath: "/a/b")
+        let b = ChangeBatch(paths: ["/a/bc/x/y"], mustRescan: false, latestEventID: 1)
+        #expect(ScopeMapper().scope(for: b, root: r, isExcluded: { _ in false }) == .wholeSet)
+    }
+    @Test func rootPathItselfWidens() {
+        let b = ChangeBatch(paths: ["/Users/x/Projects"], mustRescan: false, latestEventID: 1)
+        #expect(ScopeMapper().scope(for: b, root: root, isExcluded: { _ in true }) == .wholeSet)
+    }
+    @Test func privateVarAndVarAreSameRoot() {
+        let r = FileManager.default.temporaryDirectory.appendingPathComponent("mirror-scope-\(UUID().uuidString)")
+        try? FileManager.default.createDirectory(at: r, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: r) }
+        let real = r.resolvingSymlinksInPath().path
+        let b = ChangeBatch(paths: [real + "/p/f"], mustRescan: false, latestEventID: 1)
+        #expect(ScopeMapper().scope(for: b, root: r, isExcluded: { _ in false }) == .projects(["p"]))
+    }
 }

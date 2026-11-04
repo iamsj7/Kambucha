@@ -26,6 +26,8 @@ public struct FSEventsFeed: ChangeFeeding {
         var rescan = false
         var maxID: UInt64
         var finished = false
+        var timedOut = false
+        var startFailed = false
         var continuation: CheckedContinuation<Void, Never>?
         init(start: UInt64) { maxID = start }
         func finish() {
@@ -38,7 +40,8 @@ public struct FSEventsFeed: ChangeFeeding {
 
     public func changes(in dir: URL, since: UInt64?) async throws -> ChangeBatch {
         let start = FSEventsGetCurrentEventId()
-        guard let since else {
+        // No stored ID, or one ahead of the current ID (volume reset or restore): cannot replay.
+        guard let since, since <= start else {
             return ChangeBatch(paths: [], mustRescan: true, latestEventID: start)
         }
         let state = State(start: start)
@@ -71,26 +74,32 @@ public struct FSEventsFeed: ChangeFeeding {
         }
         FSEventStreamSetDispatchQueue(stream, queue)
 
-        var timedOut = false
+        let box = StreamBox(stream)
         await withCheckedContinuation { (c: CheckedContinuation<Void, Never>) in
             queue.async {
                 state.continuation = c
-                FSEventStreamStart(stream)
+                if !FSEventStreamStart(box.stream) { state.startFailed = true; state.finish() }
             }
             let seconds = Double(timeout.components.seconds) + Double(timeout.components.attoseconds) / 1e18
             queue.asyncAfter(deadline: .now() + seconds) {
-                if !state.finished { timedOut = true; state.finish() }
+                if !state.finished { state.timedOut = true; state.finish() }
             }
         }
         // Stop on the queue so no callback runs after we read the state.
         queue.sync {
-            FSEventStreamStop(stream)
-            FSEventStreamInvalidate(stream)
-            FSEventStreamRelease(stream)
+            FSEventStreamStop(box.stream)
+            FSEventStreamInvalidate(box.stream)
+            FSEventStreamRelease(box.stream)
         }
         return queue.sync {
-            ChangeBatch(paths: state.paths.sorted(), mustRescan: state.rescan || timedOut,
+            ChangeBatch(paths: state.paths.sorted(),
+                        mustRescan: state.rescan || state.timedOut || state.startFailed,
                         latestEventID: state.maxID)
         }
+    }
+
+    private final class StreamBox: @unchecked Sendable {
+        let stream: FSEventStreamRef
+        init(_ s: FSEventStreamRef) { stream = s }
     }
 }
