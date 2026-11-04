@@ -4,47 +4,12 @@ import Security
 @testable import MirrorCore
 @testable import MirrorSecrets
 
-/// Service names for tests that touch the real login Keychain. A killed run never reaches its
-/// `defer`, so each name carries its creator's pid, and the first use in a run clears items whose
-/// creator has gone. A live pid may be another worktree's run, so its items are left alone, and so
-/// is any name without this prefix.
-enum ThrowawayKeychain {
-    static let prefix = "com.shaikjaleel.mirror.test.pid-"
-    private static let sweptOnce: Void = sweepStale()
+/// One throwaway service per use, so no real Mirror item can be touched. Each test deletes its exact
+/// service and account in a `defer`, and tests never list the owner's Keychain. A killed run may
+/// leave a dummy item behind, which is accepted.
+private func throwawayService() -> String { "com.shaikjaleel.mirror.test.\(UUID().uuidString)" }
 
-    static func service() -> String {
-        _ = sweptOnce
-        return service(owner: getpid())
-    }
-
-    static func service(owner: pid_t) -> String { "\(prefix)\(owner).\(UUID().uuidString)" }
-
-    static func isStale(_ service: String) -> Bool {
-        guard service.hasPrefix(prefix), let pid = pid_t(service.dropFirst(prefix.count).prefix { $0 != "." }), pid > 0 else {
-            return false
-        }
-        return kill(pid, 0) == -1 && errno == ESRCH
-    }
-
-    /// Asks for attributes only, so no secret is read.
-    static func sweepStale() {
-        var query = KeychainStore.baseQuery(service: "", key: "")
-        query[kSecAttrService as String] = nil
-        query[kSecAttrAccount as String] = nil
-        query[kSecMatchLimit as String] = kSecMatchLimitAll
-        query[kSecReturnAttributes as String] = true
-        var result: CFTypeRef?
-        guard SecItemCopyMatching(query as CFDictionary, &result) == errSecSuccess, let items = result as? [[String: Any]] else { return }
-        for item in items {
-            guard let service = item[kSecAttrService as String] as? String, isStale(service),
-                  let account = item[kSecAttrAccount as String] as? String else { continue }
-            try? KeychainStore(service: service).delete(account)
-        }
-    }
-}
-
-/// Serialized: a Keychain listing taken during another test's write can come back short.
-@Suite(.serialized) struct SecretStoreTests {
+@Suite struct SecretStoreTests {
     @Test func generatedSecretsAreUniqueAndLongEnough() {
         let a = VaultSecrets.generate(), b = VaultSecrets.generate()
         #expect(a.passphrase != b.passphrase && a.salt != b.salt && a.passphrase != a.salt)
@@ -63,7 +28,7 @@ enum ThrowawayKeychain {
 
     /// A throwaway service, so no real Mirror item can be touched. Deleted even if an expectation fails.
     @Test func keychainRoundTrip() throws {
-        let store = KeychainStore(service: ThrowawayKeychain.service())
+        let store = KeychainStore(service: throwawayService())
         let key = "round-trip"
         defer { try? store.delete(key) }
 
@@ -78,17 +43,17 @@ enum ThrowawayKeychain {
     }
 
     @Test func keychainServicesAreSeparate() throws {
-        let a = KeychainStore(service: ThrowawayKeychain.service())
-        let b = KeychainStore(service: ThrowawayKeychain.service())
+        let a = KeychainStore(service: throwawayService())
+        let b = KeychainStore(service: throwawayService())
         defer { try? a.delete("k"); try? b.delete("k") }
         try a.write("only in a", key: "k")
         #expect(try b.read("k") == nil)
     }
 
-    /// `kSecUseKeychain` needs a `SecKeychainRef`, which the SDK no longer lets us get, so this proves
-    /// where the item really lands. `security` reads attributes only, of a throwaway item.
+    /// `KeychainStore` doesn't name a keychain, so an item lands in the default one. This observes
+    /// where it really goes. `security` reads attributes only, of this test's own item.
     @Test func keychainItemLandsInTheLoginKeychain() throws {
-        let service = ThrowawayKeychain.service()
+        let service = throwawayService()
         let store = KeychainStore(service: service)
         defer { try? store.delete("k") }
         try store.write("v", key: "k")
@@ -105,32 +70,6 @@ enum ThrowawayKeychain {
         #expect(text.contains("login.keychain"))
     }
 
-    @Test func staleThrowawayItemsAreClearedAndLiveOnesKept() throws {
-        let finished = Process()
-        finished.executableURL = URL(fileURLWithPath: "/usr/bin/true")
-        try finished.run()
-        finished.waitUntilExit()
-        let stale = KeychainStore(service: ThrowawayKeychain.service(owner: finished.processIdentifier))
-        let live = KeychainStore(service: ThrowawayKeychain.service())
-        defer { try? stale.delete("k"); try? live.delete("k") }
-        try stale.write("v", key: "k")
-        try live.write("v", key: "k")
-
-        ThrowawayKeychain.sweepStale()
-
-        #expect(try stale.read("k") == nil)
-        #expect(try live.read("k") == "v")
-    }
-
-    /// Only names this code made, and only with a dead creator. Older test items and the real
-    /// service aren't ours to judge.
-    @Test func onlyAThrowawayNameWithADeadOwnerIsStale() {
-        #expect(!ThrowawayKeychain.isStale(ThrowawayKeychain.service()))
-        #expect(!ThrowawayKeychain.isStale("com.shaikjaleel.mirror"))
-        #expect(!ThrowawayKeychain.isStale("com.shaikjaleel.mirror.test.\(UUID().uuidString)"))
-        #expect(!ThrowawayKeychain.isStale(ThrowawayKeychain.prefix + "not-a-pid.x"))
-    }
-
     @Test func keychainQueryStaysOffTheDataProtectionKeychain() {
         let q = KeychainStore.baseQuery(service: "s", key: "k")
         #expect(q[kSecUseDataProtectionKeychain as String] as? Bool == false)
@@ -138,7 +77,7 @@ enum ThrowawayKeychain {
     }
 
     @Test func keychainItemIsNotSynchronizable() throws {
-        let service = ThrowawayKeychain.service()
+        let service = throwawayService()
         let store = KeychainStore(service: service)
         defer { try? store.delete("k") }
         try store.write("v", key: "k")
