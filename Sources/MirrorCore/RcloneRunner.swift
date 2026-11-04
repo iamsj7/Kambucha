@@ -30,6 +30,17 @@ public extension RcloneRunning {
     }
 }
 
+/// Proves `url` is our signed rclone. Run immediately before any spawn that receives secrets, so a
+/// swapped binary is caught as late as possible. The instant between check and exec stays open.
+public protocol HelperValidating: Sendable {
+    func verifyHelper(at url: URL) throws
+}
+
+public enum RcloneRunnerError: Error, Equatable, Codable, Sendable {
+    /// A `localOnly` runner was handed a context that isn't plainly local.
+    case helperNotChecked
+}
+
 /// Runs the bundled rclone. `binary` is an absolute path chosen by the caller (the app derives it
 /// from `Bundle.main.bundleURL`); nothing here reads it from argv or PATH.
 public struct RcloneRunner: RcloneRunning {
@@ -38,11 +49,23 @@ public struct RcloneRunner: RcloneRunning {
     let killGrace: TimeInterval
     /// Called with each live stats record while rclone runs (about every 2 seconds). Off the main thread.
     let onStats: (@Sendable (RcloneStats) -> Void)?
-    public init(binary: URL, onStats: (@Sendable (RcloneStats) -> Void)? = nil) {
-        self.init(binary: binary, killGrace: 5, onStats: onStats)
+    private let helper: (any HelperValidating)?
+
+    public init(binary: URL, helper: any HelperValidating, onStats: (@Sendable (RcloneStats) -> Void)? = nil) {
+        self.init(binary: binary, killGrace: 5, helper: helper, onStats: onStats)
     }
-    init(binary: URL, killGrace: TimeInterval, onStats: (@Sendable (RcloneStats) -> Void)? = nil) {
-        self.binary = binary; self.killGrace = killGrace; self.onStats = onStats
+    private init(binary: URL, killGrace: TimeInterval, helper: (any HelperValidating)?,
+                 onStats: (@Sendable (RcloneStats) -> Void)? = nil) {
+        self.binary = binary; self.killGrace = killGrace; self.helper = helper; self.onStats = onStats
+    }
+
+    /// No helper check, so it accepts only contexts with nothing secret: `/dev/null` for a config and
+    /// an empty environment. Anything else throws `helperNotChecked` before rclone starts.
+    public static func localOnly(binary: URL, onStats: (@Sendable (RcloneStats) -> Void)? = nil) -> RcloneRunner {
+        localOnly(binary: binary, killGrace: 5, onStats: onStats)
+    }
+    static func localOnly(binary: URL, killGrace: TimeInterval, onStats: (@Sendable (RcloneStats) -> Void)? = nil) -> RcloneRunner {
+        RcloneRunner(binary: binary, killGrace: killGrace, helper: nil, onStats: onStats)
     }
 
     public func sync(_ r: SyncRequest) async throws -> RcloneResult {
@@ -58,11 +81,12 @@ public struct RcloneRunner: RcloneRunning {
     }
 
     public func capture(_ arguments: [String], context: RcloneContext) async throws -> RcloneCapture {
+        try checkHelper(for: context)
         let process = Process()
         process.executableURL = binary
         process.arguments = arguments
         process.environment = Self.childEnvironment(context)
-        process.qualityOfService = Self.qos(Task.currentPriority)
+        process.qualityOfService = Self.qos(Task.currentPriority, raised: AgentPriority.isRaised)
         let out = Pipe(), err = Pipe()
         process.standardOutput = out
         process.standardError = err
@@ -102,14 +126,24 @@ public struct RcloneRunner: RcloneRunning {
         return env
     }
 
-    private static func qos(_ p: TaskPriority) -> QualityOfService {
+    /// The calling agent's priority. A pass that began in the background keeps its task's priority after
+    /// being raised for a drive, so `raised` decides that case.
+    static func qos(_ p: TaskPriority, raised: Bool) -> QualityOfService {
+        if raised, p < .medium { return .default }
         if p >= .userInitiated { return .userInitiated }
         if p >= .medium { return .default }
         if p >= .utility { return .utility }
         return .background
     }
 
+    private func checkHelper(for context: RcloneContext) throws {
+        if let helper { try helper.verifyHelper(at: binary) }
+        else if !context.environment.isEmpty || context.configPath != "/dev/null" { throw RcloneRunnerError.helperNotChecked }
+    }
+
     private func run(_ args: [String], context: RcloneContext, logFile: URL, isCheck: Bool) async throws -> RcloneResult {
+        try checkHelper(for: context)
+
         // The log file is per run; a leftover would be parsed as this run's output.
         try? FileManager.default.removeItem(at: logFile)
 
@@ -117,7 +151,7 @@ public struct RcloneRunner: RcloneRunning {
         process.executableURL = binary
         process.arguments = args
         process.environment = Self.childEnvironment(context)
-        process.qualityOfService = Self.qos(Task.currentPriority)   // same priority as the calling agent
+        process.qualityOfService = Self.qos(Task.currentPriority, raised: AgentPriority.isRaised)
         // Output goes to the log file; stdout is discarded and stderr is drained concurrently,
         // so a full pipe can never block the child.
         let stderrPipe = Pipe()

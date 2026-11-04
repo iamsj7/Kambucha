@@ -53,4 +53,8 @@ struct AppSettingsTests {
         try Data("not json".utf8).write(to: root.appendingPathComponent("settings.json"))
         #expect(throws: (any Error).self) { try SettingsStore(root: root).load() }
     }
+
+    @Test func olderSettingsGetTheDefaultDriveReminder() throws {
+        #expect(try JSONDecoder().decode(AppSettings.self, from: Data("{}".utf8)).driveReminderDays == 7)
+    }
 }

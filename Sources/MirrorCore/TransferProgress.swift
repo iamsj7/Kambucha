@@ -1,4 +1,5 @@
 import Foundation
+import os
 
 public struct TransferProgress: Codable, Equatable, Sendable {
     public enum Phase: String, Codable, Sendable { case scanning, transferring, verifying, waitingForICloud }
@@ -49,6 +50,60 @@ public struct TransferProgress: Codable, Equatable, Sendable {
         }
         return TransferProgress(pair: pair, phase: .waitingForICloud, filesDone: filesDone, filesTotal: filesTotal,
                                 eta: eta, etaIsEstimate: true, updated: now)
+    }
+}
+
+/// The run's live progress. `RcloneRunner` is built once and its stats name no pair, so this holds which
+/// pair is running and what phase it's in. Only the transfer's stats are figures worth showing: a dry run
+/// or a check counting up would read as a backup moving, so there they only say the run is alive.
+public final class RunProgress: Sendable {
+    private static let log = Logger(subsystem: MirrorCore.bundleID, category: "RunProgress")
+    private struct Current { var pair: PairID; var phase: TransferProgress.Phase }
+
+    private let store: ProgressStore
+    private let clock: @Sendable () -> Date
+    private let observer: (@Sendable (TransferProgress) -> Void)?
+    private let current = OSAllocatedUnfairLock<Current?>(initialState: nil)
+
+    public convenience init(root: URL, clock: @escaping @Sendable () -> Date) {
+        self.init(store: ProgressStore(root: root), clock: clock, observer: nil)
+    }
+
+    init(store: ProgressStore, clock: @escaping @Sendable () -> Date, observer: (@Sendable (TransferProgress) -> Void)?) {
+        self.store = store; self.clock = clock; self.observer = observer
+    }
+
+    /// For `RcloneRunner`'s `onStats`. Off the main thread, and between runs it does nothing.
+    public func stats(_ stats: RcloneStats) {
+        guard let now = current.withLock({ $0 }) else { return }
+        var progress = TransferProgress(pair: now.pair, phase: now.phase, updated: clock())
+        if now.phase == .transferring {
+            progress = TransferProgress(pair: now.pair, stats: stats, now: clock())
+            progress.phase = .transferring
+        }
+        write(progress)
+    }
+
+    func enter(_ phase: TransferProgress.Phase, pair: PairID) {
+        current.withLock { $0 = Current(pair: pair, phase: phase) }
+        write(TransferProgress(pair: pair, phase: phase, updated: clock()))
+    }
+
+    /// `done` of `total` files have reached iCloud. `filesPerSecond` is nil until there are two sightings.
+    func uploading(pair: PairID, done: Int, total: Int, filesPerSecond: Double?) {
+        current.withLock { $0 = Current(pair: pair, phase: .waitingForICloud) }
+        write(.iCloud(pair: pair, filesDone: done, filesTotal: total, filesPerSecond: filesPerSecond, now: clock()))
+    }
+
+    /// Whatever ended the run. A killed agent leaves its file, which goes stale and shows nothing.
+    func end() {
+        guard let finished = current.withLock({ value -> Current? in defer { value = nil }; return value }) else { return }
+        do { try store.clear(finished.pair) } catch { Self.log.error("could not clear progress") }
+    }
+
+    private func write(_ progress: TransferProgress) {
+        observer?(progress)
+        do { try store.write(progress) } catch { Self.log.error("could not write progress") }
     }
 }
 

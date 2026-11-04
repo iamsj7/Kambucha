@@ -23,10 +23,15 @@ public struct DeletionGate {
         if !approved && (overMinimum || overAbsolute) {
             return .hold(count: nonGit)
         }
+        // An approval is exact: `--max-delete` stops at what the owner reviewed, plus uncounted `.git` churn.
+        if approved, let approvedDeletions { return .proceed(maxDelete: approvedDeletions + deletions.count - nonGit) }
         return .proceed(maxDelete: deletions.count + extraDeleteMargin)
     }
 
-    private static func isUnderGit(_ path: String) -> Bool {
+    /// How many of these count toward a hold.
+    public static func countable(_ deletions: [String]) -> Int { deletions.count { !isUnderGit($0) } }
+
+    static func isUnderGit(_ path: String) -> Bool {
         path.split(separator: "/", omittingEmptySubsequences: true).contains(".git")
     }
 }

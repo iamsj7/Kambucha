@@ -1,6 +1,6 @@
 import Foundation
 
-public enum RunScope: Equatable {
+public enum RunScope: Equatable, Sendable {
     case nothing
     case projects([String])
     case wholeSet
@@ -31,10 +31,22 @@ public struct ScopeMapper {
         return .projects(projects.sorted())
     }
 
+    /// `paths` relative to `root`, however FSEvents spelled them. Any outside it are left out.
+    public static func relative(_ paths: [String], to root: URL) -> [String] {
+        let prefixes = rootPrefixes(root)
+        return paths.compactMap { relative($0, prefixes: prefixes) }
+    }
+
     private static func rootPrefixes(_ root: URL) -> [String] {
         var out = [root.standardizedFileURL.path]
         let resolved = root.resolvingSymlinksInPath().path
         if !out.contains(resolved) { out.append(resolved) }
+        // URL's spellings drop `/private`, which is how FSEvents reports /tmp and /var.
+        if let real = realpath(root.path, nil) {
+            defer { free(real) }
+            let path = String(cString: real)
+            if !out.contains(path) { out.append(path) }
+        }
         return out.map { $0.hasSuffix("/") ? $0 : $0 + "/" }
     }
 

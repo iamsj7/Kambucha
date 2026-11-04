@@ -12,10 +12,53 @@ public struct AuditResult: Equatable, Sendable {
     }
 }
 
-public protocol UploadAuditing: Sendable { func audit(_: [URL]) -> AuditResult }
+public protocol UploadAuditing: Sendable {
+    func audit(_: [URL]) -> AuditResult
+    /// Whether iCloud holds this item. Nil when that can't be read, which says nothing either way.
+    func ubiquity(of: URL) -> Bool?
+}
+
+public extension UploadAuditing {
+    func ubiquity(of url: URL) -> Bool? { audit([url]).refused.isEmpty }
+}
+
+/// Asks iCloud to bring a file back. The download happens in the background.
+public protocol ICloudDownloading: Sendable {
+    func requestDownload(of: URL) throws
+    /// Free and total bytes on the volume holding this path. Nil when they can't be read.
+    func space(at: URL) -> (free: Int64, capacity: Int64)?
+}
+
+/// Measured from a process with no iCloud entitlement: an evicted file came back within a second.
+public struct ICloudDownloader: ICloudDownloading {
+    public init() {}
+    public func requestDownload(of url: URL) throws {
+        try FileManager.default.startDownloadingUbiquitousItem(at: url)
+    }
+
+    /// "Important usage" counts what the system will purge to make room, as a download would make it do.
+    public func space(at url: URL) -> (free: Int64, capacity: Int64)? {
+        let keys: Set<URLResourceKey> = [.volumeAvailableCapacityForImportantUsageKey, .volumeTotalCapacityKey]
+        guard let values = try? url.resourceValues(forKeys: keys),
+              let free = values.volumeAvailableCapacityForImportantUsage,
+              let capacity = values.volumeTotalCapacity else { return nil }
+        return (free, Int64(capacity))
+    }
+}
 
 public struct ICloudAuditor: UploadAuditing {
     public init() {}
+
+    /// Reads a flag, so an evicted item isn't downloaded (measured). An item outside iCloud reads
+    /// successfully with no value, which is why only a failed read counts as unknown.
+    public func ubiquity(of original: URL) -> Bool? {
+        var st = stat()
+        guard lstat(original.path, &st) == 0 else { return nil }
+        var url = URL(fileURLWithPath: original.path)
+        url.removeAllCachedResourceValues()
+        guard let values = try? url.resourceValues(forKeys: [.isUbiquitousItemKey]) else { return nil }
+        return values.isUbiquitousItem == true
+    }
 
     public func audit(_ urls: [URL]) -> AuditResult {
         var result = AuditResult(pending: [], refused: [])

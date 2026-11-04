@@ -2,6 +2,12 @@ import Testing
 import Foundation
 import Security
 @testable import MirrorCore
+@testable import MirrorSecrets
+
+/// One throwaway service per use, so no real Mirror item can be touched. Each test deletes its exact
+/// service and account in a `defer`, and tests never list the owner's Keychain. A killed run may
+/// leave a dummy item behind, which is accepted.
+private func throwawayService() -> String { "com.shaikjaleel.mirror.test.\(UUID().uuidString)" }
 
 @Suite struct SecretStoreTests {
     @Test func generatedSecretsAreUniqueAndLongEnough() {
@@ -22,7 +28,7 @@ import Security
 
     /// A throwaway service, so no real Mirror item can be touched. Deleted even if an expectation fails.
     @Test func keychainRoundTrip() throws {
-        let store = KeychainStore(service: "com.shaikjaleel.mirror.test.\(UUID().uuidString)")
+        let store = KeychainStore(service: throwawayService())
         let key = "round-trip"
         defer { try? store.delete(key) }
 
@@ -37,17 +43,17 @@ import Security
     }
 
     @Test func keychainServicesAreSeparate() throws {
-        let a = KeychainStore(service: "com.shaikjaleel.mirror.test.\(UUID().uuidString)")
-        let b = KeychainStore(service: "com.shaikjaleel.mirror.test.\(UUID().uuidString)")
+        let a = KeychainStore(service: throwawayService())
+        let b = KeychainStore(service: throwawayService())
         defer { try? a.delete("k"); try? b.delete("k") }
         try a.write("only in a", key: "k")
         #expect(try b.read("k") == nil)
     }
 
-    /// `kSecUseKeychain` needs a `SecKeychainRef`, which the SDK no longer lets us get, so this proves
-    /// where the item really lands. `security` reads attributes only, of a throwaway item.
+    /// `KeychainStore` doesn't name a keychain, so an item lands in the default one. This observes
+    /// where it really goes. `security` reads attributes only, of this test's own item.
     @Test func keychainItemLandsInTheLoginKeychain() throws {
-        let service = "com.shaikjaleel.mirror.test.\(UUID().uuidString)"
+        let service = throwawayService()
         let store = KeychainStore(service: service)
         defer { try? store.delete("k") }
         try store.write("v", key: "k")
@@ -71,7 +77,7 @@ import Security
     }
 
     @Test func keychainItemIsNotSynchronizable() throws {
-        let service = "com.shaikjaleel.mirror.test.\(UUID().uuidString)"
+        let service = throwawayService()
         let store = KeychainStore(service: service)
         defer { try? store.delete("k") }
         try store.write("v", key: "k")

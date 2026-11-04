@@ -15,6 +15,14 @@ struct StatusPresentation {
         case .uploading(let n):
             symbol = "arrow.clockwise.icloud"; title = "Uploading \(n.formatted()) \(n == 1 ? "file" : "files")"
             detail = nil
+        case .waitingForDownload(let n):
+            symbol = "exclamationmark.icloud"; title = "Files Didn't Match"
+            detail = StatusSummary.recheckText(count: n)
+        case .notAccepted(let n):
+            symbol = "icloud.slash"; title = StatusSummary.notAcceptedText(count: n)
+            detail = "Mirror will tell you if this hasn't changed after a day."
+        case .unfinished:
+            symbol = "icloud"; title = "Backup Not Finished"; detail = "It picks up at the next run."
         case .running:
             symbol = "arrow.clockwise.icloud"; title = "Backing Up"; detail = nil
         case .held(let n):

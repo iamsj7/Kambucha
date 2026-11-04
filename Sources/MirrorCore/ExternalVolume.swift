@@ -1,4 +1,6 @@
+import DiskArbitration
 import Foundation
+import IOKit
 
 public struct VolumeInfo: Equatable, Sendable {
     public var uuid: String
@@ -8,8 +10,8 @@ public struct VolumeInfo: Equatable, Sendable {
     /// Free space that excludes purgeable space (`volumeAvailableCapacityKey`), so it is what is really there.
     public var freeBytes: Int64
     public var totalBytes: Int64
-    /// Identifies this connection: device node plus filesystem ID. It changes when the drive is unplugged and
-    /// plugged back in. Empty when `statfs` failed, and then the 7 day interval decides.
+    /// Identifies this connection, and changes when the drive is unplugged and plugged back in. Empty when
+    /// `statfs` failed, and then the 7 day interval decides.
     public var mountID: String
     /// True for the boot volume and the system volumes. Never a backup target.
     public var isSystem: Bool
@@ -163,7 +165,31 @@ public struct SystemVolumes: VolumeLocating {
         let from = withUnsafePointer(to: &s.f_mntfromname) {
             $0.withMemoryRebound(to: CChar.self, capacity: Int(MNAMELEN)) { String(cString: $0) }
         }
-        return (type, "\(from)@\(s.f_fsid.val.0)-\(s.f_fsid.val.1)")
+        return (type, mountID(device: from, fsid: "\(s.f_fsid.val.0)-\(s.f_fsid.val.1)", media: bsdName(from).flatMap(mediaID)))
+    }
+
+    /// The device node and fsid repeat when a drive comes back on the same port (measured), so on their own a
+    /// reconnection would pass for the same connection. The media object is new with every attach.
+    static func mountID(device: String, fsid: String, media: UInt64?) -> String {
+        let base = "\(device)@\(fsid)"
+        return media.map { "\(base)#\($0)" } ?? base
+    }
+
+    /// `diskNsM` from any form a mount source takes: `/dev/disk5s1`, `/dev/rdisk5s1`, `disk5s1`, or FSKit's
+    /// `exfat://disk5s1/Name`. The first match, as a volume's name can come after it and look like one.
+    static func bsdName(_ source: String) -> String? {
+        source.firstMatch(of: /(?:^|[^A-Za-z0-9])r?(disk[0-9]+(?:s[0-9]+)*)/).map { String($0.1) }
+    }
+
+    /// The I/O Registry ID of the volume's media object. Nil if it can't be read, which only costs the distinction.
+    private static func mediaID(_ bsdName: String) -> UInt64? {
+        guard let session = DASessionCreate(kCFAllocatorDefault),
+              let disk = DADiskCreateFromBSDName(kCFAllocatorDefault, session, bsdName) else { return nil }
+        let media = DADiskCopyIOMedia(disk)
+        guard media != 0 else { return nil }
+        defer { IOObjectRelease(media) }
+        var id: UInt64 = 0
+        return IORegistryEntryGetRegistryEntryID(media, &id) == KERN_SUCCESS ? id : nil
     }
 }
 
@@ -207,7 +233,7 @@ public enum ExternalVolume {
     }
 
     /// `<volume>/Mac Backup`. The root marker sits at `<volume>/Mac Backup/.mirror-root`.
-    public static func backupRoot(on volume: VolumeInfo) -> URL {
+    static func backupRoot(on volume: VolumeInfo) -> URL {
         volume.mountPoint.appendingPathComponent(MirrorPaths.rootFolderName, isDirectory: true)
     }
 }

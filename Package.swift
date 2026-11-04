@@ -6,10 +6,12 @@ let package = Package(
     platforms: [.macOS(.v26)],
     targets: [
         .target(name: "MirrorCore", resources: [.process("Resources")]),
-        .executableTarget(name: "MirrorAgent", dependencies: ["MirrorCore"]),
+        // Keychain and code-signing checks. Only the agent links this, so Mirror.app can't reach the Keychain.
+        .target(name: "MirrorSecrets", dependencies: ["MirrorCore"]),
+        .executableTarget(name: "MirrorAgent", dependencies: ["MirrorCore", "MirrorSecrets"]),
         .executableTarget(name: "Mirror", dependencies: ["MirrorCore"]),
         .testTarget(name: "MirrorTests", dependencies: ["Mirror", "MirrorCore"]),
-        .testTarget(name: "MirrorCoreTests", dependencies: ["MirrorCore"], exclude: ["Fixtures"]),
+        .testTarget(name: "MirrorCoreTests", dependencies: ["MirrorCore", "MirrorSecrets"], exclude: ["Fixtures"]),
     ],
     swiftLanguageModes: [.v6]
 )

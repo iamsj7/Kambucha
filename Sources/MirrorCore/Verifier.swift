@@ -5,6 +5,16 @@ public struct VerifyResult: Equatable, Sendable {
     public var audit: AuditResult
     /// The rclone checks found no differences. Says nothing about uploads.
     public var checksClean: Bool
+    /// Files the size check found on both sides, so a whole-set check is the set's file count.
+    public var matchingFiles = 0
+    /// What the checks named as different, relative to what was checked. May be shorter than
+    /// `differences`, so its being empty says nothing.
+    public var differingPaths: [String] = []
+    /// Asked to be hashed, but evicted, so left unproven. Only the Quick check skips these.
+    public var skippedFreed: [String] = []
+    /// What a deep check's hash list held, in rclone's names. Nil when it compared everything, as on a
+    /// cloud destination.
+    public var hashedPaths: Set<String>?
     /// The only value that may drive "Backed Up": clean checks and nothing pending, refused or missing.
     public var backedUp: Bool {
         checksClean && audit.pending.isEmpty && audit.refused.isEmpty && audit.missing.isEmpty
@@ -32,59 +42,113 @@ public struct Verifier: Sendable {
     /// deliberately not here: it verifies like a local folder with no upload audit.
     private func audits(_ p: DestinationProfile) -> Bool { p.kind == .iCloudFolder }
 
+    /// `auditWholeMirror` is for the daily pass: every file is audited, not just those copied.
+    /// `hashCopied` is false when a deep check follows and will hash them anyway.
     public func quick(source: URL, destination: String, profile: DestinationProfile, context: RcloneContext,
-                      filter: URL, copied: [String], oneWay: Bool, logDir: URL) async throws -> VerifyResult {
-        var differences = 0
-        differences += try await run(CheckRequest(
+                      filter: URL, copied: [String], oneWay: Bool, logDir: URL,
+                      auditWholeMirror: Bool = false, hashCopied: Bool = true) async throws -> VerifyResult {
+        let size = try await run(CheckRequest(
             source: source, destination: destination, filterFile: filter, filesFrom: nil, sizeOnly: true,
             oneWay: oneWay, cryptCheck: false, context: context, logFile: logDir.appendingPathComponent("quick-size.log")).applying(profile))
-        var toHash = copied
+        var differences = size.differences
+        var differing = size.flagged
         let root = URL(fileURLWithPath: destination)
-        if audits(profile) { toHash = copied.filter { !isDataless(root.appendingPathComponent($0)) } }
-        if !toHash.isEmpty {
+        // One read decides each file, as iCloud can evict between two.
+        var toHash: [String] = [], skipped: [String] = []
+        for path in copied {
+            if audits(profile), isDataless(root.appendingPathComponent(path)) { skipped.append(path) } else { toHash.append(path) }
+        }
+        if hashCopied, !toHash.isEmpty {
             let list = try writeList(toHash, to: logDir.appendingPathComponent("quick-copied.list"))
-            differences += try await run(CheckRequest(
+            let hash = try await run(CheckRequest(
                 source: source, destination: destination, filterFile: filter, filesFrom: list, sizeOnly: false,
                 oneWay: oneWay, cryptCheck: profile.encrypted, context: context,
                 logFile: logDir.appendingPathComponent("quick-hash.log")).applying(profile))
+            differences += hash.differences
+            differing += hash.flagged
         }
         var audit = AuditResult(pending: [], refused: [])
-        if audits(profile) { audit = try await runAudit(copied.map { root.appendingPathComponent($0) }) }
-        return VerifyResult(differences: differences, audit: audit)
+        if audits(profile) {
+            // A missing mirror here means nothing was copied: the size check above already compared it.
+            // Rclone names a link `x.rclonelink`, but a local mirror holds it as `x`.
+            let paths = auditWholeMirror ? Self.files(under: root) ?? []
+                : copied.map { $0.hasSuffix(Self.linkSuffix) ? String($0.dropLast(Self.linkSuffix.count)) : $0 }
+            audit = try await runAudit(paths.map { root.appendingPathComponent($0) })
+        }
+        var result = VerifyResult(differences: differences, audit: audit)
+        result.matchingFiles = size.matching
+        result.differingPaths = differing
+        result.skippedFreed = skipped
+        return result
     }
 
+    /// Re-reads files already known to be pending or refused.
+    public func audit(_ urls: [URL]) async throws -> AuditResult { try await runAudit(urls) }
+
+    /// Off the cooperative pool, like the audit it belongs with.
+    public func ubiquity(of url: URL) async -> Bool? {
+        let auditor = self.auditor
+        return await withCheckedContinuation { continuation in
+            Self.auditQueue.async { continuation.resume(returning: auditor.ubiquity(of: url)) }
+        }
+    }
+
+    /// True when iCloud has evicted this file, so hashing it would download it.
+    public func isFreed(_ url: URL) -> Bool { isDataless(url) }
+
+    /// `oneWay` is for a held set, whose mirror keeps extras on purpose.
     public func deep(source: URL, destination: String, profile: DestinationProfile, context: RcloneContext,
-                     filter: URL, sampleFreed: Int, logDir: URL) async throws -> VerifyResult {
+                     filter: URL, sampleFreed: Int, logDir: URL, oneWay: Bool = false) async throws -> VerifyResult {
         guard audits(profile) else {
-            let d = try await run(CheckRequest(
+            let check = try await run(CheckRequest(
                 source: source, destination: destination, filterFile: filter, filesFrom: nil, sizeOnly: false,
-                oneWay: false, cryptCheck: profile.encrypted, context: context,
+                oneWay: oneWay, cryptCheck: profile.encrypted, context: context,
                 logFile: logDir.appendingPathComponent("deep.log")).applying(profile))
-            return VerifyResult(differences: d, audit: AuditResult(pending: [], refused: []), checksClean: d == 0)
+            var result = VerifyResult(differences: check.differences, audit: AuditResult(pending: [], refused: []),
+                                      checksClean: check.differences == 0)
+            result.differingPaths = check.flagged
+            return result
         }
         let root = URL(fileURLWithPath: destination)
         // A missing or unreadable mirror must never look like an empty, passing one.
         guard let all = Self.files(under: root) else { throw VerifyError.mirrorUnreadable(destination) }
         // Same filtered size-only check as Quick, so a file missing from the mirror fails Deep too.
-        var differences = try await run(CheckRequest(
+        let size = try await run(CheckRequest(
             source: source, destination: destination, filterFile: filter, filesFrom: nil, sizeOnly: true,
-            oneWay: false, cryptCheck: false, context: context, logFile: logDir.appendingPathComponent("deep-size.log")).applying(profile))
+            oneWay: oneWay, cryptCheck: false, context: context, logFile: logDir.appendingPathComponent("deep-size.log")).applying(profile))
+        var differences = size.differences
+        var differing = size.flagged
         var present: [String] = [], freed: [String] = []
         for rel in all {
-            if isDataless(root.appendingPathComponent(rel)) { freed.append(rel) } else { present.append(rel) }
+            let url = root.appendingPathComponent(rel)
+            // Rclone only knows a link as `x.rclonelink`: under `x` it'd match nothing, and pass unchecked.
+            if Self.isLink(url) { present.append(rel + Self.linkSuffix) }
+            else if isDataless(url) { freed.append(rel) }
+            else { present.append(rel) }
         }
-        let sampled = Array(freed.shuffled().prefix(max(0, sampleFreed)))
-        let list = present + sampled
+        let list = present + freed.shuffled().prefix(max(0, sampleFreed))
         if !list.isEmpty {
-            // No filter alongside --files-from: rclone cannot combine them.
-            differences += try await run(CheckRequest(
+            // No filter alongside a file list: rclone cannot combine them.
+            let hash = try await run(CheckRequest(
                 source: source, destination: destination, filterFile: nil,
                 filesFrom: try writeList(list, to: logDir.appendingPathComponent("deep.list")),
-                sizeOnly: false, oneWay: false, cryptCheck: profile.encrypted, context: context,
+                sizeOnly: false, oneWay: oneWay, cryptCheck: profile.encrypted, context: context,
                 logFile: logDir.appendingPathComponent("deep.log")).applying(profile))
+            differences += hash.differences
+            differing += hash.flagged
         }
-        let audit = try await runAudit((present + freed).map { root.appendingPathComponent($0) })
-        return VerifyResult(differences: differences, audit: audit)
+        let audit = try await runAudit(all.map { root.appendingPathComponent($0) })
+        var result = VerifyResult(differences: differences, audit: audit)
+        result.differingPaths = differing
+        result.hashedPaths = Set(list)
+        return result
+    }
+
+    private static let linkSuffix = ".rclonelink"
+
+    private static func isLink(_ url: URL) -> Bool {
+        var st = stat()
+        return lstat(url.path, &st) == 0 && (st.st_mode & S_IFMT) == S_IFLNK
     }
 
     private static let auditQueue = DispatchQueue(label: "mirror.upload-audit", qos: .utility)
@@ -107,10 +171,10 @@ public struct Verifier: Sendable {
         return total
     }
 
-    private func run(_ r: CheckRequest) async throws -> Int {
+    private func run(_ r: CheckRequest) async throws -> LogSummary {
         let res = try await rclone.check(r)
         guard res.outcome == .success else { throw VerifyError.checkDidNotComplete(res.outcome) }
-        return res.summary.differences
+        return res.summary
     }
 
     private func writeList(_ paths: [String], to url: URL) throws -> URL {

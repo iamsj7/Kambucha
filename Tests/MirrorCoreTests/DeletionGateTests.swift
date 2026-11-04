@@ -74,7 +74,7 @@ private let defaultPolicy = DeletionPolicy()
 @Test func approvalCoversReviewedCountOnly() {
     let approved = DeletionGate.decide(deletions: paths(1_240), totalFiles: 5_000,
                                        policy: defaultPolicy, approvedDeletions: 1_240)
-    #expect(approved == .proceed(maxDelete: 1_250))
+    #expect(approved == .proceed(maxDelete: 1_240))
 
     let larger = DeletionGate.decide(deletions: paths(1_241), totalFiles: 5_000,
                                      policy: defaultPolicy, approvedDeletions: 1_240)
@@ -99,4 +99,11 @@ private let defaultPolicy = DeletionPolicy()
     let decision = DeletionGate.decide(deletions: paths(100), totalFiles: 0,
                                        policy: defaultPolicy, approvedDeletions: nil)
     #expect(decision == .hold(count: 100))
+}
+
+@Test func anApprovedRunGetsNoMarginBeyondTheReviewedCount() {
+    let git = (0..<3).map { "p/.git/objects/\($0)" }
+    let files = (0..<200).map { "f\($0)" }
+    let decision = DeletionGate.decide(deletions: files + git, totalFiles: 1000, policy: DeletionPolicy(), approvedDeletions: 250)
+    #expect(decision == .proceed(maxDelete: 253))
 }

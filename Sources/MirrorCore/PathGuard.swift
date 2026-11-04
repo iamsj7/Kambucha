@@ -6,6 +6,14 @@ public enum GuardFailure: Error, Equatable {
     case sourceSuspiciouslyEmpty(now: Int, last: Int)
 }
 
+/// A local backup root that has passed the guard. Only `PathGuard` can make one, so no drive path can reach
+/// rclone without the live `VolumeInfo` having been checked against the destination.
+public struct ValidatedRoot: Equatable, Sendable {
+    public let url: URL
+    fileprivate init(_ url: URL) { self.url = url }
+    public var path: String { url.path }
+}
+
 public struct PathGuard: Sendable {
     public let iCloudDrive: URL
     public let backupRoot: URL
@@ -15,7 +23,7 @@ public struct PathGuard: Sendable {
     }
 
     /// A guard whose `Mac Backup` root is at the top of an external volume.
-    public static func forVolume(_ volume: VolumeInfo, iCloudDrive: URL) -> PathGuard {
+    static func forVolume(_ volume: VolumeInfo, iCloudDrive: URL) -> PathGuard {
         PathGuard(iCloudDrive: iCloudDrive, backupRoot: ExternalVolume.backupRoot(on: volume))
     }
 
@@ -39,18 +47,22 @@ public struct PathGuard: Sendable {
         try assertInsideRoot(mirrorURL(set))
     }
 
+    /// The one way to a drive's backup root. It must sit on the mounted drive whose UUID the destination names.
+    func driveRoot(_ destination: Destination, volume: VolumeInfo?) throws -> ValidatedRoot {
+        let mount = volume?.mountPoint.standardizedFileURL.path ?? "/"
+        guard let volume, !volume.isSystem, mount != "/", !mount.hasPrefix("/System/Volumes"),
+              let uuid = destination.volumeUUID,
+              volume.uuid.caseInsensitiveCompare(uuid) == .orderedSame,
+              Self.strictlyInsideCanonical(backupRoot, volume.mountPoint) else { throw GuardFailure.wrongDrive }
+        if volume.looksInternal && !destination.internalDiskConfirmed { throw GuardFailure.internalDiskNotConfirmed }
+        return ValidatedRoot(backupRoot)
+    }
+
+    @discardableResult
     public func validateRun(_ set: BackupSet, destination: Destination, marker: RootMarker?,
-                            sampleFileCount: Int, state: SetState, volume: VolumeInfo? = nil) throws {
+                            sampleFileCount: Int, state: SetState, volume: VolumeInfo? = nil) throws -> ValidatedRoot {
         try checkSource(set)
-        if destination.kind == .externalDrive {
-            // The backup root must sit on the mounted drive whose UUID the destination names.
-            let mount = volume?.mountPoint.standardizedFileURL.path ?? "/"
-            guard let volume, !volume.isSystem, mount != "/", !mount.hasPrefix("/System/Volumes"),
-                  let uuid = destination.volumeUUID,
-                  volume.uuid.caseInsensitiveCompare(uuid) == .orderedSame,
-                  Self.strictlyInsideCanonical(backupRoot, volume.mountPoint) else { throw GuardFailure.wrongDrive }
-            if volume.looksInternal && !destination.internalDiskConfirmed { throw GuardFailure.internalDiskNotConfirmed }
-        }
+        let root = destination.kind == .externalDrive ? try driveRoot(destination, volume: volume) : ValidatedRoot(backupRoot)
         try assertInsideRoot(mirrorURL(set))
         // Cloud destinations don't live in iCloud Drive, so only the iCloud folder needs it present.
         if destination.kind == .iCloudFolder {
@@ -63,6 +75,7 @@ public struct PathGuard: Sendable {
         if sampleFileCount == 0, let last = state.lastFileCount, last > 0 {
             throw GuardFailure.sourceSuspiciouslyEmpty(now: sampleFileCount, last: last)
         }
+        return root
     }
 
     public func sameVolumeAsICloud(_ url: URL) -> Bool {

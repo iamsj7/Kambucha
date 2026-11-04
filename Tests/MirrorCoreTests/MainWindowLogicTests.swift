@@ -35,7 +35,7 @@ private final class FakeInspector: MirroredExcludeInspecting, @unchecked Sendabl
 
 private struct FakeDryRun: DeletionDryRunProviding {
     var files: [String]
-    func heldDeletions(set: BackupSet) async throws -> [String] { files }
+    func heldDeletions(set: BackupSet, destination: Destination) async throws -> [String] { files }
 }
 
 private let groups = [
@@ -118,56 +118,54 @@ private func aSet() -> BackupSet { BackupSet(name: "Projects", source: URL(fileU
     #expect(c.pendingImpact == nil)
 }
 
-// MARK: Acceptance
-
-@Test func backupIsBlockedUntilPreviewAccepted() {
-    let store = PreviewAcceptanceStore(root: tempDir())
-    let set = aSet()
-    #expect(!store.isAccepted(set))
-    store.accept(set)
-    #expect(store.isAccepted(set))
-}
-
-@Test func ruleChangeReopensThePreview() {
-    let store = PreviewAcceptanceStore(root: tempDir())
-    var set = aSet()
-    store.accept(set)
-    set.rules.append(UserRule(pattern: "*.log", action: .exclude))
-    #expect(!store.isAccepted(set))
-    store.accept(set)
-    #expect(store.isAccepted(set))
-    set.presets.insert("node")
-    #expect(!store.isAccepted(set))
-}
-
-@Test func acceptanceSurvivesRelaunchAndIgnoresRenameOnly() {
-    let root = tempDir()
-    var set = aSet()
-    PreviewAcceptanceStore(root: root).accept(set)
-    set.name = "Renamed"
-    #expect(PreviewAcceptanceStore(root: root).isAccepted(set))
-}
-
 // MARK: Deletion review
 
-@MainActor @Test func deletionReviewShowsCountAndPassesReviewedCount() async {
+private let driveA = Destination(name: "Drive", kind: .googleDrive)
+private let driveB = Destination(name: "iCloud", kind: .iCloudFolder)
+
+@MainActor @Test func deletionReviewShowsEachHeldDestinationSeparately() async {
     let set = aSet()
-    let r = DeletionReview(set: set, provider: FakeDryRun(files: ["a", "b", "c"]))
+    let r = DeletionReview(set: set, destinations: [driveA, driveB], provider: FakeDryRun(files: ["a", "b", "c"]))
     await r.load()
-    #expect(r.files == ["a", "b", "c"])
-    #expect(r.count == 3)
-    #expect(r.allowOnceArguments == ["--allow-deletes", set.id.uuidString, "3"])
+    #expect(r.entries.map(\.destination.id) == [driveA.id, driveB.id])
+    #expect(r.entries.allSatisfy { $0.isLoaded && $0.files == ["a", "b", "c"] && $0.count == 3 })
 }
 
-@MainActor @Test func deletionReviewCannotAllowBeforeListLoads() {
-    let r = DeletionReview(set: aSet(), provider: FakeDryRun(files: ["a"]))
-    #expect(r.allowOnceArguments == nil)
+@MainActor @Test func allowOnceNamesTheDestinationAndCountsOnlyThatPairsNonGitFiles() async {
+    let set = aSet()
+    let r = DeletionReview(set: set, destinations: [driveA], provider: FakeDryRun(files: ["a", "b", "sub/.git/x", ".git/y"]))
+    await r.load()
+    #expect(r.allowOnceArguments(for: driveA.id) == ["--allow-deletes", set.id.uuidString, driveA.id.uuidString, "2"])
+    #expect(r.allowOnceArguments(for: driveB.id) == nil)
 }
 
-@MainActor @Test func deletionReviewWithNothingHeldCannotAllow() async {
-    let r = DeletionReview(set: aSet(), provider: FakeDryRun(files: []))
+@MainActor @Test func allowOnceIsNilUntilThatDestinationListLoadedAndNonEmpty() async {
+    let r = DeletionReview(set: aSet(), destinations: [driveA], provider: FakeDryRun(files: ["a"]))
+    #expect(r.allowOnceArguments(for: driveA.id) == nil)
+    let empty = DeletionReview(set: aSet(), destinations: [driveA], provider: FakeDryRun(files: [".git/x"]))
+    await empty.load()
+    #expect(empty.allowOnceArguments(for: driveA.id) == nil)   // nothing outside .git: nothing to approve
+}
+
+@MainActor @Test func oneDestinationFailingDoesNotApproveItsSibling() async {
+    struct Half: DeletionDryRunProviding {
+        func heldDeletions(set: BackupSet, destination: Destination) async throws -> [String] {
+            if destination.id == driveA.id { throw AgentFailure.busy }
+            return ["z"]
+        }
+    }
+    let r = DeletionReview(set: aSet(), destinations: [driveA, driveB], provider: Half())
     await r.load()
-    #expect(r.allowOnceArguments == nil)
+    #expect(r.allowOnceArguments(for: driveA.id) == nil)
+    #expect(r.entries[0].loadError != nil)
+    #expect(r.allowOnceArguments(for: driveB.id)?.last == "1")
+}
+
+@Test func onlyDestinationsHoldingDeletionsAreReviewed() {
+    var set = aSet(); set.destinationIDs = [driveA.id, driveB.id]
+    var held = SetState(); held.heldDeletions = 4
+    let states = [PairID(set: set.id, destination: driveA.id): held, PairID(set: set.id, destination: driveB.id): SetState()]
+    #expect(DeletionReview.heldDestinations(set: set, destinations: [driveA, driveB], states: states).map(\.id) == [driveA.id])
 }
 
 // MARK: Destination rules

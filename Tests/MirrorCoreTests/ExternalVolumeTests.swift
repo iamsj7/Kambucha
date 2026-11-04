@@ -30,6 +30,33 @@ private func has(_ a: [String], _ f: String, _ v: String) -> Bool {
         #expect(DestinationProfile.profile(for: Destination(name: "x", kind: .externalDrive)).encrypted == false)
     }
 
+    @Test func aDriveGetsOneTryPerRunAndOthersKeepTheirRetries() {
+        #expect(has(args(fs: "apfs"), "--retries", "1"))
+        #expect(has(args(fs: "exfat"), "--retries", "1"))
+        #expect(!args(fs: "apfs").contains("--retries-sleep"))   // rclone sleeps after its last try too
+        let u = URL(fileURLWithPath: "/tmp/x")
+        let iCloud = SyncRequest(source: u, destination: "/d", backupDir: "/b", filterFile: u, logFile: u, mode: .copyOnly,
+                                 profile: .profile(for: Destination(name: "i", kind: .iCloudFolder)),
+                                 context: RcloneContext(configPath: "/dev/null", environment: [:]))
+        #expect(has(RcloneCommand.arguments(iCloud), "--retries", "3"))
+    }
+
+    @Test func aDrivesRootComesOnlyThroughTheGuard() throws {
+        let e = try Env()
+        let vol = volume("AAAA", at: e.mount)
+        let set = BackupSet(name: "A", source: e.src)
+        let dest = Destination(name: "SSD", kind: .externalDrive, volumeUUID: "AAAA")
+        let g = PathGuard.forVolume(vol, iCloudDrive: e.icloud)
+        let root = try g.validateRun(set, destination: dest, marker: RootMarker(sets: [set.id: "A"]), sampleFileCount: 1,
+                                     state: SetState(), volume: vol)
+        #expect(root.url == g.backupRoot)
+        #expect(throws: GuardFailure.wrongDrive) { try g.driveRoot(dest, volume: nil) }
+        #expect(throws: GuardFailure.wrongDrive) { try g.driveRoot(dest, volume: volume("BBBB", at: e.mount)) }
+        var inside = vol; inside.looksInternal = true
+        #expect(throws: GuardFailure.internalDiskNotConfirmed) { try g.driveRoot(dest, volume: inside) }
+        #expect(try g.driveRoot(dest, volume: vol).url == g.backupRoot)
+    }
+
     @Test func matchesByUUIDNotName() {
         let d = Destination(name: "SSD", kind: .externalDrive, volumeUUID: "AAAA")
         #expect(ExternalVolume.find(d, in: [volume("BBBB", name: "SSD")]) == nil)
@@ -276,6 +303,56 @@ private func has(_ a: [String], _ f: String, _ v: String) -> Bool {
     }
 
     // MARK: Full pass once per connection
+
+    @Test func aReconnectionOnTheSameDiskNodeIsANewMountID() {
+        // Measured on a disk image: the device node and fsid both repeat after detach and attach.
+        let first = SystemVolumes.mountID(device: "/dev/disk10s1", fsid: "16777251-26", media: 4_295_001_000)
+        let second = SystemVolumes.mountID(device: "/dev/disk10s1", fsid: "16777251-26", media: 4_295_002_000)
+        #expect(first != second)
+        #expect(first == SystemVolumes.mountID(device: "/dev/disk10s1", fsid: "16777251-26", media: 4_295_001_000))
+    }
+
+    @Test func noMediaIDStillGivesAnIdentity() {
+        #expect(SystemVolumes.mountID(device: "/dev/disk10s1", fsid: "1-2", media: nil) == "/dev/disk10s1@1-2")
+    }
+
+    @Test(arguments: [("/dev/disk10s1", "disk10s1"), ("disk10s1", "disk10s1"), ("/dev/rdisk4s2", "disk4s2"),
+                      ("exfat://disk5s1/My Drive", "disk5s1"), ("msdos://disk6s1/disk9s9", "disk6s1"), ("//dev/disk7", "disk7")])
+    func theDiskIsFoundInAnyMountSourceForm(source: String, disk: String) {
+        #expect(SystemVolumes.bsdName(source) == disk)
+    }
+
+    @Test(arguments: ["map auto_home", "devfs", "//user@server/share", "", "exfat://mydisk/x"])
+    func aSourceNamingNoDiskGivesNoName(source: String) {
+        #expect(SystemVolumes.bsdName(source) == nil)
+    }
+
+    /// The reason for all of it: on exFAT the mount source isn't a `/dev/` path, so a reconnection went unnoticed.
+    @Test func aReconnectedRealExFATDriveIsANewConnection() throws {
+        let dir = FileManager.default.temporaryDirectory.appendingPathComponent("mirror-exfat-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let image = dir.appendingPathComponent("t.dmg")
+        func hdiutil(_ args: [String]) throws -> String {
+            let p = Process(); p.executableURL = URL(fileURLWithPath: "/usr/bin/hdiutil"); p.arguments = args
+            let out = Pipe(); p.standardOutput = out; p.standardError = Pipe()
+            try p.run(); let data = out.fileHandleForReading.readDataToEndOfFile(); p.waitUntilExit()
+            return String(decoding: data, as: UTF8.self)
+        }
+        _ = try hdiutil(["create", "-size", "20m", "-fs", "ExFAT", "-volname", "MIRROREX", image.path])
+        func attached() throws -> VolumeInfo? {
+            let attach = try hdiutil(["attach", image.path, "-nobrowse", "-plist"])
+            defer { if let dev = Self.devNode(attach) { _ = try? hdiutil(["detach", "-force", dev]) } }
+            return SystemVolumes(includeHidden: true).mounted().first { $0.name == "MIRROREX" }
+        }
+        let first = try #require(try attached())
+        let second = try #require(try attached())
+        #expect(first.fileSystem == "exfat")
+        #expect(first.uuid == second.uuid)
+        #expect(first.mountID.contains("#"), "mount ID: \(first.mountID)")
+        #expect(first.mountID != second.mountID)
+        #expect(ExternalVolume.needsFullPass(lastSeenMountID: first.mountID, volume: second, lastFullPass: Date(), now: Date()))
+    }
 
     @Test func fullPassOnlyWhenTheMountChanges() throws {
         let now = Date(timeIntervalSince1970: 1_800_000_000)

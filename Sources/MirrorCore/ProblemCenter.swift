@@ -3,6 +3,7 @@ import Foundation
 public enum Problem: String, Codable, CaseIterable, Sendable {
     case verificationFailed, deletionsHeld, destinationMissing, permissionLost, iCloudUnavailable
     case repeatedFailures, uploadStalled, fileRefused, signInExpired, drillFailed, drillDue
+    case agentFailed
     case driveOverdue, driveFull
 
     /// Plain, specific lead-in. Never includes file contents or secrets.
@@ -19,6 +20,7 @@ public enum Problem: String, Codable, CaseIterable, Sendable {
         case .signInExpired: "Sign-in expired"
         case .drillFailed: "Restore test failed"
         case .drillDue: "Restore test is due"
+        case .agentFailed: "Mirror could not run"
         case .driveOverdue: "Backup drive not connected"
         case .driveFull: "Backup drive is full"
         }
@@ -35,6 +37,12 @@ public enum NotificationText {
 public protocol Notifying: Sendable {
     /// Returns true only if the notification was handed to the system. False means "try again later".
     func post(_ problem: Problem, pair: PairID, setName: String, detail: String) async -> Bool
+    /// A drive finished its backup. Not a problem, so nothing is stored or retried.
+    func postSafeToEject(volumeName: String, volumeUUID: String) async -> Bool
+}
+
+public extension Notifying {
+    func postSafeToEject(volumeName: String, volumeUUID: String) async -> Bool { false }
 }
 
 public struct ActiveProblem: Codable, Equatable, Sendable {
@@ -69,8 +77,37 @@ public struct ProblemCenter: Sendable {
     private let root: URL
     private let url: URL
     private let notifier: any Notifying
-    public init(root: URL, notifier: any Notifying) {
+    private let postTimeout: Duration
+    public static let defaultPostTimeout: Duration = .seconds(10)
+    public init(root: URL, notifier: any Notifying, postTimeout: Duration = ProblemCenter.defaultPostTimeout) {
         self.root = root; url = root.appendingPathComponent("problems.json"); self.notifier = notifier
+        self.postTimeout = postTimeout
+    }
+
+    /// Saves a problem without notifying, for moments a notification mustn't delay. `raise` or the
+    /// next run's `retryPending` delivers it, so a kill right after this loses nothing.
+    public func store(_ problem: Problem, pair: PairID, setName: String, detail: String) throws {
+        try locked {
+            var all = try load()
+            guard !all.contains(where: { $0.problem == problem && $0.pair == pair }) else { return }
+            all.append(ActiveProblem(problem: problem, pair: pair, setName: setName, detail: detail, since: Date()))
+            try save(all)
+        }
+    }
+
+    /// News an open problem's first alert couldn't carry: its detail changes and the next `raise` or
+    /// `retryPending` posts it again. With nothing open, it's a new problem.
+    public func restate(_ problem: Problem, pair: PairID, setName: String, detail: String) throws {
+        try locked {
+            var all = try load()
+            if let i = all.firstIndex(where: { $0.problem == problem && $0.pair == pair }) {
+                all[i].detail = detail
+                all[i].notified = false
+            } else {
+                all.append(ActiveProblem(problem: problem, pair: pair, setName: setName, detail: detail, since: Date()))
+            }
+            try save(all)
+        }
     }
 
     public func raise(_ problem: Problem, pair: PairID, setName: String, detail: String) async throws {
@@ -85,8 +122,7 @@ public struct ProblemCenter: Sendable {
         }
         guard toPost else { return }
         let stored = try active().first { $0.problem == problem && $0.pair == pair }
-        let ok = await notifier.post(problem, pair: pair, setName: stored?.setName ?? setName,
-                                     detail: stored?.detail ?? detail)
+        let ok = await deliver(problem, pair: pair, setName: stored?.setName ?? setName, detail: stored?.detail ?? detail)
         // Duplicate posts are harmless: the notification identifier is stable, so a repeat replaces the first.
         if ok, let since = stored?.since { try markNotified(problem, pair, since: since) }
     }
@@ -94,9 +130,32 @@ public struct ProblemCenter: Sendable {
     /// Retries every problem whose notification was not delivered. Call once per run.
     public func retryPending() async throws {
         for p in try active() where !p.notified {
-            if await notifier.post(p.problem, pair: p.pair, setName: p.setName, detail: p.detail) {
+            if await deliver(p.problem, pair: p.pair, setName: p.setName, detail: p.detail) {
                 try markNotified(p.problem, p.pair, since: p.since)
             }
+        }
+    }
+
+    /// A notifier that never answers counts as not delivered, so it's retried. It can't be cancelled
+    /// (a permission prompt, say), so it's left behind, and ends with the process.
+    private func deliver(_ problem: Problem, pair: PairID, setName: String, detail: String) async -> Bool {
+        await bounded { await $0.post(problem, pair: pair, setName: setName, detail: detail) }
+    }
+
+    /// Best effort, under the same time limit, so it can never hold the agent open.
+    public func announceSafeToEject(volumeName: String, volumeUUID: String) async {
+        _ = await bounded { await $0.postSafeToEject(volumeName: volumeName, volumeUUID: volumeUUID) }
+    }
+
+    private func bounded(_ post: @escaping @Sendable (any Notifying) async -> Bool) async -> Bool {
+        let (notifier, timeout) = (self.notifier, postTimeout)
+        let answer = FirstAnswer()
+        return await withCheckedContinuation { continuation in
+            answer.attach(continuation)
+            Task { answer.give(await post(notifier)) }
+            // A dispatch timer, not a task: a timeout mustn't wait for the pool that may be what's stuck.
+            let seconds = Double(timeout.components.seconds) + Double(timeout.components.attoseconds) / 1e18
+            DispatchQueue.global().asyncAfter(deadline: .now() + seconds) { answer.give(false) }
         }
     }
 
@@ -147,5 +206,19 @@ public struct ProblemCenter: Sendable {
         e.dateEncodingStrategy = .secondsSince1970  // full precision, so `since` identifies an occurrence
         e.outputFormatting = [.prettyPrinted, .sortedKeys]
         try e.encode(list).write(to: url, options: .atomic)
+    }
+}
+
+/// Resumes one continuation with whichever answer comes first.
+private final class FirstAnswer: @unchecked Sendable {
+    private let lock = NSLock()
+    private var continuation: CheckedContinuation<Bool, Never>?
+    func attach(_ c: CheckedContinuation<Bool, Never>) { lock.withLock { continuation = c } }
+    func give(_ value: Bool) {
+        let waiting: CheckedContinuation<Bool, Never>? = lock.withLock {
+            defer { continuation = nil }
+            return continuation
+        }
+        waiting?.resume(returning: value)
     }
 }

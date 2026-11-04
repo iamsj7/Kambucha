@@ -23,7 +23,7 @@ final class ArchiveSandbox {
 }
 
 let plainContext = RcloneContext(configPath: "/dev/null", environment: [:])
-func realRunner() -> RcloneRunner { RcloneRunner(binary: vendoredRclone) }
+func realRunner() -> RcloneRunner { RcloneRunner(binary: vendoredRclone, helper: AnyHelper()) }
 func makeSet(_ name: String = "Projects", source: URL = URL(fileURLWithPath: "/tmp/none"), days: Int = 30) -> BackupSet {
     var s = BackupSet(name: name, source: source); s.archiveDays = days; return s
 }

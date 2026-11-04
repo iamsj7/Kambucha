@@ -42,20 +42,7 @@ enum DebugViewSnapshots {
     }
 
     private static func write<V: View>(_ view: V, size: CGSize, name: String, to dir: URL) {
-        for (label, appearance) in [("light", NSAppearance.Name.aqua), ("dark", .darkAqua)] {
-            let host = NSHostingView(rootView: view.background(Color(nsColor: .windowBackgroundColor)))
-            host.appearance = NSAppearance(named: appearance)
-            let window = NSWindow(contentRect: NSRect(origin: .zero, size: size), styleMask: [.titled, .resizable], backing: .buffered, defer: false)
-            window.appearance = host.appearance
-            window.contentView = host
-            host.frame = NSRect(origin: .zero, size: size)
-            window.layoutIfNeeded(); host.layoutSubtreeIfNeeded()
-            settle(0.6)
-            host.layoutSubtreeIfNeeded()
-            guard let rep = host.bitmapImageRepForCachingDisplay(in: host.bounds) else { continue }
-            host.cacheDisplay(in: host.bounds, to: rep)
-            try? rep.representation(using: .png, properties: [:])?.write(to: dir.appendingPathComponent("\(name)-\(label).png"))
-        }
+        DebugRender.render(view, size: size, name: name, to: dir, settle: 0.6)
     }
 
     static func snapshotAll(to dir: URL) {

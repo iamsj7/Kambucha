@@ -1,4 +1,5 @@
 import SwiftUI
+import AppKit
 import MirrorCore
 
 /// A review item with the set it belongs to.
@@ -27,10 +28,16 @@ extension AppModel {
     }
 
     func resolve(_ entry: ReviewEntry, include: Bool) {
-        guard var s = set(entry.setID) else { return }
-        s.rules.append(UserRule(pattern: OverviewRules.pattern(for: entry.item), action: include ? .include : .exclude))
+        guard var s = set(entry.setID), let rule = ReviewActions.rule(for: entry.item, include: include) else { return }
+        // The owner just decided this here, so a set that was accepted stays accepted. A set that never was stays unaccepted.
+        let wasAccepted = s.isPreviewAccepted
+        s.rules.append(rule)
+        if wasAccepted { s.acceptPreview() }
         save(set: s)
     }
+}
+
+extension AppModel {
 }
 
 enum OverviewRules {

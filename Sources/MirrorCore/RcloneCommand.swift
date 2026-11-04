@@ -20,10 +20,14 @@ public struct DestinationProfile: Equatable, Sendable {
     /// True on exFAT. macOS stores extended attributes there as `._*` AppleDouble files, which sync would
     /// otherwise see as extras and delete, tripping `--max-delete`. Filtered on both sides, ahead of the set's filter.
     public var excludeAppleDouble: Bool
+    /// rclone's own retries. A drive gets one try: a retry after an unplug would `mkdir` the vanished mount
+    /// path, and only the coordinator can confirm the volume first.
+    public var retries: Int
 
     public init(kind: DestinationKind, encrypted: Bool, modifyWindow: String, extraFlags: [String],
                 maxDuration: String?, fullPassInterval: TimeInterval, linksAsFiles: Bool = false,
-                trackRenames: Bool = true, excludeAppleDouble: Bool = false) {
+                trackRenames: Bool = true, excludeAppleDouble: Bool = false, retries: Int = 3) {
+        self.retries = retries
         self.trackRenames = trackRenames; self.excludeAppleDouble = excludeAppleDouble
         self.kind = kind; self.encrypted = encrypted; self.modifyWindow = modifyWindow
         self.extraFlags = extraFlags; self.maxDuration = maxDuration; self.fullPassInterval = fullPassInterval
@@ -53,7 +57,7 @@ public struct DestinationProfile: Equatable, Sendable {
             return DestinationProfile(kind: .externalDrive, encrypted: false, modifyWindow: symlinks ? "1ms" : "2s",
                                       extraFlags: [], maxDuration: nil, fullPassInterval: 7 * day,
                                       linksAsFiles: !symlinks, trackRenames: symlinks,
-                                      excludeAppleDouble: !symlinks)
+                                      excludeAppleDouble: !symlinks, retries: 1)
         }
     }
 }
@@ -77,11 +81,14 @@ public struct SyncRequest: Equatable, Sendable {
     public var profile: DestinationProfile
     public var context: RcloneContext
     public var dryRun = false
+    /// A run the owner asked to hurry. Scheduled runs never set it.
+    public var fullSpeed = false
     public init(source: URL, destination: String, backupDir: String, filterFile: URL, logFile: URL,
-                mode: SyncMode, profile: DestinationProfile, context: RcloneContext, dryRun: Bool = false) {
+                mode: SyncMode, profile: DestinationProfile, context: RcloneContext, dryRun: Bool = false,
+                fullSpeed: Bool = false) {
         self.source = source; self.destination = destination; self.backupDir = backupDir
         self.filterFile = filterFile; self.logFile = logFile; self.mode = mode
-        self.profile = profile; self.context = context; self.dryRun = dryRun
+        self.profile = profile; self.context = context; self.dryRun = dryRun; self.fullSpeed = fullSpeed
     }
 }
 
@@ -135,8 +142,10 @@ public enum RcloneCommand {
         // Filter rules are first match wins, so this must come before the set's `+ **`.
         if r.profile.excludeAppleDouble { a += ["--filter", "- ._*"] }
         a += ["--backup-dir", r.backupDir, "--filter-from", r.filterFile.path]
-        a += ["--checkers", "2", "--transfers", "2"]
-        a += ["--retries", "3", "--retries-sleep", "30s", "--low-level-retries", "10"]
+        a += ["--checkers", r.fullSpeed ? "8" : "2", "--transfers", r.fullSpeed ? "4" : "2"]
+        a += ["--retries", String(r.profile.retries)]
+        if r.profile.retries > 1 { a += ["--retries-sleep", "30s"] }   // rclone sleeps after its last try too
+        a += ["--low-level-retries", "10"]
         a += r.profile.extraFlags
         if let d = r.profile.maxDuration { a += ["--max-duration", d, "--cutoff-mode", "soft"] }
         a += common(logFile: r.logFile, context: r.context)
@@ -149,8 +158,9 @@ public enum RcloneCommand {
         if !r.linksAsFiles { a.append("--links") }
         if r.oneWay { a.append("--one-way") }
         if r.sizeOnly { a.append("--size-only") }
-        // rclone doesn't combine --files-from with --filter-from.
-        if let list = r.filesFrom { a += ["--files-from", list.path] }
+        // rclone doesn't combine a file list with --filter-from. Raw, because the plain form treats `#`
+        // as a comment and trims spaces, so such a name would go unchecked and still pass (measured).
+        if let list = r.filesFrom { a += ["--files-from-raw", list.path] }
         else {
             // Excluded even with no filter file, as the whole-tree Deep check has none.
             if r.excludeAppleDouble { a += ["--filter", "- ._*"] }

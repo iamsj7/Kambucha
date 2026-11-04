@@ -8,6 +8,14 @@ public struct LogSummary: Equatable, Sendable {
     public var renamed: [String] = []
     public var errors: [String] = []
     public var differences = 0
+    /// Files a check found identical. Absent from rclone's log when there are none.
+    public var matching = 0
+    /// What a dry run would copy.
+    public var planned: [String] = []
+    /// What a dry run would copy, in bytes.
+    public var plannedBytes: Int64 = 0
+    /// Paths named by error lines. For a check, the files that differ.
+    public var flagged: [String] = []
     public var bytes: Int64 = 0
     public init() {}
 }
@@ -89,10 +97,17 @@ public enum RcloneLogParser {
             if let b = line.statsBytes { statsBytes = b }
             guard let msg = line.msg else { continue }
             let object = line.object ?? ""
-            if line.isError { s.errors.append(object.isEmpty ? msg : "\(object): \(msg)") }
+            if line.isError {
+                s.errors.append(object.isEmpty ? msg : "\(object): \(msg)")
+                if !object.isEmpty { s.flagged.append(object) }
+            }
             if let n = differenceCount(msg) { s.differences = n }
+            if let n = matchingCount(msg) { s.matching = n }
             guard !object.isEmpty else { continue }
-            if msg.hasPrefix("Copied") {
+            if msg.hasPrefix("Skipped copy") {
+                s.planned.append(object)   // --dry-run
+                s.plannedBytes += line.size ?? 0
+            } else if msg.hasPrefix("Copied") {
                 s.copied.append(object); sizeSum += line.size ?? 0
             } else if msg == "Moved into backup dir" {
                 s.deleted.append(object); appendUnique(&s.archived, object)
@@ -119,6 +134,10 @@ public enum RcloneLogParser {
         return n
     }
 
+    private static func matchingCount(_ msg: String) -> Int? {
+        msg.hasSuffix(" matching files") ? Int(msg.dropLast(" matching files".count)) : nil
+    }
+
     /// Exit-code classification only. 10 is rclone's "transfer limit reached", which `--max-duration` triggers.
     public static func outcome(exitCode: Int32) -> RcloneResult.Outcome {
         switch exitCode {
@@ -137,6 +156,20 @@ public enum RcloneLogParser {
         "no refresh token found",                         // rclone oauthutil
         "oauth2: token expired and refresh token is not set",  // golang.org/x/oauth2
     ]
+
+    /// Google's daily upload limit, which `--drive-stop-on-upload-limit` makes fatal. Not a failure:
+    /// it lifts within a day, so it ends a run the way `--max-duration` does, and the next one resumes.
+    private static func isUploadLimit(_ msg: String, removing object: String?) -> Bool {
+        var text = msg
+        if let object, !object.isEmpty { text = text.replacingOccurrences(of: object, with: "") }
+        return text.contains("userRateLimitExceeded") || text.contains("User rate limit exceeded")
+    }
+
+    /// Rclone's own wrap-up, which repeats failures rather than adding one.
+    private static func isRunSummary(_ line: Line) -> Bool {
+        guard line.object?.isEmpty ?? true, let msg = line.msg else { return false }
+        return ["Attempt ", "Fatal error received", "Can't retry", "Not deleting", "Failed to sync"].contains(where: msg.hasPrefix)
+    }
 
     private static func isAuthError(_ msg: String, removing object: String?) -> Bool {
         var text = msg
@@ -158,6 +191,26 @@ public enum RcloneLogParser {
         let errorLines = lines(log).filter(\.isError)
         if errorLines.contains(where: { $0.msg == "Got fatal error on delete: --max-delete threshold reached" }) { return .safetyStop }
         if errorLines.contains(where: { line in line.msg.map { isAuthError($0, removing: line.object) } ?? false }) { return .authExpired }
+        // Only when the limit is all that went wrong: a real failure beside it must still count.
+        func limited(_ line: Line) -> Bool { line.msg.map { isUploadLimit($0, removing: line.object) } ?? false }
+        if errorLines.contains(where: limited), errorLines.allSatisfy({ limited($0) || isRunSummary($0) }) { return .partial }
         return outcome(exitCode: exitCode)
+    }
+
+    private static let scrubbers: [(NSRegularExpression, String)] = [
+        (#"(https?://[^\s"'?]+)\?[^\s"']*"#, "$1"),
+        (#"(?i)\b(bearer|basic)\s+[^\s"']+"#, "$1 [redacted]"),
+        (#"(?i)"?\b(access_token|refresh_token|id_token|token|client_secret|client_id|password|passphrase|secret|api[_-]?key|key|code)"?\s*[:=]\s*("[^"]*"|[^\s,&}"']+)"#, "$1=[redacted]"),
+        (#"[A-Za-z0-9_+=-]{40,}"#, "[redacted]"),
+    ].compactMap { pattern, template in (try? NSRegularExpression(pattern: pattern)).map { ($0, template) } }
+
+    /// For anything kept from rclone's output. Its errors can quote URLs and token responses, and
+    /// run records are read by the UI and last 30 days. Paths stay, as they say what failed.
+    public static func scrub(_ text: String) -> String {
+        var out = text
+        for (regex, template) in scrubbers {
+            out = regex.stringByReplacingMatches(in: out, range: NSRange(out.startIndex..., in: out), withTemplate: template)
+        }
+        return String(out.prefix(500))
     }
 }

@@ -9,15 +9,12 @@ struct DestinationDetailView: View {
     @State private var message: String?
     @State private var showingKit = false
     @State private var pasting = false
+    @State private var confirmingInternal = false
 
     private var status: DestinationStatus { model.destinationStatus(destination) }
     private var usedBy: [BackupSet] { model.sets.filter { $0.destinationIDs.contains(destination.id) } }
     private var signsIn: Bool { destination.kind == .googleDrive || destination.kind == .oneDrive }
-    private var connected: VolumeInfo? { ExternalVolume.find(destination, in: model.services.volumes.mounted()) }
-    private var hasRun: Bool {
-        model.sets.contains { $0.destinationIDs.contains(destination.id) &&
-            model.states[PairID(set: $0.id, destination: destination.id)]?.lastFinished != nil }
-    }
+    private var connected: VolumeInfo? { ExternalVolume.find(destination, in: model.volumeCache.volumes) }
 
     var body: some View {
         Form {
@@ -36,11 +33,31 @@ struct DestinationDetailView: View {
                 Text("Encryption is chosen when a destination is created and can't be changed. To change it, add a new destination.")
             }
 
-            if destination.kind == .externalDrive, let volume = connected, hasRun {
+            if ExternalDriveSetup.needsConfirmation(destination, volume: connected) {
+                Section {
+                    Label(ExternalDriveSetup.internalConfirmationTitle, systemImage: "internaldrive")
+                    Text(ExternalDriveSetup.internalConfirmationMessage).foregroundStyle(.secondary)
+                    Button("Use This Disk…") { confirmingInternal = true }
+                } header: { Text("Confirm This Disk") } footer: {
+                    Text("Backups to this drive wait until you confirm.")
+                }
+            }
+
+            if destination.kind == .externalDrive, let volume = connected {
                 Section("Drive") {
-                    Button("Eject \"\(volume.name)\"") { eject(volume) }
+                    Button("Eject \"\(volume.name)\"") { Task { await model.eject.eject(volume) } }
+                        .disabled(model.eject.isEjecting || model.isBackupActive)
                         .accessibilityHint("Safely unmounts the drive")
-                    if let message { Label(message, systemImage: "exclamationmark.triangle") }
+                    if model.isBackupActive {
+                        Text("A backup is running. You can eject when it finishes.").font(.caption).foregroundStyle(.secondary)
+                    }
+                    if case .failed(let text) = model.eject.phase {
+                        HStack {
+                            Label(text, systemImage: "exclamationmark.triangle")
+                            Spacer()
+                            Button("Dismiss") { model.eject.dismiss() }.buttonStyle(.borderless)
+                        }
+                    }
                 }
             }
 
@@ -75,12 +92,10 @@ struct DestinationDetailView: View {
         .sheet(isPresented: $pasting) {
             RecoveryKitPasteSheet(model: model, destination: destination) { message = nil }
         }
-    }
-
-    private func eject(_ volume: VolumeInfo) {
-        message = nil
-        do { try NSWorkspace.shared.unmountAndEjectDevice(at: volume.mountPoint) }
-        catch { message = "Couldn't eject \"\(volume.name)\". Something may still be using it." }
+        .confirmationDialog(ExternalDriveSetup.internalConfirmationTitle, isPresented: $confirmingInternal, titleVisibility: .visible) {
+            Button("Use This Disk") { model.save(destination: ExternalDriveSetup.confirmed(destination)) }
+            Button("Cancel", role: .cancel) {}
+        } message: { Text(ExternalDriveSetup.internalConfirmationMessage) }
     }
 
     private func reconnect() async {

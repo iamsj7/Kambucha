@@ -3,7 +3,13 @@ import MirrorCore
 
 /// Records whether this launchd-started agent can read iCloud Drive and ~/Documents, to
 /// `<support>/access.json`. Read-only apart from that file, and touches no Keychain item.
-/// Not yet called: main.swift must call it at the start of every launchd run (see the report).
 func recordAccess() {
-    AgentAccess.writeReport(support: MirrorPaths.support)
+    var support = MirrorPaths.support
+    #if MIRROR_PROBES
+    // Proof builds only: a throwaway run must leave the real support folder alone.
+    if let home = ProcessInfo.processInfo.environment["MIRROR_PROOF_HOME"] {
+        support = MirrorPaths.support(home: URL(fileURLWithPath: home))
+    }
+    #endif
+    AgentAccess.writeReport(support: support)
 }

@@ -58,6 +58,31 @@ private struct Env {
 }
 
 @Suite struct VerifierTests {
+    /// Eviction can happen between two reads, so one read decides each file.
+    @Test func eachFileIsHashedOrSkippedNeverBothOrNeither() async throws {
+        let e = try Env(); defer { e.cleanup() }
+        final class Flip: @unchecked Sendable {
+            let lock = NSLock(); var reads = 0
+            func read() -> Bool { lock.withLock { reads += 1; return reads % 2 == 0 } }
+        }
+        let flip = Flip(), rclone = FakeRclone()
+        let v = Verifier(rclone: rclone, auditor: FakeAuditor(), isDataless: { _ in flip.read() })
+        let result = try await v.quick(source: e.src, destination: e.dst.path, profile: profile(.iCloudFolder), context: ctx(),
+                                       filter: e.filter, copied: ["a", "b", "c", "d"], oneWay: false, logDir: e.logs)
+        #expect(flip.reads == 4)
+        #expect(Set((rclone.lists.last ?? []) + result.skippedFreed) == ["a", "b", "c", "d"])
+    }
+
+    @Test func aLinkIsAuditedByItsNameInTheMirror() async throws {
+        let e = try Env(); defer { e.cleanup() }
+        let rclone = FakeRclone(), auditor = FakeAuditor()
+        let v = Verifier(rclone: rclone, auditor: auditor, isDataless: { _ in false })
+        _ = try await v.quick(source: e.src, destination: e.dst.path, profile: profile(.iCloudFolder), context: ctx(),
+                              filter: e.filter, copied: ["p/link.rclonelink"], oneWay: false, logDir: e.logs)
+        #expect(auditor.calls.first?.map(\.lastPathComponent) == ["link"])
+        #expect(rclone.lists.last == ["p/link.rclonelink"])   // the hash list keeps rclone's own name
+    }
+
     @Test func quickRunsSizeOnlyThenHashOfCopied() async throws {
         let e = try Env(); defer { e.cleanup() }
         try e.mirror(["a.txt", "d/b.txt"])
@@ -178,6 +203,20 @@ private struct Env {
         #expect(rc.checks.count == 2)
         #expect(rc.lists[1].sorted() == ["d/ok", "keep.txt"])
         #expect(rc.checks[1].filterFile == nil)
+    }
+
+    /// A list naming a link's mirror name matches nothing in rclone, so it would go unchecked and pass.
+    @Test func deepHashesALinkUnderRclonesNameAndAuditsItUnderItsOwn() async throws {
+        let e = try Env(); defer { e.cleanup() }
+        try e.mirror(["ok"])
+        try FileManager.default.createSymbolicLink(atPath: e.dst.appendingPathComponent("link").path, withDestinationPath: "ok")
+        let rc = FakeRclone(), auditor = FakeAuditor()
+        let v = Verifier(rclone: rc, auditor: auditor, isDataless: { _ in false })
+        let result = try await v.deep(source: e.src, destination: e.dst.path, profile: profile(.iCloudFolder), context: ctx(),
+                                      filter: e.filter, sampleFreed: 0, logDir: e.logs)
+        #expect(rc.lists[1].sorted() == ["link.rclonelink", "ok"])
+        #expect(result.hashedPaths == ["link.rclonelink", "ok"])
+        #expect(auditor.calls.flatMap { $0 }.map(\.lastPathComponent).sorted() == ["link", "ok"])
     }
 
     @Test func deepSamplesAtMostRequested() async throws {

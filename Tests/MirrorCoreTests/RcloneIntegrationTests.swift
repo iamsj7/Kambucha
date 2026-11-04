@@ -47,7 +47,7 @@ private final class Sandbox {
 }
 
 @Suite struct RcloneIntegrationTests {
-    let runner = RcloneRunner(binary: rcloneBinary)
+    let runner = RcloneRunner.localOnly(binary: rcloneBinary)
 
     @Test func addModifyDelete() async throws {
         let sb = try Sandbox()
@@ -159,6 +159,22 @@ private final class Sandbox {
         #expect(sb.exists(sb.dst, "a.txt"))
     }
 
+    /// Same length, so the size check can't see it. Only a hash under rclone's name for the link can.
+    @Test func aDeepCheckFindsALinkRetargetedToTheSameLength() async throws {
+        let sb = try Sandbox()
+        try FileManager.default.createSymbolicLink(atPath: sb.src.appendingPathComponent("link").path, withDestinationPath: "aaaa")
+        try FileManager.default.createSymbolicLink(atPath: sb.dst.appendingPathComponent("link").path, withDestinationPath: "bbbb")
+        struct Everything: UploadAuditing { func audit(_: [URL]) -> AuditResult { AuditResult(pending: [], refused: []) } }
+        let profile = DestinationProfile.profile(for: Destination(name: "i", kind: .iCloudFolder))
+        let logs = sb.root.appendingPathComponent("logs")
+        try FileManager.default.createDirectory(at: logs, withIntermediateDirectories: true)
+        let result = try await Verifier(rclone: runner, auditor: Everything()).deep(
+            source: sb.src, destination: sb.dst.path, profile: profile, context: RcloneContext(configPath: "/dev/null", environment: [:]),
+            filter: sb.filter, sampleFreed: 0, logDir: logs)
+        #expect(result.differences == 1)
+        #expect(result.differingPaths == ["link.rclonelink"])
+    }
+
     @Test func symlinksRoundTrip() async throws {
         let sb = try Sandbox()
         try sb.write("target.txt", "payload")
@@ -233,7 +249,7 @@ private final class Sandbox {
         // Ignores SIGTERM, so only SIGKILL stops it.
         let fake = try script("trap '' TERM\nexec sleep 60")
         let sb = try Sandbox()
-        let runner = RcloneRunner(binary: fake, killGrace: 0.5)
+        let runner = RcloneRunner.localOnly(binary: fake, killGrace: 0.5)
         let req = sb.request()
         let started = Date()
         let task = Task { try await runner.sync(req) }
@@ -245,7 +261,7 @@ private final class Sandbox {
 
     @Test func launchFailureThrowsInsteadOfHanging() async throws {
         let sb = try Sandbox()
-        let runner = RcloneRunner(binary: URL(fileURLWithPath: "/nonexistent/rclone"))
+        let runner = RcloneRunner.localOnly(binary: URL(fileURLWithPath: "/nonexistent/rclone"))
         await #expect(throws: (any Error).self) { try await runner.sync(sb.request()) }
     }
 
@@ -253,7 +269,7 @@ private final class Sandbox {
         let sb = try Sandbox()
         try sb.write("a.txt", "hello world")
         let box = StatsBox()
-        let live = RcloneRunner(binary: rcloneBinary) { box.add($0) }
+        let live = RcloneRunner.localOnly(binary: rcloneBinary) { box.add($0) }
         let result = try await live.sync(sb.request())
         #expect(result.outcome == .success)
         let last = try #require(box.all.last)
@@ -264,7 +280,7 @@ private final class Sandbox {
         let sb = try Sandbox()
         try sb.write("a.txt", "hello world")
         let box = StatsBox()
-        let live = RcloneRunner(binary: rcloneBinary) { box.add($0) }
+        let live = RcloneRunner.localOnly(binary: rcloneBinary) { box.add($0) }
         _ = try await live.sync(sb.request())
         let atReturn = box.all.count
         try await Task.sleep(for: .milliseconds(1500))
@@ -276,7 +292,7 @@ private final class Sandbox {
         let sb = try Sandbox()
         for i in 0..<200 { try sb.write("f\(i).txt", String(repeating: "x", count: 1000)) }
         let box = StatsBox()
-        let live = RcloneRunner(binary: rcloneBinary) { box.add($0) }
+        let live = RcloneRunner.localOnly(binary: rcloneBinary) { box.add($0) }
         let req = sb.request()
         let t = Task { try await live.sync(req) }
         try await Task.sleep(for: .milliseconds(50))

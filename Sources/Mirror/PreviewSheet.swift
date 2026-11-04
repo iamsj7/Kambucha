@@ -62,6 +62,10 @@ struct PreviewSheet: View {
         if let error = controller.loadError {
             ContentUnavailableView("Preview Unavailable", systemImage: "exclamationmark.triangle", description: Text(error))
         } else if let r = controller.result {
+            ForEach(PreviewWarnings.appleDouble(set: controller.set, destinations: model.destinations,
+                                                volumes: model.volumeCache.volumes), id: \.self) {
+                Label($0, systemImage: "exclamationmark.triangle").font(.callout)
+            }
             HStack(spacing: 12) {
                 Total(title: "Backed up", value: r.includedBytes.formatted(.byteCount(style: .file)),
                       detail: "\(r.includedFiles.formatted()) files", symbol: "checkmark.circle")
