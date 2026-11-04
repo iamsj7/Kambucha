@@ -35,7 +35,7 @@ extension AppModel {
         if wasAccepted { s.acceptPreview() }
         save(set: s)
         // Nothing changed on disk, so the agent would otherwise leave this until the daily pass.
-        if include, wasAccepted, !isBackupActive { runNow(s.id) }
+        if include, wasAccepted { runSoon(s.id) }
     }
 }
 

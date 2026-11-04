@@ -88,6 +88,8 @@ final class AppModel {
     @ObservationIgnored let eject: EjectController
     /// Set when the owner chooses Review Deletions; the review window shows that set's held deletions.
     var reviewingSet: UUID?
+    /// Sets to run once the backup under way ends, as what it's doing was decided before the owner's latest choice.
+    private(set) var queuedRuns: [UUID] = []
     /// Why the review is still open, shown in it. Ends with the review.
     private(set) var reviewNotice: String?
     /// Sticky: cleared only by `dismissError()` or the next owner action. `refresh()` never touches it.
@@ -163,6 +165,18 @@ final class AppModel {
         sets = snap.sets; rows = snap.rows; status = snap.status; progress = snap.progress
         agentRunning = snap.running
         destinations = snap.destinations; states = snap.states
+        startQueuedRun()
+    }
+
+    /// Asks for a run of `set` now, or as soon as the one under way ends.
+    func runSoon(_ set: UUID) {
+        if isBackupActive { if !queuedRuns.contains(set) { queuedRuns.append(set) } } else { runNow(set) }
+    }
+
+    /// Every state load comes here, and the end of any run, launchd's included, changes the folders being watched.
+    private func startQueuedRun() {
+        guard !queuedRuns.isEmpty, !isBackupActive, runQueue.waiting.isEmpty, !AgentLockProbe.isHeld(support: support) else { return }
+        runNow(queuedRuns.removeFirst())
     }
 
     // MARK: Panel visibility and polling

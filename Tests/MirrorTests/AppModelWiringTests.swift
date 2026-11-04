@@ -292,6 +292,26 @@ private func vol(_ uuid: String, internalLooking: Bool = false) -> VolumeInfo {
         #expect(try activeProblems(m) == [.verificationFailed])
     }
 
+    @Test func includingDuringARunQueuesARunForAfterIt() throws {
+        let dest = Destination(name: "iCloud", kind: .iCloudFolder)
+        var set = BackupSet(name: "Docs", source: URL(fileURLWithPath: "/tmp/docs"), destinationIDs: [dest.id])
+        set.acceptPreview()
+        let item = ReviewItem(id: "t", path: "vendor", kind: .trackedInExcluded)
+        let m = try make(destinations: [dest], sets: [set]) { store, root in
+            var st = SetState(); st.reviewItems = [item]
+            try store.save(st, for: PairID(set: set.id, destination: dest.id))
+            try "\(getpid())\n".write(to: root.appendingPathComponent(AgentPresence.fileName), atomically: true, encoding: .utf8)
+        }
+        #expect(m.isBackupActive)
+        m.resolve(m.reviewEntries[0], include: true)
+        #expect(m.queuedRuns == [set.id])
+        m.reload()
+        #expect(m.queuedRuns == [set.id])   // still running, so it waits
+        try FileManager.default.removeItem(at: m.support.appendingPathComponent(AgentPresence.fileName))
+        m.reload()
+        #expect(m.queuedRuns.isEmpty)
+    }
+
     @Test func resolvingAReviewItemKeepsAnAcceptedSetAccepted() throws {
         let dest = Destination(name: "iCloud", kind: .iCloudFolder)
         var set = BackupSet(name: "Docs", source: URL(fileURLWithPath: "/tmp/docs"), destinationIDs: [dest.id])
