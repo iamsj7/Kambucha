@@ -35,7 +35,7 @@ public struct TransferProgress: Codable, Equatable, Sendable {
         let transferring = s.bytesTotal != nil || s.filesTotal != nil
         self.init(pair: pair, phase: transferring ? .transferring : .scanning,
                   bytesDone: s.bytes, bytesTotal: s.bytesTotal, filesDone: s.filesDone, filesTotal: s.filesTotal,
-                  bytesPerSecond: s.speed, eta: s.eta, etaIsEstimate: false, updated: now)
+                  bytesPerSecond: s.speed, eta: ETAGuard.sanitize(eta: s.eta, rate: s.speed), etaIsEstimate: false, updated: now)
     }
 
     /// iCloud has no byte-accurate upload figure, so progress counts files and the ETA is marked an estimate.
@@ -43,7 +43,10 @@ public struct TransferProgress: Codable, Equatable, Sendable {
     public static func iCloud(pair: PairID, filesDone: Int, filesTotal: Int?, filesPerSecond: Double?,
                               now: Date) -> TransferProgress {
         var eta: TimeInterval?
-        if let total = filesTotal, let r = filesPerSecond, r > 0, total >= filesDone { eta = Double(total - filesDone) / r }
+        if let total = filesTotal, let r = filesPerSecond, r > 0, total >= filesDone {
+            let e = Double(total - filesDone) / r
+            eta = e <= ETAGuard.maximumETA ? e : nil   // a files-per-second rate has no byte floor
+        }
         return TransferProgress(pair: pair, phase: .waitingForICloud, filesDone: filesDone, filesTotal: filesTotal,
                                 eta: eta, etaIsEstimate: true, updated: now)
     }

@@ -130,7 +130,12 @@ final class AppModel {
     // MARK: Panel visibility and polling
 
     func panelAppeared() { panelVisible = true; refresh(); updatePolling() }
-    func panelDisappeared() { panelVisible = false; updatePolling() }
+    func panelDisappeared() {
+        panelVisible = false
+        // The progress folder is written every 2 s during a run; nobody is looking, so stop watching it.
+        watchers.removeValue(forKey: "progress")?.cancel()
+        updatePolling()
+    }
 
     private var isRunning: Bool { if case .running = status { true } else { false } }
 
@@ -209,12 +214,13 @@ final class AppModel {
 
     // MARK: Watching
 
-    private static let watched = ["", "state", "runs", "progress"]
+    private static let watched = ["", "state", "runs"]
 
     /// Attaches a watcher for each folder that doesn't have one. A folder that was replaced has its
     /// old watcher cancelled first, so the new one is picked up on the next refresh.
     private func attachMissingWatchers() {
-        for sub in Self.watched where watchers[sub] == nil {
+        let wanted = panelVisible ? Self.watched + ["progress"] : Self.watched
+        for sub in wanted where watchers[sub] == nil {
             let dir = sub.isEmpty ? support : support.appendingPathComponent(sub, isDirectory: true)
             try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
             let fd = open(dir.path, O_EVTONLY)

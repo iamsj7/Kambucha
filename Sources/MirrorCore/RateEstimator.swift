@@ -1,5 +1,17 @@
 import Foundation
 
+/// Keeps an ETA honest: no figure below a minimum rate or beyond a cap.
+public enum ETAGuard {
+    /// Below this the rate is too noisy for a time to mean anything (0.5 B/s would read "1,157 days").
+    public static let minimumRate: Double = 1024
+    public static let maximumETA: TimeInterval = 7 * 86_400
+
+    public static func sanitize(eta: TimeInterval?, rate: Double?) -> TimeInterval? {
+        guard let eta, eta >= 0, eta <= maximumETA, let rate, rate >= minimumRate else { return nil }
+        return eta
+    }
+}
+
 /// Smooths a cumulative byte counter into bytes per second. The first sample gives no rate, and a
 /// counter that goes backwards (wrap or reset) rebases instead of producing a negative or huge rate.
 public struct RateEstimator: Sendable {
@@ -25,6 +37,6 @@ public struct RateEstimator: Sendable {
     /// Seconds to move `remaining` bytes at the current rate. Nil with no rate, a zero rate or no remainder figure.
     public func eta(remaining: Int64) -> TimeInterval? {
         guard let rate, rate > 0, remaining >= 0 else { return nil }
-        return Double(remaining) / rate
+        return ETAGuard.sanitize(eta: Double(remaining) / rate, rate: rate)
     }
 }

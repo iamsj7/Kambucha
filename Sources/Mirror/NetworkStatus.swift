@@ -29,9 +29,11 @@ final class NetworkStatus {
         monitor = m
         sampler = Task { [weak self] in
             var estimator = RateEstimator(smoothing: 0.5)
+            var tracker = InterfaceDeltaTracker()
+            var cumulative: UInt64 = 0   // monotonic, built from per-interface deltas
             while !Task.isCancelled {
-                let out = InterfaceCounters.sample().bytesOut
-                let rate = estimator.add(bytes: out, at: Date())
+                cumulative += tracker.add(InterfaceCounters.interfaces()).bytesOut
+                let rate = estimator.add(bytes: cumulative, at: Date())
                 guard let self, !Task.isCancelled else { return }
                 self.uploadBytesPerSecond = rate
                 try? await Task.sleep(for: .seconds(1))

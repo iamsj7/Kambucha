@@ -39,6 +39,23 @@ struct TransferProgressTests {
         #expect(p.bytesTotal == nil && p.fraction == nil && p.eta == nil && p.phase == .scanning)
     }
 
+    @Test func rcloneEtaHiddenWhenSlowOrAbsurd() {
+        let slow = RcloneStats(bytes: 1, bytesTotal: 100_000_000, filesDone: 0, filesTotal: 1, speed: 0.5, eta: 99_999_999)
+        #expect(TransferProgress(pair: pair, stats: slow, now: t0).eta == nil)
+        let huge = RcloneStats(bytes: 1, bytesTotal: 100, filesDone: 0, filesTotal: 1, speed: 5000, eta: 700_000)
+        #expect(TransferProgress(pair: pair, stats: huge, now: t0).eta == nil)
+        let ok = RcloneStats(bytes: 1, bytesTotal: 100, filesDone: 0, filesTotal: 1, speed: 5000, eta: 30)
+        #expect(TransferProgress(pair: pair, stats: ok, now: t0).eta == 30)
+    }
+
+    @Test func statsFixtureParsesAndClassifies() throws {
+        let data = try fixtureData()
+        let s = RcloneLogParser.parse(data)
+        #expect(s.bytes == 5_000_000 && s.errors.isEmpty && s.differences == 0)
+        #expect(RcloneLogParser.outcome(exitCode: 0, log: data) == .success)
+        #expect(RcloneLogParser.outcome(exitCode: 7, log: data) == .permanent)
+    }
+
     @Test func nonStatsLineIsNil() {
         #expect(RcloneLogParser.stats(line: Data(#"{"level":"info","msg":"Copied (new)","object":"a"}"#.utf8)) == nil)
     }
@@ -102,19 +119,33 @@ extension TransferProgressTests {
         let file = dir().appendingPathExtension("jsonl")
         let lines = try fixtureLines().filter { RcloneLogParser.stats(line: $0) != nil }
         try (lines[0] + Data("\n".utf8)).write(to: file)
+        let appended = Array(lines.dropFirst())
         let box = StatsBox()
         let task = Task { await LogTail.follow(file) { box.add($0) } }
-        try await Task.sleep(for: .milliseconds(300))
+        try await Task.sleep(for: .milliseconds(300))   // lines[0] was there before the tail started: ignored
         let h = try FileHandle(forWritingTo: file)
         try h.seekToEnd()
         // A line split across two writes must be reassembled, not dropped.
-        let second = lines[1] + Data("\n".utf8)
+        let second = appended[0] + Data("\n".utf8)
         try h.write(contentsOf: second.prefix(40))
         try await Task.sleep(for: .milliseconds(1200))
         try h.write(contentsOf: second.dropFirst(40))
         try h.close()
         try await Task.sleep(for: .milliseconds(1300))
         task.cancel(); await task.value
-        #expect(box.all.map(\.bytes) == [1_077_248, 2_125_824], "got \(box.all.map(\.bytes))")
+        #expect(box.all.map(\.bytes) == [2_125_824], "got \(box.all.map(\.bytes))")
+    }
+
+    @Test func logTailHandlesTruncation() async throws {
+        let file = dir().appendingPathExtension("jsonl")
+        let lines = try fixtureLines().filter { RcloneLogParser.stats(line: $0) != nil }
+        try (lines[1] + Data("\n".utf8) + lines[2] + Data("\n".utf8)).write(to: file)
+        let box = StatsBox()
+        let task = Task { await LogTail.follow(file) { box.add($0) } }
+        try await Task.sleep(for: .milliseconds(300))
+        try (lines[0] + Data("\n".utf8)).write(to: file)   // shorter than before: a new file
+        try await Task.sleep(for: .milliseconds(1300))
+        task.cancel(); await task.value
+        #expect(box.all.map(\.bytes) == [1_077_248])
     }
 }

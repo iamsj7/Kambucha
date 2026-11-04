@@ -33,8 +33,8 @@ struct RateEstimatorTests {
 
     @Test func etaFromRate() {
         var r = RateEstimator()
-        _ = r.add(bytes: 0, at: t0); _ = r.add(bytes: 1000, at: t0 + 1)
-        #expect(r.eta(remaining: 5000) == 5)
+        _ = r.add(bytes: 0, at: t0); _ = r.add(bytes: 2000, at: t0 + 1)
+        #expect(r.eta(remaining: 10_000) == 5)
     }
 
     @Test func smoothingDampsSpike() {
@@ -43,5 +43,25 @@ struct RateEstimatorTests {
         let spiked = r.add(bytes: 1000 + 100_000, at: t0 + 2)!
         #expect(spiked < 100_000 / 2)
         #expect(spiked > 1000)
+    }
+
+    @Test func etaHiddenBelowMinimumRate() {
+        var r = RateEstimator()
+        _ = r.add(bytes: 0, at: t0); _ = r.add(bytes: 1, at: t0 + 2)   // 0.5 B/s
+        #expect(r.eta(remaining: 600_000_000) == nil)
+    }
+
+    @Test func etaHiddenAboveSevenDays() {
+        var r = RateEstimator()
+        _ = r.add(bytes: 0, at: t0); _ = r.add(bytes: 2048, at: t0 + 1)   // 2 KiB/s
+        #expect(r.eta(remaining: 2048 * 604_801) == nil)
+        #expect(r.eta(remaining: 2048 * 604_800) == 604_800)
+    }
+
+    @Test func sanitizeAppliesToPassedThroughEta() {
+        #expect(ETAGuard.sanitize(eta: 100_000, rate: 0.5) == nil)
+        #expect(ETAGuard.sanitize(eta: 100_000, rate: nil) == nil)
+        #expect(ETAGuard.sanitize(eta: 700_000, rate: 5000) == nil)
+        #expect(ETAGuard.sanitize(eta: 90, rate: 5000) == 90)
     }
 }
