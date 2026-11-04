@@ -50,11 +50,17 @@ struct MenuBarPanel: View {
             }
             .buttonStyle(.borderless)
             if let err = model.lastError {
-                Label(err, systemImage: "exclamationmark.triangle").font(.footnote).foregroundStyle(.secondary)
+                HStack(alignment: .top) {
+                    Label(err, systemImage: "exclamationmark.triangle").font(.footnote).foregroundStyle(.secondary)
+                    Spacer(minLength: 4)
+                    Button("Dismiss") { model.dismissError() }.font(.footnote).buttonStyle(.borderless)
+                }
             }
         }
         .padding()
         .frame(width: 320)
+        .onAppear { model.panelAppeared() }
+        .onDisappear { model.panelDisappeared() }
     }
 
     private var header: some View {

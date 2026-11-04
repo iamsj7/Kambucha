@@ -8,9 +8,6 @@ import MirrorCore
 enum DebugFixtures {
     enum Name: String, CaseIterable { case backedUp, uploading, running, held, attention, paused, notConfigured }
 
-    private static let lockHolder = LockBox()
-    private final class LockBox: @unchecked Sendable { var locks: [RunLock] = [] }
-
     static func make(_ name: Name) -> URL {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent("mirror-fixture-\(name.rawValue)-\(UUID().uuidString)")
         try? FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
@@ -56,9 +53,7 @@ enum DebugFixtures {
                 scope: "all", status: status))
         }
         if name == .running {
-            let l = RunLock(url: root.appendingPathComponent("locks/agent.lock"))
-            _ = l.tryAcquire()
-            lockHolder.locks.append(l)
+            try? "\(getpid())\n".write(to: root.appendingPathComponent(AgentPresence.fileName), atomically: true, encoding: .utf8)
         }
         return root
     }

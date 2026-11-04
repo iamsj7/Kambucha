@@ -68,6 +68,9 @@ public enum StatusSummary {
 
         // 4. Backed up only when every pair has finished at least once.
         if !setsWithNoDestination.isEmpty { return .attention("No destination chosen") }
+        if active.contains(where: { $0.destinationIDs.contains { known[$0] == nil } }) {
+            return .attention("A destination was removed")
+        }
         let finished = pairs.compactMap { states[$0]?.lastFinished }
         if pairs.isEmpty || finished.count != pairs.count { return .attention("Not backed up yet") }
         let files = pairs.reduce(0) { $0 + (states[$1]?.lastFileCount ?? 0) }

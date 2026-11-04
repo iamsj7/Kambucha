@@ -110,3 +110,12 @@ struct StatusSummaryTests {
         guard case .attention = overall(s, [dest], [:]) else { Issue.record("never run is not Backed Up"); return }
     }
 }
+
+extension StatusSummaryTests {
+    @Test func danglingDestinationIsAttentionNotBackedUp() {
+        var s = set([dest])
+        s.destinationIDs.append(UUID())
+        let r = overall(s, [dest], [pair(s, dest): state()], [record(s, dest, .success)])
+        #expect(r == .attention("A destination was removed"))
+    }
+}
