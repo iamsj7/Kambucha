@@ -40,7 +40,7 @@ public enum AgentWire {
     }
 
     /// Every answer. `ok` must be true for success: a missing or false `ok` with no `failure` is an error. `entries` is set by
-    /// `archive-list`, `files` by `dry-run-deletions` (every file a run would delete, `.git` ones included).
+    /// `archive-list`, `files` by `dry-run-deletions` (what a run would delete outside `.git`, so its count is what `--allow-deletes` takes).
     public struct Response: Codable, Equatable, Sendable {
         public var ok: Bool?
         public var failure: AgentFailure?

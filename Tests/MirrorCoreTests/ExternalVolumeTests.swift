@@ -304,6 +304,23 @@ private func has(_ a: [String], _ f: String, _ v: String) -> Bool {
 
     // MARK: Full pass once per connection
 
+    @Test func aReconnectionOnTheSameDiskNodeIsANewMountID() {
+        // Measured on a disk image: the device node and fsid both repeat after detach and attach.
+        let first = SystemVolumes.mountID(device: "/dev/disk10s1", fsid: "16777251-26", media: 4_295_001_000)
+        let second = SystemVolumes.mountID(device: "/dev/disk10s1", fsid: "16777251-26", media: 4_295_002_000)
+        #expect(first != second)
+        #expect(first == SystemVolumes.mountID(device: "/dev/disk10s1", fsid: "16777251-26", media: 4_295_001_000))
+    }
+
+    @Test func noMediaIDStillGivesAnIdentity() {
+        #expect(SystemVolumes.mountID(device: "/dev/disk10s1", fsid: "1-2", media: nil) == "/dev/disk10s1@1-2")
+    }
+
+    @Test func aDeviceNameNeedsItsDevPrefixRemovedForDiskArbitration() {
+        #expect(SystemVolumes.bsdName("/dev/disk10s1") == "disk10s1")
+        #expect(SystemVolumes.bsdName("disk10s1") == nil)
+    }
+
     @Test func fullPassOnlyWhenTheMountChanges() throws {
         let now = Date(timeIntervalSince1970: 1_800_000_000)
         let v = VolumeInfo(uuid: "A", name: "S", mountPoint: URL(fileURLWithPath: "/Volumes/S"), fileSystem: "apfs",
