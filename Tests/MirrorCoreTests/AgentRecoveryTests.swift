@@ -26,6 +26,7 @@ private final class Rig: @unchecked Sendable {
     let secrets = MemorySecrets(), trust = Trust(), volumes = Volumes()
     let iCloudDest = Destination(name: "iCloud", kind: .iCloudFolder)
     var set: BackupSet
+    var retriesBusy = true
     let binary: URL
 
     init(binary: URL = vendoredRclone) throws {
@@ -57,7 +58,15 @@ private final class Rig: @unchecked Sendable {
         let e = JSONEncoder(); e.dateEncodingStrategy = .iso8601
         let input = try e.encode(body)
         let d = JSONDecoder(); d.dateDecodingStrategy = .iso8601
-        return try d.decode(AgentWire.Response.self, from: await service.respond(subcommand: subcommand, input: { input }))
+        // As in `ServiceRig.send`: a sibling test's spawn can briefly keep a released flock alive, which only
+        // happens in one process. Anything but `busy` returns at once, and a stuck lock still fails after 2 seconds.
+        var answer = try d.decode(AgentWire.Response.self, from: await service.respond(subcommand: subcommand, input: { input }))
+        let deadline = Date().addingTimeInterval(2)
+        while retriesBusy, answer.failure == .busy, Date() < deadline {
+            try await Task.sleep(for: .milliseconds(20))
+            answer = try d.decode(AgentWire.Response.self, from: await service.respond(subcommand: subcommand, input: { input }))
+        }
+        return answer
     }
 
     func list(_ destination: UUID? = nil) async throws -> AgentWire.Response {
@@ -122,6 +131,7 @@ private let stamp = "2026-11-04T10-00-00"
         let fd = open(folder.appendingPathComponent("secrets.lock").path, O_CREAT | O_RDWR, 0o600)
         defer { close(fd) }
         #expect(flock(fd, LOCK_EX | LOCK_NB) == 0)
+        r.retriesBusy = false
         #expect(try await r.list().failure == .busy)
     }
 
@@ -228,7 +238,8 @@ private let stamp = "2026-11-04T10-00-00"
         try r.put("Archive/Docs/\(stamp)/a.txt", "on the drive", in: root)
         #expect(try await r.list(d.id).entries?.count == 1)
         let to = try target(r)
-        #expect(try await r.restore("Archive/Docs/\(stamp)/a.txt", to: to.path, destination: d.id).ok == true)
+        let answer = try await r.restore("Archive/Docs/\(stamp)/a.txt", to: to.path, destination: d.id)
+        #expect(answer.ok == true, "failure: \(String(describing: answer.failure))")
         #expect(try String(contentsOf: to, encoding: .utf8) == "on the drive")
     }
 
@@ -345,6 +356,14 @@ private let stamp = "2026-11-04T10-00-00"
 }
 
 @Suite struct AgentRecoveryClientShapeTests {
+    @Test func everyNewFailureHasItsOwnWords() {
+        let generic = SetupFailureText.message(for: AgentFailure.other)
+        for failure: AgentFailure in [.notFound, .driveNotConnected, .archive, .restoreFailed, .restore(.overSource("/x"))] {
+            #expect(SetupFailureText.message(for: failure) != generic)
+        }
+        #expect(SetupFailureText.message(for: AgentFailure.driveNotConnected).contains("drive"))
+    }
+
     @Test func aFailureCarriesNoRcloneText() {
         #expect(AgentFailure(ArchiveError.rcloneFailed("token=SECRET")) == .archive)
         #expect(AgentFailure(ArchiveError.authExpired) == .session(.notSignedIn))

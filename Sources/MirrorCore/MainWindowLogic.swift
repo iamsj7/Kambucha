@@ -196,7 +196,7 @@ public enum SetupFailureText {
         case let e as RestoreError:
             switch e {
             case .overSource: return "That folder is, or holds, a folder Mirror backs up. Choose a different place to restore to."
-            case .destinationNotEmpty: return "That folder isn't empty. Choose an empty folder."
+            case .destinationNotEmpty: return "Something is already there, and Mirror won't replace it. Choose a new name or an empty folder."
             }
         case is ArchiveError: return "That file isn't in the archive."
         case let e as AgentClientError:
@@ -218,6 +218,11 @@ public enum SetupFailureText {
         case .lockFailed: "Mirror could not start that action. Try again."
         case .invalidRequest, .other: "The backup agent could not finish that. Try again."
         case .cancelled: "Cancelled."
+        case .notFound: "That backup or file is no longer there."
+        case .driveNotConnected: "Connect the drive, then try again."
+        case .archive: "Mirror could not read the archive. Try again."
+        case .restoreFailed: "Mirror couldn't restore that. Nothing was changed. Try again."
+        case .restore(let reason): message(for: reason)
         case .session, .setup, .kit, .drill, .keychain, .runner: "The backup agent could not finish that. Try again."
         }
     }
