@@ -140,8 +140,10 @@ final class ArchiveModel {
         }
         let name = (entry.path as NSString).lastPathComponent
         restoreState = .restoring(name)
+        // The save panel has already asked "Replace?" of anything it was pointed at.
+        let replacing = FileManager.default.fileExists(atPath: target.path)
         do {
-            try await provider.restore(entry: entry, set: set, destination: dest, to: target)
+            try await provider.restore(entry: entry, set: set, destination: dest, to: target, replacing: replacing)
             restoreState = .done(target)
         } catch is CancellationError {
             restoreState = .idle

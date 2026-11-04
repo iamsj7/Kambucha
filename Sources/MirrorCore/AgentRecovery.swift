@@ -152,7 +152,7 @@ struct AgentRecovery: Sendable {
             let inMirror = r.path == mirror || r.path.hasPrefix(mirror + "/")
             let result = try await service.restore(
                 from: from, context: access.context, to: URL(fileURLWithPath: r.to), sources: sources,
-                asFile: try await isFile(from, context: access.context),
+                asFile: try await isFile(from, context: access.context), replacingFile: r.replacing == true,
                 manifest: inMirror ? manifest : nil,
                 manifestSubpath: inMirror ? String(r.path.dropFirst(mirror.count + 1)) : "")
             switch result.outcome {

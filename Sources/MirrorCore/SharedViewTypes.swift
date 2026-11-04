@@ -49,5 +49,6 @@ public protocol ArchiveProviding: Sendable {
     /// One folder of the latest backup. `path` is below the backup root: `Sets/<set>[/sub]`.
     func browse(path: String, set: BackupSet, destination: Destination) async throws -> [BackupItem]
     /// `entry.path` can be a file or a folder, under `Archive/` or `Sets/`.
-    func restore(entry: ArchiveEntry, set: BackupSet, destination: Destination, to: URL) async throws
+    /// `replacing`: the owner already agreed to replace the file at `to`.
+    func restore(entry: ArchiveEntry, set: BackupSet, destination: Destination, to: URL, replacing: Bool) async throws
 }

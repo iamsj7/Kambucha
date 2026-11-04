@@ -37,7 +37,7 @@ public protocol ArchiveAgentCalling: Sendable {
     func archiveList(set: UUID, destination: UUID) async throws -> [ArchiveEntry]
     /// `path` is the entry's path below the backup root (`Archive/<set>/<stamp>/...`). The agent pins the backup root
     /// itself, or the crypt endpoint for an encrypted destination.
-    func archiveRestore(set: UUID, destination: UUID, path: String, to: URL) async throws
+    func archiveRestore(set: UUID, destination: UUID, path: String, to: URL, replacing: Bool) async throws
     func setList(set: UUID, destination: UUID, path: String) async throws -> [BackupItem]
     func dryRunDeletions(set: UUID, destination: UUID) async throws -> HeldFiles
 }
@@ -70,8 +70,8 @@ public struct AgentArchiveClient: ArchiveAgentCalling {
         return entries.map { ArchiveEntry(id: $0.id, setName: $0.setName, stamp: $0.stamp, path: $0.path, size: $0.size) }
     }
 
-    public func archiveRestore(set: UUID, destination: UUID, path: String, to: URL) async throws {
-        _ = try await ask(AgentWire.archiveRestore, AgentWire.RestoreRequest(set: set, destination: destination, path: path, to: to.path))
+    public func archiveRestore(set: UUID, destination: UUID, path: String, to: URL, replacing: Bool = false) async throws {
+        _ = try await ask(AgentWire.archiveRestore, AgentWire.RestoreRequest(set: set, destination: destination, path: path, to: to.path, replacing: replacing))
     }
 
     public func setList(set: UUID, destination: UUID, path: String) async throws -> [BackupItem] {
@@ -107,8 +107,8 @@ public struct AgentArchiveProvider: ArchiveProviding {
         try await client.setList(set: set.id, destination: destination.id, path: path)
     }
 
-    public func restore(entry: ArchiveEntry, set: BackupSet, destination: Destination, to: URL) async throws {
-        try await client.archiveRestore(set: set.id, destination: destination.id, path: entry.path, to: to)
+    public func restore(entry: ArchiveEntry, set: BackupSet, destination: Destination, to: URL, replacing: Bool) async throws {
+        try await client.archiveRestore(set: set.id, destination: destination.id, path: entry.path, to: to, replacing: replacing)
     }
 }
 

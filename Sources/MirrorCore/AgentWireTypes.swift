@@ -25,8 +25,10 @@ public enum AgentWire {
         public var destination: UUID
         public var path: String
         public var to: String
-        public init(set: UUID, destination: UUID, path: String, to: String) {
-            self.set = set; self.destination = destination; self.path = path; self.to = to
+        /// The owner agreed to replace the file at `to`. It lifts no other guard.
+        public var replacing: Bool?
+        public init(set: UUID, destination: UUID, path: String, to: String, replacing: Bool? = nil) {
+            self.set = set; self.destination = destination; self.path = path; self.to = to; self.replacing = replacing
         }
     }
 

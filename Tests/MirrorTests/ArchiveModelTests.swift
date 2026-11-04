@@ -8,6 +8,7 @@ private final class FakeArchive: ArchiveProviding, @unchecked Sendable {
     var listError: (any Error)?
     var restoreError: (any Error)?
     private(set) var restored: [(ArchiveEntry, URL)] = []
+    private(set) var replacing: [Bool] = []
     var folders: [String: [BackupItem]] = [:]
     var browseError: (any Error)?
     func browse(path: String, set: BackupSet, destination: Destination) async throws -> [BackupItem] {
@@ -18,9 +19,10 @@ private final class FakeArchive: ArchiveProviding, @unchecked Sendable {
         if let listError { throw listError }
         return entries
     }
-    func restore(entry: ArchiveEntry, set: BackupSet, destination: Destination, to: URL) async throws {
+    func restore(entry: ArchiveEntry, set: BackupSet, destination: Destination, to: URL, replacing: Bool) async throws {
         if let restoreError { throw restoreError }
         restored.append((entry, to))
+        self.replacing.append(replacing)
     }
 }
 
@@ -150,6 +152,19 @@ struct ArchiveModelTests {
         let file = ArchiveEntry(id: "x", setName: "Docs", stamp: Date(), path: "Archive/Docs/2026-11-04T10-00-30/p/a.txt", size: 1)
         await model.restoreRun(of: file) { _ in FileManager.default.temporaryDirectory.appendingPathComponent("run") }
         #expect(fake.restored.map(\.0.path) == ["Archive/Docs/2026-11-04T10-00-30"])
+    }
+
+    /// The save panel asked "Replace?" and the owner said yes, so saying "try again" would be a lie.
+    @Test func aFileTheSavePanelReplacesIsReplaced() async throws {
+        let fake = FakeArchive(); fake.entries = [entry("x", day: 1)]
+        let (model, _, _) = try make(fake)
+        await model.reload()
+        let existing = FileManager.default.temporaryDirectory.appendingPathComponent("mirror-existing-\(UUID().uuidString).txt")
+        try "mine".write(to: existing, atomically: true, encoding: .utf8)
+        defer { try? FileManager.default.removeItem(at: existing) }
+        await model.restore(fake.entries[0]) { _ in existing }
+        await model.restore(fake.entries[0]) { _ in existing.deletingLastPathComponent().appendingPathComponent("mirror-new-\(UUID().uuidString).txt") }
+        #expect(fake.replacing == [true, false])
     }
 
     @Test func anAgentRefusalIsSaidForWhatItIs() async throws {

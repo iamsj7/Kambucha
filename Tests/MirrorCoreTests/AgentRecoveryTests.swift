@@ -73,8 +73,8 @@ private final class Rig: @unchecked Sendable {
         try await ask(AgentWire.archiveList, AgentWire.PairRequest(set: set.id, destination: destination ?? iCloudDest.id))
     }
 
-    func restore(_ path: String, to: String, destination: UUID? = nil) async throws -> AgentWire.Response {
-        try await ask(AgentWire.archiveRestore, AgentWire.RestoreRequest(set: set.id, destination: destination ?? iCloudDest.id, path: path, to: to))
+    func restore(_ path: String, to: String, destination: UUID? = nil, replacing: Bool? = nil) async throws -> AgentWire.Response {
+        try await ask(AgentWire.archiveRestore, AgentWire.RestoreRequest(set: set.id, destination: destination ?? iCloudDest.id, path: path, to: to, replacing: replacing))
     }
 
     func dryRun(_ destination: UUID? = nil) async throws -> AgentWire.Response {
@@ -256,6 +256,41 @@ private let stamp = "2026-11-04T10-00-00"
         let to = try r.tmp.sub("out").appendingPathComponent("run")
         #expect(try await r.restore("Archive/Docs/\(stamp)", to: to.path).ok == true)
         #expect(try String(contentsOf: to.appendingPathComponent("p/b.txt"), encoding: .utf8) == "two")
+    }
+
+    @Test func aFileReplacesOnlyWhatTheOwnerAgreedToReplace() async throws {
+        let r = try Rig()
+        try r.put("Archive/Docs/\(stamp)/a.txt", "archived")
+        let out = try r.tmp.sub("out")
+        try r.put("a.txt", "mine", in: out)
+        let to = out.appendingPathComponent("a.txt")
+        #expect(try await r.restore("Archive/Docs/\(stamp)/a.txt", to: to.path).failure == .restore(.destinationNotEmpty(to.path)))
+        #expect(try String(contentsOf: to, encoding: .utf8) == "mine")
+        #expect(try await r.restore("Archive/Docs/\(stamp)/a.txt", to: to.path, replacing: true).ok == true)
+        #expect(try String(contentsOf: to, encoding: .utf8) == "archived")
+    }
+
+    @Test func replacingNeverLiftsTheSourceGuard() async throws {
+        let r = try Rig()
+        try r.put("Archive/Docs/\(stamp)/a.txt", "archived")
+        try r.put("a.txt", "mine", in: r.source)
+        let to = r.source.appendingPathComponent("a.txt")
+        let answer = try await r.restore("Archive/Docs/\(stamp)/a.txt", to: to.path, replacing: true)
+        #expect(answer.ok != true)
+        #expect(try String(contentsOf: to, encoding: .utf8) == "mine")
+    }
+
+    @Test func replacingCoversAFileNotAFolderOrALink() async throws {
+        let r = try Rig()
+        try r.put("Archive/Docs/\(stamp)/a.txt", "archived")
+        try r.put("Sets/Docs/p/f.txt")
+        let out = try r.tmp.sub("out")
+        try r.put("full/mine.txt", in: out)
+        let folder = out.appendingPathComponent("full")
+        #expect(try await r.restore("Sets/Docs/p", to: folder.path, replacing: true).failure == .restore(.destinationNotEmpty(folder.path)))
+        let link = out.appendingPathComponent("link")
+        try FileManager.default.createSymbolicLink(at: link, withDestinationURL: folder.appendingPathComponent("mine.txt"))
+        #expect(try await r.restore("Archive/Docs/\(stamp)/a.txt", to: link.path, replacing: true).failure == .restore(.destinationNotEmpty(link.path)))
     }
 
     @Test func aFolderIsNotRestoredOverAFolderWithFilesInIt() async throws {

@@ -16,7 +16,7 @@ enum DebugViewSnapshots {
             return [e("1", "src/App.swift", 0.1, 18_400), e("2", "src/Model.swift", 0.1, 9_200), e("3", "notes/plan.md", 1.2, 4_100),
                     e("4", "assets/logo.png", 3.5, 220_000), e("5", "README.md", 3.5, 2_900)]
         }
-        func restore(entry: ArchiveEntry, set: BackupSet, destination: Destination, to: URL) async throws {}
+        func restore(entry: ArchiveEntry, set: BackupSet, destination: Destination, to: URL, replacing: Bool) async throws {}
         func browse(path: String, set: BackupSet, destination: Destination) async throws -> [BackupItem] {
             [BackupItem(name: "client-site", isFolder: true, size: 0), BackupItem(name: "mobile-app", isFolder: true, size: 0),
              BackupItem(name: "notes.md", isFolder: false, size: 4_100), BackupItem(name: "README.md", isFolder: false, size: 2_900)]
@@ -136,7 +136,7 @@ enum DebugViewSnapshots {
 
     private struct EmptyArchive: ArchiveProviding {
         func list(set: BackupSet, destination: Destination) async throws -> [ArchiveEntry] { [] }
-        func restore(entry: ArchiveEntry, set: BackupSet, destination: Destination, to: URL) async throws {}
+        func restore(entry: ArchiveEntry, set: BackupSet, destination: Destination, to: URL, replacing: Bool) async throws {}
         func browse(path: String, set: BackupSet, destination: Destination) async throws -> [BackupItem] { [] }
     }
 }

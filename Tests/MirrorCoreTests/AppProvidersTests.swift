@@ -136,7 +136,7 @@ private func scriptTransport(_ box: ArchiveSandbox, exit code: Int, output: Stri
     let set = makeSet("Docs"), dest = Destination(name: "iCloud", kind: .iCloudFolder)
     let entry = ArchiveEntry(id: "1", setName: "Docs", stamp: Date(), path: "Archive/Docs/2026-11-04T10-00/a.txt", size: 1)
     try await AgentArchiveProvider(client: AgentArchiveClient(transport: t))
-        .restore(entry: entry, set: set, destination: dest, to: URL(fileURLWithPath: "/tmp/out"))
+        .restore(entry: entry, set: set, destination: dest, to: URL(fileURLWithPath: "/tmp/out"), replacing: false)
     #expect(t.calls[0].subcommand == "archive-restore")
     #expect(bodyText(t).contains("Archive/Docs/2026-11-04T10-00/a.txt"))
 }
@@ -155,7 +155,7 @@ private final class FakeDryRunClient: ArchiveAgentCalling, @unchecked Sendable {
     private(set) var asked: [UUID] = []
     init(files: [UUID: [String]]) { self.files = files }
     func archiveList(set: UUID, destination: UUID) async throws -> [ArchiveEntry] { [] }
-    func archiveRestore(set: UUID, destination: UUID, path: String, to: URL) async throws {}
+    func archiveRestore(set: UUID, destination: UUID, path: String, to: URL, replacing: Bool) async throws {}
     func setList(set: UUID, destination: UUID, path: String) async throws -> [BackupItem] { [] }
     func dryRunDeletions(set: UUID, destination: UUID) async throws -> HeldFiles {
         asked.append(destination); return HeldFiles(files: files[destination] ?? [], gitCount: 0)
