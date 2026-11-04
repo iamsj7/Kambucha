@@ -54,7 +54,7 @@ import Foundation
 
     @Test func gitFailingIsReportedNotSwallowed() throws {
         let box = try ArchiveSandbox()
-        let repo = try box.dir("broken"); try box.dir("broken/.git")   // looks like a repo, is not one
+        let repo = try box.dir("broken"); _ = try box.dir("broken/.git")   // looks like a repo, is not one
         #expect(throws: ReviewError.self) { try scanner.trackedInExcluded(repo: repo, excluded: ["vendor"]) }
         let missing = ReviewScanner(filters: FilterBuilder(presets: []), gitPath: "/nonexistent/git")
         #expect(throws: ReviewError.self) { try missing.trackedInExcluded(repo: repo, excluded: ["vendor"]) }
