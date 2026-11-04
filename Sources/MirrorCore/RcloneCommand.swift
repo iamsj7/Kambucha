@@ -120,6 +120,6 @@ public enum RcloneCommand {
     }
 
     private static func common(logFile: URL, context: RcloneContext) -> [String] {
-        ["--use-json-log", "-v", "--log-file", logFile.path, "--stats", "0", "--config", context.configPath]
+        ["--use-json-log", "-v", "--log-file", logFile.path, "--stats", "2s", "--stats-log-level", "NOTICE", "--config", context.configPath]
     }
 }

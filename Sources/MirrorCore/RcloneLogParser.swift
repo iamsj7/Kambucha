@@ -26,7 +26,41 @@ public struct RcloneResult: Equatable, Sendable {
     }
 }
 
+/// One live stats record from rclone's JSON log (`--stats 2s --stats-log-level NOTICE`).
+public struct RcloneStats: Equatable, Sendable {
+    public var bytes: Int64
+    /// Nil when rclone has not counted a total yet (it reports 0 while listing).
+    public var bytesTotal: Int64?
+    public var filesDone: Int
+    public var filesTotal: Int?
+    /// Nil until rclone has a speed (it reports 0 at the start).
+    public var speed: Double?
+    public var eta: TimeInterval?
+    public init(bytes: Int64, bytesTotal: Int64?, filesDone: Int, filesTotal: Int?, speed: Double?, eta: TimeInterval?) {
+        self.bytes = bytes; self.bytesTotal = bytesTotal; self.filesDone = filesDone
+        self.filesTotal = filesTotal; self.speed = speed; self.eta = eta
+    }
+}
+
 public enum RcloneLogParser {
+    /// A stats record from one log line, or nil when the line is not one.
+    public static func stats(line: Data) -> RcloneStats? {
+        guard let d = (try? JSONSerialization.jsonObject(with: line)) as? [String: Any],
+              let s = d["stats"] as? [String: Any], let bytes = (s["bytes"] as? NSNumber)?.int64Value else { return nil }
+        func positive(_ k: String) -> Int64? { (s[k] as? NSNumber).map(\.int64Value).flatMap { $0 > 0 ? $0 : nil } }
+        let speed = (s["speed"] as? NSNumber)?.doubleValue
+        let eta = (s["eta"] as? NSNumber)?.doubleValue
+        return RcloneStats(bytes: bytes, bytesTotal: positive("totalBytes"),
+                           filesDone: Int((s["transfers"] as? NSNumber)?.int64Value ?? 0),
+                           filesTotal: positive("totalTransfers").map(Int.init),
+                           speed: speed.flatMap { $0 > 0 ? $0 : nil }, eta: eta.flatMap { $0 >= 0 ? $0 : nil })
+    }
+
+    /// The newest stats record in a log.
+    public static func lastStats(_ data: Data) -> RcloneStats? {
+        data.split(separator: UInt8(ascii: "\n")).reversed().lazy.compactMap { stats(line: Data($0)) }.first
+    }
+
     /// One log line, decoded leniently: a field of an unexpected type is ignored, never the whole line.
     private struct Line {
         var level: String?
