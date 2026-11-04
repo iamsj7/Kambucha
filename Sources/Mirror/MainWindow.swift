@@ -276,6 +276,27 @@ struct DestinationStatus: Equatable {
     var text: String
 }
 
+extension DestinationStatus {
+    init(_ health: DestinationHealth) {
+        func files(_ n: Int) -> String { "\(n.formatted()) \(n == 1 ? "file" : "files")" }
+        switch health {
+        case .unused: self.init(symbol: "circle.dashed", text: "Not used by any set")
+        case .paused: self.init(symbol: "pause.circle", text: "Paused")
+        case .notBackedUp: self.init(symbol: "circle.dashed", text: "Not backed up yet")
+        case .previewNeeded: self.init(symbol: "eye", text: "Preview needed")
+        case .failing: self.init(symbol: "exclamationmark.icloud", text: "Needs attention")
+        case .unfinished: self.init(symbol: "circle.dashed", text: "Backup not finished")
+        case .stopped(let problem): self.init(symbol: "exclamationmark.icloud", text: problem.headline)
+        case .mismatched(let n): self.init(symbol: "exclamationmark.icloud", text: "\(files(n)) didn't match")
+        case .held(let n): self.init(symbol: "pause.circle", text: "\(n.formatted()) \(n == 1 ? "deletion" : "deletions") held")
+        case .uploading(let n): self.init(symbol: "arrow.clockwise.icloud", text: "Uploading \(files(n))")
+        case .notAccepted(let n): self.init(symbol: "icloud.slash", text: StatusSummary.notAcceptedText(count: n))
+        case .backedUp(let last):
+            self.init(symbol: "checkmark.circle", text: "Backed up \(last.formatted(.relative(presentation: .named)))")
+        }
+    }
+}
+
 extension AppModel {
     func destinationStatus(_ d: Destination, now: Date = Date()) -> DestinationStatus {
         let pairs = sets.flatMap { s in s.destinationIDs.contains(d.id) ? [PairID(set: s.id, destination: d.id)] : [] }
@@ -292,13 +313,6 @@ extension AppModel {
         if d.encrypted && !d.recoveryKitConfirmed {
             return DestinationStatus(symbol: "exclamationmark.triangle", text: "Save your Recovery Kit")
         }
-        if pairs.contains(where: { (states[$0]?.consecutiveFailures ?? 0) > 0 }) {
-            return DestinationStatus(symbol: "exclamationmark.icloud", text: "Needs attention")
-        }
-        if let finished {
-            return DestinationStatus(symbol: "checkmark.circle",
-                                     text: "Backed up \(finished.formatted(.relative(presentation: .named)))")
-        }
-        return DestinationStatus(symbol: "circle.dashed", text: pairs.isEmpty ? "Not used by any set" : "Not backed up yet")
+        return DestinationStatus(StatusSummary.destinationHealth(d.id, sets: sets, states: states))
     }
 }

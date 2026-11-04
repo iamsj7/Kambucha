@@ -16,6 +16,17 @@ public enum OverallStatus: Equatable, Sendable {
     case notConfigured
 }
 
+/// What one destination can honestly say, across the sets that use it.
+public enum DestinationHealth: Equatable, Sendable {
+    case unused, paused, notBackedUp, previewNeeded, failing, unfinished
+    case stopped(Problem)
+    case mismatched(Int)
+    case held(Int)
+    case uploading(Int)
+    case notAccepted(Int)
+    case backedUp(last: Date)
+}
+
 /// Folds the on-disk state into the one status the menu bar shows (spec sections 8a and 12).
 public enum StatusSummary {
     /// A real mismatch said as one, in the status and the run record: never a neutral wait.
@@ -110,6 +121,28 @@ public enum StatusSummary {
         if pairs.contains(where: { states[$0]?.isBackedUp != true }) { return .unfinished }
         let files = pairs.reduce(0) { $0 + (states[$1]?.lastFileCount ?? 0) }
         return .backedUp(last: finished.max()!, files: files)
+    }
+
+    /// One destination's state across the sets that use it. Only a pair's `isBackedUp` earns "Backed Up", so
+    /// finishing a run while uploads are pending or deletions are held reads as what it is. Worst first.
+    public static func destinationHealth(_ id: UUID, sets: [BackupSet], states: [PairID: SetState]) -> DestinationHealth {
+        let using = sets.filter { $0.destinationIDs.contains(id) }
+        guard !using.isEmpty else { return .unused }
+        let active = using.filter { !$0.isPaused }
+        guard !active.isEmpty else { return .paused }
+        let pairs = active.map { states[PairID(set: $0.id, destination: id)] ?? SetState() }
+        func total(_ count: (SetState) -> Int) -> Int { pairs.reduce(0) { $0 + count($1) } }
+
+        if let stop = pairs.compactMap(\.stoppedBy).first { return .stopped(stop) }
+        if pairs.contains(where: { $0.consecutiveFailures > 0 }) { return .failing }
+        if total(\.mismatched.count) > 0 { return .mismatched(total(\.mismatched.count)) }
+        if total(\.heldDeletions) > 0 { return .held(total(\.heldDeletions)) }
+        if total(\.pendingUploads) > 0 { return .uploading(total(\.pendingUploads)) }
+        if total(\.refusedSince.count) > 0 { return .notAccepted(total(\.refusedSince.count)) }
+        if active.contains(where: { !$0.isPreviewAccepted }) { return .previewNeeded }
+        if pairs.contains(where: { $0.lastFinished == nil }) { return .notBackedUp }
+        guard pairs.allSatisfy(\.isBackedUp) else { return .unfinished }
+        return .backedUp(last: pairs.compactMap(\.lastFinished).max()!)
     }
 
     /// A set whose preview was never accepted (a set made before acceptance moved onto the set, say) can't be backed up
