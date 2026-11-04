@@ -19,7 +19,8 @@ public struct RunPlanner {
         let fullDue = state.lastFullPass.map { now.timeIntervalSince($0) >= profile.fullPassInterval } ?? true
         // Never checked isn't overdue: the first full pass sets the baseline.
         let deepDue = state.lastDeepCheck.map { now.timeIntervalSince($0) >= deepCheckInterval } ?? false
-        var planned = including(state.verifyOwed, in: scope)
+        // Evicted files can't be hashed yet, so they don't drive runs. They stay owed, and they wait.
+        var planned = including(state.verifyOwed.filter { state.freedSince[$0] == nil }, in: scope)
         if fullDue || state.wholeSetOwed || state.hashWholeSet {
             planned = .wholeSet
         } else if state.heldDeletions > 0, planned != .nothing {

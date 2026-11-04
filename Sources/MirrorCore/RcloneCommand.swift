@@ -152,8 +152,9 @@ public enum RcloneCommand {
         if !r.linksAsFiles { a.append("--links") }
         if r.oneWay { a.append("--one-way") }
         if r.sizeOnly { a.append("--size-only") }
-        // rclone doesn't combine --files-from with --filter-from.
-        if let list = r.filesFrom { a += ["--files-from", list.path] }
+        // rclone doesn't combine a file list with --filter-from. Raw, because the plain form treats `#`
+        // as a comment and trims spaces, so such a name would go unchecked and still pass (measured).
+        if let list = r.filesFrom { a += ["--files-from-raw", list.path] }
         else {
             // Excluded even with no filter file, as the whole-tree Deep check has none.
             if r.excludeAppleDouble { a += ["--filter", "- ._*"] }

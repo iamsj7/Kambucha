@@ -33,8 +33,7 @@ enum BackupRun {
             sessions: { RcloneSession(destination: $0, secrets: secrets, binary: binary, helper: trust, workDir: work) },
             remote: RcloneRemoteFiles(binary: binary, helper: trust),
             paths: RunPaths(support: places.support, logs: places.logs, work: work),
-            helperCheck: { try trust.verifyHelper(at: binary) },
-            iCloudSignedIn: { FileManager.default.ubiquityIdentityToken != nil })
+            helperCheck: { try trust.verifyHelper(at: binary) })
 
         if command.fullSpeed { AgentPriority.raiseToNormal() }
         // launchd sends SIGTERM at logout. Dying at once would strand rclone, any sign-in config and

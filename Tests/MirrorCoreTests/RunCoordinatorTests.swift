@@ -16,6 +16,9 @@ private final class FakeRclone: RcloneRunning, @unchecked Sendable {
     private var _planned: [String] = [], _hashDifferences = 0, _differing: [String] = [], _killCheck = false
     private var _hashed: [[String]] = []
     private var _realErrors: [String] = []
+    private var _realThrow: (any Error)?
+    private var _deepDifferences = 0
+    func failRealSync(_ e: (any Error)?) { lock.withLock { _realThrow = e } }
     var onDryRun: (@Sendable () -> Void)?
     var onRealSync: (@Sendable () -> Void)?
 
@@ -30,8 +33,10 @@ private final class FakeRclone: RcloneRunning, @unchecked Sendable {
     func script(real: [RcloneResult.Outcome] = [], dryDeletions: [String] = [], copied: [String] = [],
                 differences: Int = 0, matching: Int = 0, checkOutcome: RcloneResult.Outcome = .success,
                 dryOutcome: RcloneResult.Outcome = .success, killRealSync: Bool = false, planned: [String] = [],
-                hashDifferences: Int = 0, differing: [String] = [], killCheck: Bool = false, errors: [String] = []) {
+                hashDifferences: Int = 0, differing: [String] = [], killCheck: Bool = false, errors: [String] = [],
+                deepDifferences: Int = 0) {
         lock.withLock {
+            _deepDifferences = deepDifferences
             _planned = planned; _hashDifferences = hashDifferences; _differing = differing; _killCheck = killCheck
             _realErrors = errors
             _real = real; _dryDeletions = dryDeletions; _copied = copied; _differences = differences
@@ -50,6 +55,7 @@ private final class FakeRclone: RcloneRunning, @unchecked Sendable {
                 return RcloneResult(exitCode: 0, summary: s, outcome: _dryOutcome)
             }
             if _throwOnRealSync { throw CancellationError() }
+            if let _realThrow { throw _realThrow }
             s.copied = _copied
             let outcome = _real.isEmpty ? .success : _real.removeFirst()
             if outcome != .success { s.errors = _realErrors.isEmpty ? ["boom"] : _realErrors }
@@ -62,7 +68,10 @@ private final class FakeRclone: RcloneRunning, @unchecked Sendable {
             if _killCheck { throw CancellationError() }
             _checks.append(r)
             var s = LogSummary()
-            s.differences = _differences; s.matching = _matching; s.flagged = _differing
+            s.differences = _differences; s.matching = _matching
+            let deep = r.logFile.lastPathComponent.hasPrefix("deep")
+            if deep { s.differences += _deepDifferences }
+            if s.differences > 0 || r.filesFrom != nil && _hashDifferences > 0 { s.flagged = _differing }
             if let list = r.filesFrom {
                 _hashed.append(((try? String(contentsOf: list, encoding: .utf8)) ?? "").split(separator: "\n").map(String.init))
                 s.differences += _hashDifferences
@@ -177,8 +186,10 @@ private final class Harness: @unchecked Sendable {
     var now = Date(timeIntervalSince1970: 2_000_000_000)
     var set: BackupSet
     var iCloudDest = Destination(name: "iCloud", kind: .iCloudFolder)
-    var signedIn = true
     var helperError: (any Error)?
+    private var _freed = Set<String>()
+    /// File names iCloud has evicted.
+    var freed: Set<String> { get { lock.withLock { _freed } } set { lock.withLock { _freed = newValue } } }
     let store: ConfigStore, records: RunRecordStore, problems: ProblemCenter
 
     init() throws {
@@ -219,7 +230,7 @@ private final class Harness: @unchecked Sendable {
         let runner: any RcloneRunning = wrapped ?? rclone
         return RunCoordinator(
             store: store, records: records, problems: problems, rclone: runner, feed: feed,
-            verifier: Verifier(rclone: runner, auditor: auditor, isDataless: { _ in false }),
+            verifier: Verifier(rclone: runner, auditor: auditor, isDataless: { [self] in freed.contains($0.lastPathComponent) }),
             guard: PathGuard(iCloudDrive: iCloud, backupRoot: backupRoot),
             detector: StackDetector(presets: presets), filters: FilterBuilder(presets: presets), clock: clock,
             sessions: { [self] d in
@@ -231,8 +242,7 @@ private final class Harness: @unchecked Sendable {
                 }
             },
             remote: files, paths: RunPaths(support: support, logs: logs, work: work),
-            helperCheck: { [self] in if let helperError { throw helperError } },
-            iCloudSignedIn: { [self] in signedIn })
+            helperCheck: { [self] in if let helperError { throw helperError } })
     }
 
     @discardableResult
@@ -751,7 +761,7 @@ private final class Harness: @unchecked Sendable {
         h.rclone.script(dryDeletions: manyDeletions())
         await h.run()
         await h.run(RunCommand(setID: h.set.id, approvedDeletions: 500, force: true))
-        #expect(h.rclone.realSyncs.last?.mode == .mirror(maxDelete: 510))
+        #expect(h.rclone.realSyncs.last?.mode == .mirror(maxDelete: 500))
         #expect(h.rclone.realSyncs.last?.destination == h.mirror)
         #expect(try h.state.heldDeletions == 0)
         #expect(try h.active.isEmpty)
@@ -1496,13 +1506,48 @@ private final class Harness: @unchecked Sendable {
         #expect(h.rclone.allCalls == 0)
     }
 
-    @Test func signedOutOfICloudSaysSo() async throws {
-        let h = try backedUp()
-        try FileManager.default.removeItem(at: h.backupRoot)
-        h.signedIn = false
+    @Test func aMarkerThatLeftICloudStopsThePair() async throws {
+        let h = try backedUp(); h.change("flowapp/a.txt")
+        h.auditor.set(refused: [RootMarker.fileName])
         await h.run()
+        #expect(h.rclone.allCalls == 0)
         #expect(try h.active == [.iCloudUnavailable])
-        #expect(h.notifier.details.first?.contains("signed out") == true)
+        #expect(h.notifier.details.first?.contains("iCloud Drive may be signed out") == true)
+        #expect(try h.latest()?.errors == ["iCloud Drive may be signed out"])
+        #expect(try h.state.isBackedUp == false)
+        #expect(try h.state.lastEventID == 5)
+    }
+
+    @Test func theMarkerCheckIsOneReadAWakeUp() async throws {
+        let h = try backedUp()
+        await h.run()
+        #expect(h.auditor.calls.map { $0.map(\.lastPathComponent) } == [[RootMarker.fileName]])
+    }
+
+    @Test func aSignedOutMacNeverClaimsANewPair() async throws {
+        let h = try Harness()
+        h.auditor.set(refused: ["icloud"])   // the backup root's parent
+        await h.run()
+        #expect(h.rclone.allCalls == 0)
+        #expect(!FileManager.default.fileExists(atPath: h.backupRoot.path))
+        #expect(try h.active == [.iCloudUnavailable])
+    }
+
+    @Test func iCloudUnavailableNotifiesOnceAcrossWakeUps() async throws {
+        let h = try backedUp()
+        h.auditor.set(refused: [RootMarker.fileName])
+        await h.run(); await h.run(); await h.run()
+        #expect(h.notifier.posted == [.iCloudUnavailable])
+    }
+
+    @Test func iCloudUnavailableClearsOnlyOnceTheClaimPasses() async throws {
+        let h = try backedUp()
+        h.auditor.set(refused: [RootMarker.fileName])
+        await h.run()
+        h.auditor.set()
+        await h.run()
+        #expect(try h.active.isEmpty)
+        #expect(try h.state.isBackedUp)
     }
 
     @Test func aLostMarkerWhileSignedInIsStillADestinationProblem() async throws {
@@ -1596,6 +1641,204 @@ private final class Harness: @unchecked Sendable {
     }
 }
 
+/// Fix round 2.
+@Suite struct RoundTwoTests {
+    private func mismatched(_ h: Harness) async throws {
+        try h.prime(); h.change("flowapp/a.txt")
+        h.rclone.script(copied: ["a.txt"], hashDifferences: 1, differing: ["a.txt"])
+        await h.run()
+        #expect(try h.active == [.verificationFailed])
+    }
+
+    @Test func anEvictedOwedFileIsNotClearedUnhashed() async throws {
+        let h = try Harness(); try await mismatched(h)
+        h.rclone.script()
+        h.freed = ["a.txt"]
+        await h.run()
+        #expect(h.rclone.hashed.count == 1)   // only the first run's: nothing was hashed this time
+        #expect(try h.state.verifyOwed == ["flowapp/a.txt"])
+        #expect(try h.state.freedSince["flowapp/a.txt"] == h.now)
+        #expect(try h.state.isBackedUp == false)
+        #expect(try h.active == [.verificationFailed])   // unhashed proves nothing, so the alert stands
+    }
+
+    @Test func aFreedFileDoesNotForceAnRcloneRunEveryWakeUp() async throws {
+        let h = try Harness(); try await mismatched(h)
+        h.rclone.script(); h.freed = ["a.txt"]
+        await h.run()
+        let calls = h.rclone.allCalls
+        await h.run()
+        #expect(h.rclone.allCalls == calls)
+        #expect(try h.state.verifyOwed == ["flowapp/a.txt"])
+    }
+
+    @Test func aFreedFileIsHashedOnceItsBackOnDisk() async throws {
+        let h = try Harness(); try await mismatched(h)
+        h.rclone.script(); h.freed = ["a.txt"]
+        await h.run()
+        h.freed = []
+        await h.run()
+        #expect(h.rclone.hashed.last == ["a.txt"])
+        #expect(try h.state.verifyOwed.isEmpty)
+        #expect(try h.state.freedSince.isEmpty)
+        #expect(try h.active.isEmpty)
+    }
+
+    private func deepDue(_ h: Harness, freed: [String]) throws {
+        try h.prime()
+        let dir = h.backupRoot.appendingPathComponent("Sets/x/flowapp")
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        var s = try h.state
+        s.lastFullPass = h.now.addingTimeInterval(-25 * hour)
+        s.lastDeepCheck = h.now.addingTimeInterval(-31 * 24 * hour)
+        for name in freed {
+            try Data().write(to: dir.appendingPathComponent(name))
+            try Data().write(to: h.source.appendingPathComponent("flowapp/\(name)"))
+            s.verifyOwed.append("flowapp/\(name)")
+            s.freedSince["flowapp/\(name)"] = h.now.addingTimeInterval(-40 * 24 * hour)
+        }
+        s.verifyOwed.sort()
+        try h.store.save(s, for: h.pair)
+        h.freed = Set(freed)
+    }
+
+    @Test func theDeepCheckSamplesAFreedOwedFile() async throws {
+        let h = try Harness(); try deepDue(h, freed: ["old.txt"])
+        await h.run()
+        #expect(h.rclone.hashed.contains { $0.contains("flowapp/old.txt") })
+        #expect(try h.state.verifyOwed.isEmpty)
+        #expect(try h.state.freedSince.isEmpty)
+    }
+
+    @Test func aSampledFreedFileThatMismatchesStaysOwedAndFlagged() async throws {
+        let h = try Harness(); try deepDue(h, freed: ["old.txt"])
+        h.rclone.script(hashDifferences: 1, differing: ["flowapp/old.txt"])
+        await h.run()
+        #expect(try h.state.verifyOwed == ["flowapp/old.txt"])
+        #expect(try h.state.reviewItems.map(\.kind) == [.unprovenFreed])
+        #expect(try h.active.contains(.verificationFailed))
+    }
+
+    @Test func freedFilesBeyondTheSampleAreFlaggedForReview() async throws {
+        let h = try Harness()
+        let names = (0...RunCoordinator.freedSample).map { "old\($0).txt" }
+        try deepDue(h, freed: names)
+        await h.run()
+        let s = try h.state
+        #expect(s.verifyOwed.count == 1)
+        #expect(s.reviewItems.map(\.path) == s.verifyOwed)
+        #expect(s.reviewItems.map(\.kind) == [.unprovenFreed])
+    }
+
+    @Test func anOweUnderTheFlagKeepsAMissingFile() async throws {
+        let h = try Harness(); try h.prime(); h.change("flowapp/gone-x.txt")
+        try Data().write(to: h.source.appendingPathComponent("flowapp/gone-x.txt"))
+        let many = (0...RunCoordinator.maxOwed).map { "f\($0)" }
+        h.rclone.script(copied: many + ["gone-x.txt"], planned: many)
+        await h.run()
+        #expect(try h.state.verifyOwed == ["flowapp/gone-x.txt"])
+        #expect(try h.state.hashWholeSet == false)
+    }
+
+    @Test func aDifferenceCountWithNoNamedPathIsNotExplained() async throws {
+        let h = try Harness(); try h.prime()
+        let a = h.source.appendingPathComponent("flowapp/a.txt").path
+        h.feed.set(ChangeBatch(paths: [a], mustRescan: false, latestEventID: 10),
+                   changedLater: ChangeBatch(paths: [a], mustRescan: false, latestEventID: 11))
+        h.rclone.script(differences: 2, differing: ["a.txt"])   // two differences, only one explained
+        await h.run()
+        #expect(h.notifier.posted == [.verificationFailed])
+    }
+
+    @Test func aDeepDifferenceFromAChangingFileIsRetried() async throws {
+        let h = try Harness(); try h.prime()
+        let a = h.source.appendingPathComponent("flowapp/a.txt").path
+        var s = try h.state; s.hashWholeSet = true; try h.store.save(s, for: h.pair)
+        try FileManager.default.createDirectory(at: h.backupRoot.appendingPathComponent("Sets/x"), withIntermediateDirectories: true)
+        h.feed.set(ChangeBatch(paths: [a], mustRescan: false, latestEventID: 10),
+                   changedLater: ChangeBatch(paths: [a], mustRescan: false, latestEventID: 11))
+        h.rclone.script(differing: ["flowapp/a.txt"], deepDifferences: 1)
+        await h.run()
+        #expect(h.notifier.posted.isEmpty)
+        #expect(try h.state.consecutiveFailures == 1)
+    }
+
+    @Test func aPairLockThatWontOpenIsRecorded() async throws {
+        let h = try Harness(); try h.prime(); h.change("flowapp/a.txt")
+        let name = "\(h.pair.set.uuidString)-\(h.pair.destination.uuidString).lock"
+        try FileManager.default.createDirectory(at: h.support.appendingPathComponent("locks/\(name)"), withIntermediateDirectories: true)
+        await h.run()
+        #expect(h.rclone.allCalls == 0)
+        #expect(try h.latest()?.status == .failed)
+        #expect(try h.active == [.repeatedFailures])
+    }
+
+    @Test func configLostMidRunIsRecordedAndFails() async throws {
+        let h = try Harness(); try h.prime(); h.change("flowapp/a.txt")
+        var other = BackupSet(name: "y", source: h.root.appendingPathComponent("src2"))
+        try FileManager.default.createDirectory(at: other.source.appendingPathComponent("p"), withIntermediateDirectories: true)
+        other.destinationIDs = [h.iCloudDest.id]
+        try h.store.saveSets([h.set, other])
+        let sets = h.support.appendingPathComponent("sets.json")
+        h.rclone.onRealSync = { try? Data("not json".utf8).write(to: sets) }
+        let ok = await h.run()
+        #expect(ok == false)
+        #expect(try h.records.recent(limit: 5).contains { $0.setID == PairID.agent.set })
+        #expect(try h.active.contains(.agentFailed))
+    }
+
+    @Test func anUntrustedHelperMidRunFailsTheAgent() async throws {
+        let h = try Harness(); try h.prime(); h.change("flowapp/a.txt")
+        h.rclone.failRealSync(AgentFailure.untrustedHelper)
+        let ok = await h.run()
+        #expect(ok == false)
+        #expect(try h.active == [.agentFailed])
+    }
+
+    @Test func aHoldIsStoredBeforeTheSyncSoAKillCantLoseIt() async throws {
+        let h = try Harness(); try h.prime(); h.change("flowapp/a.txt")
+        h.rclone.script(dryDeletions: (0..<500).map { "f\($0)" })
+        final class Seen: @unchecked Sendable { var problems: [Problem] = [] }
+        let seen = Seen()
+        h.rclone.onRealSync = { seen.problems = (try? h.active) ?? [] }
+        await h.run()
+        #expect(seen.problems == [.deletionsHeld])
+        #expect(h.notifier.posted == [.deletionsHeld])
+    }
+
+    @Test func aStoredHoldIsNotifiedByTheNextRunAfterAKill() async throws {
+        let h = try Harness(); try h.prime()
+        try h.problems.store(.deletionsHeld, pair: h.pair, setName: "x", detail: "500 deletions held")
+        #expect(h.notifier.posted.isEmpty)
+        await h.run()
+        #expect(h.notifier.posted == [.deletionsHeld])
+    }
+
+    @Test func anExternalDrivePairNeverTouchesTheICloudRoot() async throws {
+        let h = try Harness(); try h.claim()
+        var d = Destination(name: "Drive", kind: .externalDrive, encrypted: false)
+        d.volumeUUID = UUID().uuidString
+        h.set.destinationIDs = [d.id]; try h.save(extra: [d])
+        h.change("flowapp/a.txt", rescan: true)
+        await h.run()
+        #expect(h.rclone.allCalls == 0)
+        #expect(h.session(d) == nil)
+        #expect(h.files.calls == 0)
+        #expect(try h.latest()?.status == .skipped)
+        #expect(try h.active.isEmpty)
+    }
+
+    @Test func theApprovedMaxDeleteIsTheReviewedCountPlusGit() async throws {
+        let h = try Harness(); try h.prime(); h.change("flowapp/a.txt")
+        let plain = (0..<500).map { "f\($0)" }
+        h.rclone.script(dryDeletions: plain)
+        await h.run()
+        h.rclone.script(dryDeletions: plain + ["p/.git/x", "p/.git/y"])
+        await h.run(RunCommand(setID: h.set.id, approvedDeletions: 500, force: true))
+        #expect(h.rclone.realSyncs.last?.mode == .mirror(maxDelete: 502))
+    }
+}
+
 @Suite struct CoordinatorRoundOneMinorTests {
     @Test func rawRcloneTextIsScrubbedInRecords() async throws {
         let h = try Harness(); try h.prime(); h.change("flowapp/a.txt")
@@ -1677,9 +1920,9 @@ private final class Harness: @unchecked Sendable {
         #expect(s.verifyOwed.isEmpty && !s.wholeSetOwed && !s.hashWholeSet && s.stoppedBy == nil)
     }
 
-    @Test func uploadLimitIsTransient() {
+    @Test func uploadLimitResumesLikeAPartialRun() {
         let line = #"{"level":"error","msg":"Failed to copy: googleapi: Error 403: User rate limit exceeded., userRateLimitExceeded","object":"a.bin"}"#
-        #expect(RcloneLogParser.outcome(exitCode: 7, log: Data(line.utf8)) == .transient)
+        #expect(RcloneLogParser.outcome(exitCode: 7, log: Data(line.utf8)) == .partial)
         let named = #"{"level":"error","msg":"Failed to copy: permission denied","object":"User rate limit exceeded.txt"}"#
         #expect(RcloneLogParser.outcome(exitCode: 7, log: Data(named.utf8)) == .permanent)
     }

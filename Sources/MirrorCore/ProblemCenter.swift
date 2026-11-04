@@ -78,6 +78,17 @@ public struct ProblemCenter: Sendable {
         self.postTimeout = postTimeout
     }
 
+    /// Saves a problem without notifying, for moments a notification mustn't delay. `raise` or the
+    /// next run's `retryPending` delivers it, so a kill right after this loses nothing.
+    public func store(_ problem: Problem, pair: PairID, setName: String, detail: String) throws {
+        try locked {
+            var all = try load()
+            guard !all.contains(where: { $0.problem == problem && $0.pair == pair }) else { return }
+            all.append(ActiveProblem(problem: problem, pair: pair, setName: setName, detail: detail, since: Date()))
+            try save(all)
+        }
+    }
+
     public func raise(_ problem: Problem, pair: PairID, setName: String, detail: String) async throws {
         let toPost: Bool = try locked {
             var all = try load()

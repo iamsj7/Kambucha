@@ -147,7 +147,7 @@ private func has(_ args: [String], _ flag: String, _ value: String? = nil) -> Bo
         let a = RcloneCommand.arguments(CheckRequest(source: URL(fileURLWithPath: "/s"), destination: "/d",
             filterFile: URL(fileURLWithPath: "/f"), filesFrom: URL(fileURLWithPath: "/list"), sizeOnly: false,
             oneWay: false, cryptCheck: false, context: ctx(), logFile: URL(fileURLWithPath: "/l")))
-        #expect(has(a, "--files-from", "/list"))
+        #expect(has(a, "--files-from-raw", "/list"))
         #expect(!a.contains("--filter-from"))
     }
 }

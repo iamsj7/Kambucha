@@ -247,6 +247,25 @@ private struct NoSession: RunSession {
         #expect(result.summary.planned == ["p/g.txt"])
     }
 
+    /// Plain `--files-from` reads `#` as a comment and trims spaces, so these went unchecked.
+    @Test func awkwardNamesAreHashedForReal() async throws {
+        let dir = try tempDir("names"); defer { try? FileManager.default.removeItem(at: dir) }
+        let src = dir.appendingPathComponent("s"), dst = dir.appendingPathComponent("d"), logs = dir.appendingPathComponent("l")
+        for d in [src, dst, logs] { try FileManager.default.createDirectory(at: d, withIntermediateDirectories: true) }
+        let names = ["#hash.txt", " lead.txt"]
+        for n in names {
+            try Data("aaaa".utf8).write(to: src.appendingPathComponent(n))
+            try Data("bbbb".utf8).write(to: dst.appendingPathComponent(n))   // same size, so only a hash can tell
+        }
+        let filter = dir.appendingPathComponent("f"); try Data().write(to: filter)
+        let verifier = Verifier(rclone: RcloneRunner.localOnly(binary: binary), auditor: AllUploaded())
+        let result = try await verifier.quick(source: src, destination: dst.path,
+                                              profile: .profile(for: Destination(name: "d", kind: .iCloudFolder)),
+                                              context: plain, filter: filter, copied: names, oneWay: false, logDir: logs)
+        #expect(result.differences == 2)
+        #expect(Set(result.differingPaths) == Set(names))
+    }
+
     @Test func anEmptyFirstRunPasses() async throws {
         let r = try Rig()
         #expect(try await r.run().status == .success)

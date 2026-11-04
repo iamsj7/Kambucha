@@ -10,6 +10,8 @@ public struct VerifyResult: Equatable, Sendable {
     /// What the checks named as different, relative to what was checked. May be shorter than
     /// `differences`, so its being empty says nothing.
     public var differingPaths: [String] = []
+    /// Asked to be hashed, but evicted, so left unproven. Only the Quick check skips these.
+    public var skippedFreed: [String] = []
     /// The only value that may drive "Backed Up": clean checks and nothing pending, refused or missing.
     public var backedUp: Bool {
         checksClean && audit.pending.isEmpty && audit.refused.isEmpty && audit.missing.isEmpty
@@ -48,7 +50,11 @@ public struct Verifier: Sendable {
         var differing = size.flagged
         var toHash = copied
         let root = URL(fileURLWithPath: destination)
-        if audits(profile) { toHash = copied.filter { !isDataless(root.appendingPathComponent($0)) } }
+        var skipped: [String] = []
+        if audits(profile) {
+            toHash = copied.filter { !isDataless(root.appendingPathComponent($0)) }
+            skipped = copied.filter { isDataless(root.appendingPathComponent($0)) }
+        }
         if !toHash.isEmpty {
             let list = try writeList(toHash, to: logDir.appendingPathComponent("quick-copied.list"))
             let hash = try await run(CheckRequest(
@@ -69,45 +75,61 @@ public struct Verifier: Sendable {
         var result = VerifyResult(differences: differences, audit: audit)
         result.matchingFiles = size.matching
         result.differingPaths = differing
+        result.skippedFreed = skipped
         return result
     }
 
     /// Re-reads files already known to be pending or refused.
     public func audit(_ urls: [URL]) async throws -> AuditResult { try await runAudit(urls) }
 
-    /// `oneWay` is for a held set, whose mirror keeps extras on purpose.
+    /// True when iCloud has evicted this file, so hashing it would download it.
+    public func isFreed(_ url: URL) -> Bool { isDataless(url) }
+
+    /// `oneWay` is for a held set, whose mirror keeps extras on purpose. `mustHash` names evicted files
+    /// to include whatever the sample picks, as nothing else can ever prove them.
     public func deep(source: URL, destination: String, profile: DestinationProfile, context: RcloneContext,
-                     filter: URL, sampleFreed: Int, logDir: URL, oneWay: Bool = false) async throws -> VerifyResult {
+                     filter: URL, sampleFreed: Int, logDir: URL, oneWay: Bool = false,
+                     mustHash: [String] = []) async throws -> VerifyResult {
         guard audits(profile) else {
-            let d = try await run(CheckRequest(
+            let check = try await run(CheckRequest(
                 source: source, destination: destination, filterFile: filter, filesFrom: nil, sizeOnly: false,
                 oneWay: oneWay, cryptCheck: profile.encrypted, context: context,
-                logFile: logDir.appendingPathComponent("deep.log")).applying(profile)).differences
-            return VerifyResult(differences: d, audit: AuditResult(pending: [], refused: []), checksClean: d == 0)
+                logFile: logDir.appendingPathComponent("deep.log")).applying(profile))
+            var result = VerifyResult(differences: check.differences, audit: AuditResult(pending: [], refused: []),
+                                      checksClean: check.differences == 0)
+            result.differingPaths = check.flagged
+            return result
         }
         let root = URL(fileURLWithPath: destination)
         // A missing or unreadable mirror must never look like an empty, passing one.
         guard let all = Self.files(under: root) else { throw VerifyError.mirrorUnreadable(destination) }
         // Same filtered size-only check as Quick, so a file missing from the mirror fails Deep too.
-        var differences = try await run(CheckRequest(
+        let size = try await run(CheckRequest(
             source: source, destination: destination, filterFile: filter, filesFrom: nil, sizeOnly: true,
-            oneWay: oneWay, cryptCheck: false, context: context, logFile: logDir.appendingPathComponent("deep-size.log")).applying(profile)).differences
+            oneWay: oneWay, cryptCheck: false, context: context, logFile: logDir.appendingPathComponent("deep-size.log")).applying(profile))
+        var differences = size.differences
+        var differing = size.flagged
         var present: [String] = [], freed: [String] = []
         for rel in all {
             if isDataless(root.appendingPathComponent(rel)) { freed.append(rel) } else { present.append(rel) }
         }
-        let sampled = Array(freed.shuffled().prefix(max(0, sampleFreed)))
+        let required = Set(mustHash).intersection(freed)
+        let sampled = Array(required) + freed.filter { !required.contains($0) }.shuffled().prefix(max(0, sampleFreed))
         let list = present + sampled
         if !list.isEmpty {
-            // No filter alongside --files-from: rclone cannot combine them.
-            differences += try await run(CheckRequest(
+            // No filter alongside a file list: rclone cannot combine them.
+            let hash = try await run(CheckRequest(
                 source: source, destination: destination, filterFile: nil,
                 filesFrom: try writeList(list, to: logDir.appendingPathComponent("deep.list")),
                 sizeOnly: false, oneWay: oneWay, cryptCheck: profile.encrypted, context: context,
-                logFile: logDir.appendingPathComponent("deep.log")).applying(profile)).differences
+                logFile: logDir.appendingPathComponent("deep.log")).applying(profile))
+            differences += hash.differences
+            differing += hash.flagged
         }
         let audit = try await runAudit((present + freed).map { root.appendingPathComponent($0) })
-        return VerifyResult(differences: differences, audit: audit)
+        var result = VerifyResult(differences: differences, audit: audit)
+        result.differingPaths = differing
+        return result
     }
 
     private static let linkSuffix = ".rclonelink"

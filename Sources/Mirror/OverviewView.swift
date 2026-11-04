@@ -152,6 +152,7 @@ struct ReviewItemRow: View {
         case .trackedInExcluded: "Tracked by git, inside an excluded folder"
         case .secretInExcluded: "Looks like a secret, inside an excluded folder"
         case .refusedByICloud: "iCloud won't accept this file"
+        case .unprovenFreed: "Only in iCloud, so Mirror couldn't confirm its contents"
         }
     }
 

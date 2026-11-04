@@ -154,7 +154,8 @@ public enum RcloneLogParser {
         "oauth2: token expired and refresh token is not set",  // golang.org/x/oauth2
     ]
 
-    /// Google's daily upload limit, which `--drive-stop-on-upload-limit` makes fatal. It clears by itself.
+    /// Google's daily upload limit, which `--drive-stop-on-upload-limit` makes fatal. Not a failure:
+    /// it lifts within a day, so it ends a run the way `--max-duration` does, and the next one resumes.
     private static func isUploadLimit(_ msg: String, removing object: String?) -> Bool {
         var text = msg
         if let object, !object.isEmpty { text = text.replacingOccurrences(of: object, with: "") }
@@ -181,7 +182,7 @@ public enum RcloneLogParser {
         let errorLines = lines(log).filter(\.isError)
         if errorLines.contains(where: { $0.msg == "Got fatal error on delete: --max-delete threshold reached" }) { return .safetyStop }
         if errorLines.contains(where: { line in line.msg.map { isAuthError($0, removing: line.object) } ?? false }) { return .authExpired }
-        if errorLines.contains(where: { line in line.msg.map { isUploadLimit($0, removing: line.object) } ?? false }) { return .transient }
+        if errorLines.contains(where: { line in line.msg.map { isUploadLimit($0, removing: line.object) } ?? false }) { return .partial }
         return outcome(exitCode: exitCode)
     }
 

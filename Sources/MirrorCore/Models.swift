@@ -86,7 +86,7 @@ public struct PairID: Codable, Hashable, Sendable {
 }
 
 public struct ReviewItem: Codable, Equatable, Identifiable, Sendable {
-    public enum Kind: String, Codable, Sendable { case trackedInExcluded, secretInExcluded, refusedByICloud }
+    public enum Kind: String, Codable, Sendable { case trackedInExcluded, secretInExcluded, refusedByICloud, unprovenFreed }
     public var id: String
     public var path: String
     public var kind: Kind
@@ -113,7 +113,7 @@ public struct SetState: Codable, Equatable, Sendable {
     public var uploadingSince: Date?
     /// A whole-set run started and hasn't passed. FSEvents may not replay why it was needed.
     public var wholeSetOwed = false
-    /// `--max-duration` stopped the last run. It resumes at the next wake-up.
+    /// `--max-duration` or Google's daily upload limit stopped the last run. It resumes at the next wake-up.
     public var syncIncomplete = false
     /// Project folders from the last scan. Nil until the first, so only later arrivals count as new.
     public var knownProjects: [String]?
@@ -125,6 +125,10 @@ public struct SetState: Codable, Equatable, Sendable {
     /// A stop that never reached the backup: iCloud gone, source unreadable, marker lost, sign-in
     /// expired. Cleared only when the same check next passes.
     public var stoppedBy: Problem?
+    /// Which of `verifyOwed` iCloud has evicted, and since when. These can't be hashed without a
+    /// download, so they wait: back on disk, or sampled by the deep check. They stay owed meanwhile,
+    /// but don't force a run at every wake-up.
+    public var freedSince: [String: Date] = [:]
     public init() {}
 
     /// Fields added after the first release of this file may be absent, and that must never make
@@ -151,6 +155,7 @@ public struct SetState: Codable, Equatable, Sendable {
         verifyOwed = try c.decodeIfPresent([String].self, forKey: .verifyOwed) ?? []
         hashWholeSet = try c.decodeIfPresent(Bool.self, forKey: .hashWholeSet) ?? false
         stoppedBy = try c.decodeIfPresent(Problem.self, forKey: .stoppedBy)
+        freedSince = try c.decodeIfPresent([String: Date].self, forKey: .freedSince) ?? [:]
     }
 
     /// The one source of "Backed Up": the last run finished, checks passed, everything reached iCloud.

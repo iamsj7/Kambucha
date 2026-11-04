@@ -15,14 +15,15 @@ public struct RunPaths: Sendable {
 }
 
 /// Runs every due pair, one at a time, through the flow in spec section 10. This owns the rule the
-/// whole app depends on: the stored event ID moves only in `finish`, after sync and verification
-/// both passed, so anything else (a failure, a kill, a held source) replays from where it was.
+/// whole app depends on: the stored event ID moves only after sync and verification both passed
+/// (`finish`), or when a batch held nothing but excluded paths, so nothing was owed. Anything else
+/// (a failure, a kill, a held source) replays from where it was.
 public final class RunCoordinator: Sendable {
     private static let log = Logger(subsystem: MirrorCore.bundleID, category: "RunCoordinator")
     private static let retention: TimeInterval = 30 * 86_400
     private static let notifyAfterFailures = 3
     private static let patience: TimeInterval = 86_400   // refused and stalled files
-    private static let freedSample = 20
+    static let freedSample = 20
     /// Past this the list stops being cheap to save at every step, so a flag stands in for it.
     static let maxOwed = 5_000
     /// Finder's droppings don't make a source any less empty.
@@ -36,18 +37,16 @@ public final class RunCoordinator: Sendable {
     private let remote: any RemoteFileAccessing
     private let paths: RunPaths
     private let helperCheck: @Sendable () throws -> Void
-    private let iCloudSignedIn: @Sendable () -> Bool
 
     public init(store: ConfigStore, records: RunRecordStore, problems: ProblemCenter, rclone: any RcloneRunning,
                 feed: any ChangeFeeding, verifier: Verifier, guard pathGuard: PathGuard, detector: StackDetector,
                 filters: FilterBuilder, clock: @escaping @Sendable () -> Date,
                 sessions: @escaping @Sendable (Destination) -> any RunSession, remote: any RemoteFileAccessing,
-                paths: RunPaths, helperCheck: @escaping @Sendable () throws -> Void = {},
-                iCloudSignedIn: @escaping @Sendable () -> Bool = { true }) {
+                paths: RunPaths, helperCheck: @escaping @Sendable () throws -> Void = {}) {
         self.store = store; self.records = records; self.problems = problems; self.rclone = rclone
         self.feed = feed; self.verifier = verifier; self.pathGuard = pathGuard; self.detector = detector
         self.filters = filters; self.clock = clock; self.sessions = sessions; self.remote = remote; self.paths = paths
-        self.helperCheck = helperCheck; self.iCloudSignedIn = iCloudSignedIn
+        self.helperCheck = helperCheck
     }
 
     /// Another run holding the lock means leave quietly: no state, record or pid file is touched.
@@ -125,7 +124,11 @@ public final class RunCoordinator: Sendable {
         for pair in RunPlanner.order(pairs) {
             if Task.isCancelled { break }
             guard let destination = destinations.first(where: { $0.id == pair.destination }) else { continue }
-            guard await run(pair, destination: destination, command: command, expired: &expired) else { break }
+            switch await run(pair, destination: destination, command: command, expired: &expired) {
+            case .carryOn: continue
+            case .stop: return true
+            case .agentFailed: return false
+            }
         }
         return true
     }
@@ -161,7 +164,11 @@ public final class RunCoordinator: Sendable {
         case verificationFailed(differences: Int)
         case changedDuringRun
         case stateNotSaved
+        case iCloudSignedOut
     }
+
+    /// How one pair's run leaves the rest. `stop` is a cancelled run. `agentFailed` also fails the agent.
+    private enum PairEnd { case carryOn, stop, agentFailed }
 
     /// One folder's worth of work: the whole set, or one project.
     private struct Slice {
@@ -173,18 +180,31 @@ public final class RunCoordinator: Sendable {
         var logDir: URL
     }
 
-    /// False when the run was cancelled, so no further pair starts.
-    private func run(_ pair: PairID, destination: Destination, command: RunCommand, expired: inout Set<UUID>) async -> Bool {
-        let lock = RunLock(url: paths.pairLock(pair))
-        guard lock.attempt() == .acquired else { return true }
-        defer { lock.release() }
+    private func run(_ pair: PairID, destination: Destination, command: RunCommand, expired: inout Set<UUID>) async -> PairEnd {
         // Read here, not at the start: an earlier pair may have applied presets to this set.
-        guard let set = (try? store.loadSets())?.first(where: { $0.id == pair.set }) else { return true }
+        let found: BackupSet?
+        do { found = try store.loadSets().first(where: { $0.id == pair.set }) } catch {
+            await report("Mirror could not read its settings")
+            return .agentFailed
+        }
+        guard let set = found else { return .carryOn }   // removed since the run began
 
         let started = clock()
         var tally = Tally()
         tally.trigger = command.force || command.approvedDeletions != nil ? .manual : .schedule
         func record() { write(tally, set: set, destination: destination, started: started) }
+
+        let lock = RunLock(url: paths.pairLock(pair))
+        switch lock.attempt() {
+        case .acquired: break
+        case .held: return .carryOn
+        case .openFailed:
+            tally.errors = ["This backup's lock could not be opened"]
+            record()
+            await raise(.repeatedFailures, pair, set, detail: "Mirror could not open this backup's lock")
+            return .carryOn
+        }
+        defer { lock.release() }
 
         let loaded: SetState
         do { loaded = try store.state(for: pair) } catch {
@@ -192,24 +212,30 @@ public final class RunCoordinator: Sendable {
             await raise(.repeatedFailures, pair, set, detail: "Mirror can't read what it saved about this backup")
             tally.errors = ["State file unreadable"]
             record()
-            return true
+            return .carryOn
         }
         if set.isPaused {
             tally.status = .skipped; tally.scope = "paused"
             record()
-            return true
+            return .carryOn
+        }
+        // Not wired in yet (Task 21's list). Treating it as local would put its files in the iCloud root.
+        if destination.kind == .externalDrive {
+            tally.status = .skipped; tally.scope = "external drive"
+            record()
+            return .carryOn
         }
         if destination.encrypted, !destination.recoveryKitConfirmed, !Self.isLocal(destination.kind) {
             tally.status = .skipped; tally.scope = "waiting for Recovery Kit"
             record()
-            return true
+            return .carryOn
         }
 
         let job = Job(pair: pair, set: set, destination: destination,
                       approved: loaded.heldDeletions > 0 ? command.approvedDeletions : nil,
                       profile: .profile(for: destination), isLocal: Self.isLocal(destination.kind))
         var state = loaded
-        var carryOn = true
+        var end = PairEnd.carryOn
         if expired.contains(destination.id) {
             state.stoppedBy = .signInExpired
             tally.errors = ["Sign-in expired"]
@@ -218,7 +244,7 @@ public final class RunCoordinator: Sendable {
             do {
                 try await process(job, command: command, state: &state, tally: &tally)
             } catch {
-                carryOn = absorb(error, job, state: &state, tally: &tally, expired: &expired)
+                end = absorb(error, job, state: &state, tally: &tally, expired: &expired)
             }
         }
         if state != loaded, !save(state, pair), tally.status != .failed, tally.status != .verificationFailed {
@@ -228,9 +254,11 @@ public final class RunCoordinator: Sendable {
         }
         tally.pending = state.pendingUploads
         tally.refused = state.refusedSince.count
+        // Saved ahead of the record, so a kill between them can't leave a stop no one was told of.
+        for notice in tally.notices { keep(notice.problem, notice.pair, set, detail: notice.detail) }
         record()
         for notice in tally.notices { await raise(notice.problem, notice.pair, set, detail: notice.detail) }
-        return carryOn
+        return end
     }
 
     /// Exhaustive, so a new kind has to decide. An external drive will be local too.
@@ -251,14 +279,16 @@ public final class RunCoordinator: Sendable {
         let sample = sampleCount(set.source)
         try pathGuard.validateRun(set, destination: job.destination, marker: RootMarker(sets: [set.id: set.name]),
                                   sampleFileCount: sample, state: guarded)
-        clear([.permissionLost, .iCloudUnavailable], pair)
-        if state.stoppedBy == .permissionLost || state.stoppedBy == .iCloudUnavailable { state.stoppedBy = nil }
+        clear([.permissionLost], pair)
+        if state.stoppedBy == .permissionLost { state.stoppedBy = nil }
 
         let localContext = RcloneContext(configPath: "/dev/null", environment: [:])
         if job.isLocal {
             guard !job.destination.encrypted else { throw RcloneSessionError.encryptionNotSupported }
             try await confirmClaim(job, endpoint: pathGuard.backupRoot.path, context: localContext, files: LocalFiles(), state: &state)
         }
+
+        refreshFreed(job, set: set, state: &state)
 
         // Find changes, with no disk walk and no network when there are none.
         let batch = try await feed.changes(in: set.source, since: state.lastEventID)
@@ -388,6 +418,7 @@ public final class RunCoordinator: Sendable {
             holding = true
             state.heldDeletions = count
             tally.notices.append((.deletionsHeld, pair, "\(count) deletions held"))
+            keep(.deletionsHeld, pair, set, detail: "\(count) deletions held")   // no posting with a session open
         }
 
         // Saved first, so a kill during the sync can't lose a hold or what it was about to copy.
@@ -425,6 +456,7 @@ public final class RunCoordinator: Sendable {
         var verified = VerifyResult(differences: 0, audit: AuditResult(pending: [], refused: []))
         let wholePass = plan.isDailyPass && scope == .wholeSet
         let matcher = FilterMatcher(lines: filters.lines(for: set, projects: projects, scope: nil))
+        var listOverflowed = false
         for (slice, summary) in zip(slices, perSlice) {
             // Carried files that have since left the source, or the rules, have nothing to prove.
             let owed = Self.within(slice, carried).filter {
@@ -436,56 +468,95 @@ public final class RunCoordinator: Sendable {
                                                   logDir: slice.logDir, auditWholeMirror: wholePass)
             Self.merge(result, of: slice, into: &verified)
             guard result.checksClean else { continue }   // a mismatch stays owed, or the next run would call it clean
-            prove(slice, audit: result.audit, mirror: mirrorRoot(set), state: &state)
+            if prove(slice, result, mirror: mirrorRoot(set), state: &state) { listOverflowed = true }
             try persist(state, pair)
         }
         tally.filesChecked = verified.matchingFiles
         var deepRan = false
         if let slice = slices.first, scope == .wholeSet, flaggedBefore || (plan.isDeepDue && plan.isDailyPass && !holding) {
+            // Oldest first, so a long list still gets through them. They're sampled, not downloaded wholesale.
+            let due = state.freedSince.sorted { ($0.value, $0.key) < ($1.value, $1.key) }.map(\.key).prefix(Self.freedSample)
             let deep = try await verifier.deep(source: slice.source, destination: slice.destination, profile: job.profile,
-                                               context: context, filter: slice.filter, sampleFreed: Self.freedSample,
-                                               logDir: slice.logDir, oneWay: holding)
+                                               context: context, filter: slice.filter,
+                                               sampleFreed: Self.freedSample - due.count, logDir: slice.logDir,
+                                               oneWay: holding, mustHash: Array(due))
             verified.differences += deep.differences
             verified.checksClean = verified.checksClean && deep.checksClean
             verified.differingPaths += deep.differingPaths
-            if deep.checksClean { track(deep.audit, mirror: mirrorRoot(set), state: &state) }
+            if deep.checksClean {
+                track(deep.audit, mirror: mirrorRoot(set), state: &state)
+                state.verifyOwed.removeAll(where: due.contains)
+                for path in due { state.freedSince[path] = nil }
+            }
+            flagFreed(state: &state)
             deepRan = true
         }
         guard verified.checksClean else {
             tally.verification = "Quick check found \(verified.differences) differences"
-            if await changedDuringRun(set, differing: verified.differingPaths, since: batch.latestEventID) { throw Stop.changedDuringRun }
+            if await changedDuringRun(set, verified, since: batch.latestEventID) { throw Stop.changedDuringRun }
             throw Stop.verificationFailed(differences: verified.differences)
         }
         tally.verification = deepRan ? "Quick and deep checks passed" : "Quick check passed"
         // Every file this run touched was just hashed. Only what an earlier run left behind needs the deep check.
-        if !flaggedBefore || deepRan { state.hashWholeSet = false }
+        if (!flaggedBefore || deepRan), !listOverflowed { state.hashWholeSet = false }
 
         try await reconcileUploads(job, set: set, state: &state, tally: &tally)
         finish(job, plan: plan, scope: scope, batch: batch, verified: verified, holding: holding, deepRan: deepRan, state: &state)
         tally.status = holding ? .held : (verified.backedUp && state.isBackedUp ? .success : .partial)
     }
 
-    /// Adds to what's owed. Past the bound, the flag replaces the list.
-    private func owe(_ paths: [String], state: inout SetState) {
-        guard !paths.isEmpty, !state.hashWholeSet else { return }
+    /// Adds to what's owed, even with the flag set: the flag can clear in this same run, and what
+    /// it stood for mustn't go with it. Past the bound, the flag replaces the list. True then.
+    @discardableResult
+    private func owe(_ paths: [String], state: inout SetState) -> Bool {
+        guard !paths.isEmpty else { return false }
         let all = Set(state.verifyOwed).union(paths)
-        if all.count > Self.maxOwed {
-            state.hashWholeSet = true
-            state.verifyOwed = []
-        } else {
+        guard all.count > Self.maxOwed else {
             state.verifyOwed = all.sorted()
+            return false
         }
+        state.hashWholeSet = true
+        state.verifyOwed = []
+        state.freedSince = [:]
+        return true
     }
 
     /// A slice passed its checks: what it owed is proven, and its audit carries on in the upload
-    /// tracking. A file the audit couldn't find proves nothing, so it stays owed if the source has it.
-    private func prove(_ slice: Slice, audit: AuditResult, mirror: URL, state: inout SetState) {
+    /// tracking. Two things prove nothing and stay owed: a file the audit couldn't find, and one
+    /// iCloud evicted, which was never hashed. True if that outgrew the list.
+    private func prove(_ slice: Slice, _ result: VerifyResult, mirror: URL, state: inout SetState) -> Bool {
         let prefix = slice.folder.map { $0 + "/" } ?? ""
         state.verifyOwed.removeAll { $0.hasPrefix(prefix) }
-        track(audit, mirror: mirror, state: &state)
+        track(result.audit, mirror: mirror, state: &state)
         let root = mirror.path + "/"
-        let lost = audit.missing.map { $0.hasPrefix(root) ? String($0.dropFirst(root.count)) : $0 }
-        owe(Self.within(slice, lost).filter { Self.existsInSource($0, slice) }.map { Self.inSet($0, slice) }, state: &state)
+        let lost = result.audit.missing.map { $0.hasPrefix(root) ? String($0.dropFirst(root.count)) : $0 }
+        let missing = Self.within(slice, lost).filter { Self.existsInSource($0, slice) }.map { Self.inSet($0, slice) }
+        let freed = result.skippedFreed.map { Self.inSet($0, slice) }
+        let overflowed = owe(missing + freed, state: &state)
+        let now = clock()
+        if !overflowed { for path in freed where state.freedSince[path] == nil { state.freedSince[path] = now } }
+        let owed = Set(state.verifyOwed)
+        state.freedSince = state.freedSince.filter { owed.contains($0.key) }
+        return overflowed
+    }
+
+    /// One flag read per evicted file, no walk. One that came back is hashed by the next run.
+    private func refreshFreed(_ job: Job, set: BackupSet, state: inout SetState) {
+        guard job.isLocal else { return }
+        let mirror = mirrorRoot(set)
+        for path in state.freedSince.keys where !verifier.isFreed(mirror.appendingPathComponent(path)) {
+            state.freedSince[path] = nil
+        }
+        state.reviewItems.removeAll { $0.kind == .unprovenFreed && state.freedSince[$0.path] == nil }
+    }
+
+    /// Whatever a deep check couldn't prove has outlasted it, so the owner hears about it.
+    private func flagFreed(state: inout SetState) {
+        state.reviewItems.removeAll { $0.kind == .unprovenFreed && state.freedSince[$0.path] == nil }
+        for path in state.freedSince.keys.sorted()
+        where !state.reviewItems.contains(where: { $0.kind == .unprovenFreed && $0.path == path }) {
+            state.reviewItems.append(ReviewItem(id: "unproven:\(path)", path: path, kind: .unprovenFreed))
+        }
     }
 
     /// Takes on an audit's findings without re-reading anything. `reconcileUploads` applies the rules.
@@ -518,7 +589,9 @@ public final class RunCoordinator: Sendable {
             if state.lastDeepCheck == nil { state.lastDeepCheck = now }
         }
         if deepRan { state.lastDeepCheck = now }
-        var solved: [Problem] = [.verificationFailed, .repeatedFailures, .signInExpired]
+        var solved: [Problem] = [.repeatedFailures, .signInExpired]
+        // An evicted file passed through unhashed, so a mismatch reported on it still stands.
+        if state.freedSince.isEmpty { solved.append(.verificationFailed) }
         if !holding {
             state.heldDeletions = 0
             solved.append(.deletionsHeld)
@@ -559,10 +632,13 @@ public final class RunCoordinator: Sendable {
     }
 
     /// Spec section 11: a file that changed under the run is retried by the next one, not an alarm.
-    /// Only the files that differ count, so a real mismatch beside unrelated activity still alerts.
-    private func changedDuringRun(_ set: BackupSet, differing: [String], since: UInt64) async -> Bool {
-        guard !differing.isEmpty, let later = try? await feed.changes(in: set.source, since: since) else { return false }
-        return later.paths.contains { changed in differing.contains { changed.hasSuffix("/" + $0) } }
+    /// Every difference has to be accounted for, by count and by path, or a real mismatch could
+    /// hide behind unrelated activity.
+    private func changedDuringRun(_ set: BackupSet, _ verified: VerifyResult, since: UInt64) async -> Bool {
+        let differing = verified.differingPaths
+        guard !differing.isEmpty, differing.count >= verified.differences,
+              let later = try? await feed.changes(in: set.source, since: since) else { return false }
+        return differing.allSatisfy { path in later.paths.contains { $0.hasSuffix("/" + path) } }
     }
 
     // MARK: Claiming a destination
@@ -582,6 +658,8 @@ public final class RunCoordinator: Sendable {
         if let data = try await files.read(path, context: context) {
             guard let parsed = try? JSONDecoder().decode(RootMarker.self, from: data) else { throw GuardFailure.destinationUnclaimed }
             marker = parsed
+            // Signing out can leave a local copy of the folder behind, marker included.
+            try await requireICloud(job, at: URL(fileURLWithPath: path))
         }
         if marker?.claims(set.id) != true {
             guard state.lastFinished == nil, state.lastEventID == nil, state.lastFullPass == nil else {
@@ -598,6 +676,7 @@ public final class RunCoordinator: Sendable {
             if taken.contains(where: { $0.lowercased() == name || $0.lowercased() == name + "/" }) {
                 throw GuardFailure.destinationUnclaimed
             }
+            try await requireICloud(job, at: pathGuard.backupRoot.deletingLastPathComponent())
             var claimed = marker ?? RootMarker()
             claimed.sets[set.id] = set.name
             let encoder = JSONEncoder()
@@ -607,8 +686,16 @@ public final class RunCoordinator: Sendable {
         }
         try pathGuard.validateRun(set, destination: job.destination, marker: marker,
                                   sampleFileCount: 1, state: SetState())
-        clear([.destinationMissing, .signInExpired], job.pair)
+        clear([.destinationMissing, .signInExpired, .iCloudUnavailable], job.pair)
         state.stoppedBy = nil
+    }
+
+    /// One resource read. Measured in a real iCloud Drive: the folder and a marker are ubiquitous from
+    /// the moment they're written, so "not ubiquitous" means iCloud has let go of this folder. The
+    /// agent has no iCloud entitlement, so `ubiquityIdentityToken` can't be relied on here.
+    private func requireICloud(_ job: Job, at url: URL) async throws {
+        guard job.destination.kind == .iCloudFolder else { return }
+        if try await !verifier.audit([url]).refused.isEmpty { throw Stop.iCloudSignedOut }
     }
 
     // MARK: Projects
@@ -684,9 +771,9 @@ public final class RunCoordinator: Sendable {
     // MARK: Failures
 
     /// Turns whatever stopped a run into state, a record and at most one alert. The event ID stays
-    /// put on every path through here. False when no further pair should start.
+    /// put on every path through here.
     private func absorb(_ error: any Error, _ job: Job, state: inout SetState, tally: inout Tally,
-                        expired: inout Set<UUID>) -> Bool {
+                        expired: inout Set<UUID>) -> PairEnd {
         let (pair, set) = (job.pair, job.set)
         func stop(_ problem: Problem, _ message: String, detail: String) {
             state.stoppedBy = problem
@@ -698,16 +785,13 @@ public final class RunCoordinator: Sendable {
             // Rclone's text can quote what the token endpoint said, so it stays out.
             stop(.signInExpired, "Sign-in expired", detail: job.destination.name)
         }
-        /// Sign-out can look like a lost marker. The token only ever changes the wording here.
         func iCloudStopped() {
-            let detail = iCloudSignedIn() ? "Backups are paused until it's back. Nothing was deleted."
-                : "This Mac is signed out of iCloud, so backups are paused. Nothing was deleted."
-            stop(.iCloudUnavailable, "iCloud Drive is unavailable", detail: detail)
+            stop(.iCloudUnavailable, "iCloud Drive is unavailable", detail: "Backups are paused until it's back. Nothing was deleted.")
         }
         switch error {
         case is CancellationError:
             tally.errors = ["Stopped before finishing"]
-            return false
+            return .stop
         case let failure as GuardFailure:
             switch failure {
             case .iCloudUnavailable:
@@ -721,8 +805,6 @@ public final class RunCoordinator: Sendable {
                 tally.status = .held
                 tally.errors = ["Source is empty"]
                 tally.notices.append((.deletionsHeld, pair, "the source folder is empty, so nothing was changed"))
-            case .destinationUnclaimed where job.isLocal && !iCloudSignedIn():
-                iCloudStopped()
             case .destinationUnclaimed:
                 stop(.destinationMissing, "Destination isn't claimed by this set", detail: job.destination.name)
             default:
@@ -735,9 +817,10 @@ public final class RunCoordinator: Sendable {
         case AgentFailure.untrustedHelper:
             tally.errors = ["The embedded rclone failed its signature check"]
             tally.notices.append((.agentFailed, .agent, "The embedded rclone failed its signature check"))
-            return false
+            return .agentFailed
         case Stop.rclone(.partial, _):
-            // The dry run ran out of time. Nothing changed, so this is a resume, not a failure.
+            // The dry run hit the time limit or Google's upload limit. Nothing changed, so this
+            // is a resume, not a failure.
             state.syncIncomplete = true
             tally.status = .partial
         case Stop.rclone(_, let errors):
@@ -751,6 +834,9 @@ public final class RunCoordinator: Sendable {
             tally.notices.append((.verificationFailed, pair, "\(differences) differences found"))
         case Stop.changedDuringRun:
             fail("Files changed during the run", job, state: &state, tally: &tally)
+        case Stop.iCloudSignedOut:
+            stop(.iCloudUnavailable, "iCloud Drive may be signed out",
+                 detail: "iCloud Drive may be signed out, so backups are paused. Nothing was deleted.")
         case Stop.stateNotSaved:
             fail("State could not be saved", job, state: &state, tally: &tally)
         case VerifyError.mirrorUnreadable:
@@ -768,7 +854,7 @@ public final class RunCoordinator: Sendable {
             // Arbitrary errors could describe anything, so they stay out of the record.
             fail("Run failed", job, state: &state, tally: &tally)
         }
-        return true
+        return .carryOn
     }
 
     private func fail(_ message: String, _ job: Job, state: inout SetState, tally: inout Tally) {
@@ -782,6 +868,13 @@ public final class RunCoordinator: Sendable {
 
     private func raise(_ problem: Problem, _ pair: PairID, _ set: BackupSet, detail: String) async {
         do { try await problems.raise(problem, pair: pair, setName: set.name, detail: detail) } catch {
+            Self.log.error("could not record a problem")
+        }
+    }
+
+    /// Saves a problem without posting it, for when a notification mustn't delay anything.
+    private func keep(_ problem: Problem, _ pair: PairID, _ set: BackupSet, detail: String) {
+        do { try problems.store(problem, pair: pair, setName: set.name, detail: detail) } catch {
             Self.log.error("could not record a problem")
         }
     }
