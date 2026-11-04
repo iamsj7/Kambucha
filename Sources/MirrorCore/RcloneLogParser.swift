@@ -8,6 +8,8 @@ public struct LogSummary: Equatable, Sendable {
     public var renamed: [String] = []
     public var errors: [String] = []
     public var differences = 0
+    /// Files a check found identical. Absent from rclone's log when there are none.
+    public var matching = 0
     public var bytes: Int64 = 0
     public init() {}
 }
@@ -57,6 +59,7 @@ public enum RcloneLogParser {
             let object = line.object ?? ""
             if line.isError { s.errors.append(object.isEmpty ? msg : "\(object): \(msg)") }
             if let n = differenceCount(msg) { s.differences = n }
+            if let n = matchingCount(msg) { s.matching = n }
             guard !object.isEmpty else { continue }
             if msg.hasPrefix("Copied") {
                 s.copied.append(object); sizeSum += line.size ?? 0
@@ -83,6 +86,10 @@ public enum RcloneLogParser {
     private static func differenceCount(_ msg: String) -> Int? {
         guard msg.hasSuffix(" differences found"), let n = Int(msg.dropLast(" differences found".count)) else { return nil }
         return n
+    }
+
+    private static func matchingCount(_ msg: String) -> Int? {
+        msg.hasSuffix(" matching files") ? Int(msg.dropLast(" matching files".count)) : nil
     }
 
     /// Exit-code classification only. 10 is rclone's "transfer limit reached", which `--max-duration` triggers.

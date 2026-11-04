@@ -1,6 +1,18 @@
 import Foundation
 
 public struct LogRotator {
+    /// Prunes each per-run folder directly inside `dir`, then removes those left empty.
+    public static func pruneRunFolders(_ dir: URL, olderThan date: Date) throws {
+        let fm = FileManager.default
+        guard fm.fileExists(atPath: dir.path) else { return }
+        for url in try fm.contentsOfDirectory(at: dir, includingPropertiesForKeys: [.isDirectoryKey]) {
+            guard (try? url.resourceValues(forKeys: [.isDirectoryKey]))?.isDirectory == true else { continue }
+            try pruneRunFolders(url, olderThan: date)
+            try prune(url, olderThan: date)
+            if try fm.contentsOfDirectory(atPath: url.path).isEmpty { try fm.removeItem(at: url) }
+        }
+    }
+
     /// Deletes regular files in `dir` last modified before `date`. A missing directory is not an error.
     public static func prune(_ dir: URL, olderThan date: Date) throws {
         guard FileManager.default.fileExists(atPath: dir.path) else { return }

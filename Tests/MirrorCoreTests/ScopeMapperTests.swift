@@ -58,4 +58,15 @@ struct ScopeMapperTests {
         let b = ChangeBatch(paths: [real + "/p/f"], mustRescan: false, latestEventID: 1)
         #expect(ScopeMapper().scope(for: b, root: r, isExcluded: { _ in false }) == .projects(["p"]))
     }
+
+    /// FSEvents reports `/private/tmp/...`, while URL's own spellings drop `/private`.
+    @Test func eventsSpelledWithPrivatePrefixStayInScope() throws {
+        let root = URL(fileURLWithPath: NSTemporaryDirectory()).appendingPathComponent("scope-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let real = try #require(realpath(root.path, nil))
+        defer { free(real) }
+        let batch = ChangeBatch(paths: [String(cString: real) + "/p/a.txt"], mustRescan: false, latestEventID: 1)
+        #expect(ScopeMapper().scope(for: batch, root: root, isExcluded: { _ in false }) == .projects(["p"]))
+    }
 }

@@ -79,7 +79,23 @@ public struct SetState: Codable, Equatable, Sendable {
     public var pendingUploads = 0
     public var refusedSince: [String: Date] = [:]
     public var reviewItems: [ReviewItem] = []
+    /// Mirror-relative paths behind `pendingUploads`, so later wake-ups can re-read them with no disk walk.
+    public var uploadingPaths: [String] = []
+    /// When uploads last made progress. Nil with nothing pending.
+    public var uploadingSince: Date?
+    /// A whole-set run started and hasn't passed. FSEvents may not replay why it was needed.
+    public var wholeSetOwed = false
+    /// `--max-duration` stopped the last run. It resumes at the next wake-up.
+    public var syncIncomplete = false
+    /// Project folders from the last scan. Nil until the first, so only later arrivals count as new.
+    public var knownProjects: [String]?
     public init() {}
+
+    /// The one source of "Backed Up": the last run finished, checks passed, everything reached iCloud.
+    public var isBackedUp: Bool {
+        lastFinished != nil && consecutiveFailures == 0 && heldDeletions == 0 && pendingUploads == 0
+            && refusedSince.isEmpty && !syncIncomplete && !wholeSetOwed
+    }
 }
 
 public struct Preset: Codable, Equatable, Identifiable, Sendable {

@@ -55,11 +55,14 @@ public struct SyncRequest: Equatable, Sendable {
     public var profile: DestinationProfile
     public var context: RcloneContext
     public var dryRun = false
+    /// A run the owner asked to hurry. Scheduled runs never set it.
+    public var fullSpeed = false
     public init(source: URL, destination: String, backupDir: String, filterFile: URL, logFile: URL,
-                mode: SyncMode, profile: DestinationProfile, context: RcloneContext, dryRun: Bool = false) {
+                mode: SyncMode, profile: DestinationProfile, context: RcloneContext, dryRun: Bool = false,
+                fullSpeed: Bool = false) {
         self.source = source; self.destination = destination; self.backupDir = backupDir
         self.filterFile = filterFile; self.logFile = logFile; self.mode = mode
-        self.profile = profile; self.context = context; self.dryRun = dryRun
+        self.profile = profile; self.context = context; self.dryRun = dryRun; self.fullSpeed = fullSpeed
     }
 }
 
@@ -96,7 +99,7 @@ public enum RcloneCommand {
         // --links is a plain global flag. A ":local,links:" connection string would stop rclone
         // seeing both sides as one backend config and so disable APFS clones.
         a += ["--links", "--backup-dir", r.backupDir, "--filter-from", r.filterFile.path]
-        a += ["--checkers", "2", "--transfers", "2"]
+        a += ["--checkers", r.fullSpeed ? "8" : "2", "--transfers", r.fullSpeed ? "4" : "2"]
         a += ["--retries", "3", "--retries-sleep", "30s", "--low-level-retries", "10"]
         a += r.profile.extraFlags
         if let d = r.profile.maxDuration { a += ["--max-duration", d, "--cutoff-mode", "soft"] }
