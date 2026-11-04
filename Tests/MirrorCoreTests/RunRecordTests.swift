@@ -61,4 +61,18 @@ struct LogRotatorTests {
         #expect(FileManager.default.fileExists(atPath: new.path))
         try LogRotator.prune(d.appendingPathComponent("missing"), olderThan: Date())
     }
+
+    @Test func continuesPastRemovalError() throws {
+        let d = FileManager.default.temporaryDirectory.appendingPathComponent("mirror-logs-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: d, withIntermediateDirectories: true)
+        let stuck = d.appendingPathComponent("a-stuck.log"), other = d.appendingPathComponent("b-old.log")
+        for u in [stuck, other] {
+            try Data("x".utf8).write(to: u)
+            try FileManager.default.setAttributes([.modificationDate: Date(timeIntervalSince1970: 1_000)], ofItemAtPath: u.path)
+        }
+        chflags(stuck.path, UInt32(UF_IMMUTABLE))
+        defer { chflags(stuck.path, 0) }
+        #expect(throws: (any Error).self) { try LogRotator.prune(d, olderThan: Date(timeIntervalSince1970: 2_000)) }
+        #expect(!FileManager.default.fileExists(atPath: other.path))
+    }
 }

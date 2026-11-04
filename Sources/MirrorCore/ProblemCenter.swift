@@ -30,7 +30,8 @@ public enum NotificationText {
 }
 
 public protocol Notifying: Sendable {
-    func post(_ problem: Problem, setName: String, detail: String)
+    /// Returns true only if the notification was handed to the system. False means "try again later".
+    func post(_ problem: Problem, pair: PairID, setName: String, detail: String) async -> Bool
 }
 
 public struct ActiveProblem: Codable, Equatable, Sendable {
@@ -39,42 +40,103 @@ public struct ActiveProblem: Codable, Equatable, Sendable {
     public var setName: String
     public var detail: String
     public var since: Date
-    public init(problem: Problem, pair: PairID, setName: String, detail: String, since: Date) {
-        self.problem = problem; self.pair = pair; self.setName = setName; self.detail = detail; self.since = since
+    /// False until a notification was actually delivered.
+    public var notified: Bool
+    public init(problem: Problem, pair: PairID, setName: String, detail: String, since: Date, notified: Bool = false) {
+        self.problem = problem; self.pair = pair; self.setName = setName; self.detail = detail
+        self.since = since; self.notified = notified
+    }
+    public init(from decoder: any Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        problem = try c.decode(Problem.self, forKey: .problem)
+        pair = try c.decode(PairID.self, forKey: .pair)
+        setName = try c.decode(String.self, forKey: .setName)
+        detail = try c.decode(String.self, forKey: .detail)
+        since = try c.decode(Date.self, forKey: .since)
+        notified = try c.decodeIfPresent(Bool.self, forKey: .notified) ?? true
     }
 }
 
-/// Tracks open problems per pair in `<root>/problems.json`. A problem notifies once until cleared.
+public struct ProblemCenterError: Error, Equatable { public var message: String }
+
+/// Tracks open problems per pair in `<root>/problems.json`. A problem notifies once until cleared;
+/// a notification that was not delivered is retried. All file access is serialised by `problems.lock`,
+/// so the agent and the UI can both use it.
 public struct ProblemCenter: Sendable {
+    private let root: URL
     private let url: URL
     private let notifier: any Notifying
     public init(root: URL, notifier: any Notifying) {
-        url = root.appendingPathComponent("problems.json"); self.notifier = notifier
+        self.root = root; url = root.appendingPathComponent("problems.json"); self.notifier = notifier
     }
 
-    public func raise(_ problem: Problem, pair: PairID, setName: String, detail: String) throws {
-        var all = try active()
-        if all.contains(where: { $0.problem == problem && $0.pair == pair }) { return }
-        all.append(ActiveProblem(problem: problem, pair: pair, setName: setName, detail: detail, since: Date()))
-        try save(all)
-        notifier.post(problem, setName: setName, detail: detail)
+    public func raise(_ problem: Problem, pair: PairID, setName: String, detail: String) async throws {
+        let toPost: Bool = try locked {
+            var all = try load()
+            if let existing = all.first(where: { $0.problem == problem && $0.pair == pair }) {
+                return !existing.notified
+            }
+            all.append(ActiveProblem(problem: problem, pair: pair, setName: setName, detail: detail, since: Date()))
+            try save(all)
+            return true
+        }
+        guard toPost else { return }
+        let stored = try active().first { $0.problem == problem && $0.pair == pair }
+        let ok = await notifier.post(problem, pair: pair, setName: stored?.setName ?? setName,
+                                     detail: stored?.detail ?? detail)
+        if ok { try markNotified(problem, pair) }
+    }
+
+    /// Retries every problem whose notification was not delivered. Call once per run.
+    public func retryPending() async throws {
+        for p in try active() where !p.notified {
+            if await notifier.post(p.problem, pair: p.pair, setName: p.setName, detail: p.detail) {
+                try markNotified(p.problem, p.pair)
+            }
+        }
     }
 
     public func clear(_ problem: Problem, pair: PairID) throws {
-        let all = try active()
-        let kept = all.filter { !($0.problem == problem && $0.pair == pair) }
-        if kept.count != all.count { try save(kept) }
+        try locked {
+            let all = try load()
+            let kept = all.filter { !($0.problem == problem && $0.pair == pair) }
+            if kept.count != all.count { try save(kept) }
+        }
     }
 
-    public func active() throws -> [ActiveProblem] {
+    public func active() throws -> [ActiveProblem] { try locked { try load() } }
+
+    private func markNotified(_ problem: Problem, _ pair: PairID) throws {
+        try locked {
+            var all = try load()
+            guard let i = all.firstIndex(where: { $0.problem == problem && $0.pair == pair }) else { return }
+            all[i].notified = true
+            try save(all)
+        }
+    }
+
+    private func locked<T>(_ body: () throws -> T) throws -> T {
+        let lock = RunLock(url: root.appendingPathComponent("problems.lock"))
+        guard lock.acquire(timeout: 5) else { throw ProblemCenterError(message: "problems.lock busy") }
+        defer { lock.release() }
+        return try body()
+    }
+
+    /// A corrupt file is moved aside and treated as empty so it can't block every alert.
+    private func load() throws -> [ActiveProblem] {
         guard FileManager.default.fileExists(atPath: url.path) else { return [] }
         let d = JSONDecoder()
         d.dateDecodingStrategy = .iso8601
-        return try d.decode([ActiveProblem].self, from: Data(contentsOf: url))
+        do { return try d.decode([ActiveProblem].self, from: Data(contentsOf: url)) }
+        catch {
+            let aside = root.appendingPathComponent("problems.corrupt-\(UUID().uuidString).json")
+            try? FileManager.default.moveItem(at: url, to: aside)
+            return []
+        }
     }
 
     private func save(_ list: [ActiveProblem]) throws {
-        try FileManager.default.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
         let e = JSONEncoder()
         e.dateEncodingStrategy = .iso8601
         e.outputFormatting = [.prettyPrinted, .sortedKeys]

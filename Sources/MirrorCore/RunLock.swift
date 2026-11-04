@@ -1,4 +1,5 @@
 import Foundation
+import os
 
 /// Exclusive, non-blocking advisory lock (flock). The kernel drops it when the holder exits or crashes.
 /// One per pair at `support/locks/<pair>.lock`, plus one agent-wide.
@@ -10,15 +11,31 @@ public final class RunLock: @unchecked Sendable {
     public init(url: URL) { self.url = url }
     deinit { release() }
 
+    private static let log = Logger(subsystem: "app.mirror", category: "RunLock")
+
+    /// False when another holder has it, and also (logged) when the lock file can't be opened.
     public func tryAcquire() -> Bool {
         guardLock.lock(); defer { guardLock.unlock() }
         if fd >= 0 { return true }
         try? FileManager.default.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
         let f = open(url.path, O_CREAT | O_RDWR | O_CLOEXEC, 0o600)
-        guard f >= 0 else { return false }
+        guard f >= 0 else {
+            Self.log.error("cannot open lock file, errno \(errno)")
+            return false
+        }
         if flock(f, LOCK_EX | LOCK_NB) == 0 { fd = f; return true }
         close(f)
         return false
+    }
+
+    /// Waits up to `timeout` seconds for the lock (polling, so the wait is bounded).
+    public func acquire(timeout: TimeInterval) -> Bool {
+        let deadline = Date().addingTimeInterval(timeout)
+        while true {
+            if tryAcquire() { return true }
+            if Date() >= deadline { return false }
+            usleep(5_000)
+        }
     }
 
     public func release() {

@@ -5,17 +5,17 @@ import MirrorCore
 /// Posts problems as macOS notifications. Swap point: if Gate 1 shows the agent cannot post directly,
 /// replace this with a `Notifying` that launches `Mirror --notify <problem-id>` instead.
 struct UNNotifier: Notifying {
-    func post(_ problem: Problem, setName: String, detail: String) {
+    func post(_ problem: Problem, pair: PairID, setName: String, detail: String) async -> Bool {
+        // UNUserNotificationCenter traps in a process with no bundle identifier.
+        guard Bundle.main.bundleIdentifier != nil else { return false }
         let center = UNUserNotificationCenter.current()
-        center.requestAuthorization(options: [.alert, .sound]) { granted, _ in
-            guard granted else { return }
-            let content = UNMutableNotificationContent()
-            content.title = setName
-            content.body = NotificationText.body(problem, setName: setName, detail: detail)
-            // Stable identifier per problem and set: a repeat replaces rather than stacks.
-            let req = UNNotificationRequest(identifier: "mirror.\(problem.rawValue).\(setName)",
-                                            content: content, trigger: nil)
-            center.add(req)
-        }
+        guard (try? await center.requestAuthorization(options: [.alert, .sound])) == true else { return false }
+        let content = UNMutableNotificationContent()
+        content.title = setName
+        content.body = NotificationText.body(problem, setName: setName, detail: detail)
+        // Stable identifier per problem and pair: a repeat replaces rather than stacks.
+        let id = "mirror.\(problem.rawValue).\(pair.set.uuidString)-\(pair.destination.uuidString)"
+        do { try await center.add(UNNotificationRequest(identifier: id, content: content, trigger: nil)); return true }
+        catch { return false }
     }
 }
