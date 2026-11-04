@@ -137,6 +137,9 @@ public struct SetState: Codable, Equatable, Sendable {
     public var stoppedBy: Problem?
     /// Files a check found different, which `.verificationFailed` is about. All are in `verifyOwed`.
     public var mismatched: [String: Mismatch] = [:]
+    /// The last evicted mismatch a download was requested for. The next batch starts after it, so a
+    /// stuck file can't keep the others from their turn.
+    public var downloadCursor: String?
     public init() {}
 
     /// Fields added after the first release of this file may be absent, and that must never make
@@ -164,6 +167,7 @@ public struct SetState: Codable, Equatable, Sendable {
         hashWholeSet = try c.decodeIfPresent(Bool.self, forKey: .hashWholeSet) ?? false
         stoppedBy = try c.decodeIfPresent(Problem.self, forKey: .stoppedBy)
         mismatched = try c.decodeIfPresent([String: Mismatch].self, forKey: .mismatched) ?? [:]
+        downloadCursor = try c.decodeIfPresent(String.self, forKey: .downloadCursor)
     }
 
     /// Files iCloud must bring back before Mirror can verify them.

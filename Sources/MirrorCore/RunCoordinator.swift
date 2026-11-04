@@ -28,7 +28,12 @@ public final class RunCoordinator: Sendable {
     /// Past this the list stops being cheap to save at every step, so a flag stands in for it.
     static let maxOwed = 5_000
     /// Each is a real download, so a long list is worked through over several wake-ups.
-    static let maxDownloadsPerRun = 200
+    static let maxDownloadsPerRun = 50
+    /// Downloads wait for the larger of this and `minFreeShare` of the volume.
+    static let minFreeBytes: Int64 = 5_000_000_000
+    static let minFreeShare = 0.05
+    /// How long an evicted mismatch can wait for its hash before the owner hears of it.
+    static let verifyPatience: TimeInterval = 7 * 86_400
     /// Finder's droppings don't make a source any less empty.
     private static let noise: Set<String> = [".DS_Store", ".localized"]
 
@@ -41,17 +46,19 @@ public final class RunCoordinator: Sendable {
     private let paths: RunPaths
     private let helperCheck: @Sendable () throws -> Void
     private let downloader: any ICloudDownloading
+    private let requestGrace: TimeInterval
+    private let requests = DispatchGroup()
 
     public init(store: ConfigStore, records: RunRecordStore, problems: ProblemCenter, rclone: any RcloneRunning,
                 feed: any ChangeFeeding, verifier: Verifier, guard pathGuard: PathGuard, detector: StackDetector,
                 filters: FilterBuilder, clock: @escaping @Sendable () -> Date,
                 sessions: @escaping @Sendable (Destination) -> any RunSession, remote: any RemoteFileAccessing,
                 paths: RunPaths, helperCheck: @escaping @Sendable () throws -> Void = {},
-                downloader: any ICloudDownloading = ICloudDownloader()) {
+                downloader: any ICloudDownloading = ICloudDownloader(), requestGrace: TimeInterval = 5) {
         self.store = store; self.records = records; self.problems = problems; self.rclone = rclone
         self.feed = feed; self.verifier = verifier; self.pathGuard = pathGuard; self.detector = detector
         self.filters = filters; self.clock = clock; self.sessions = sessions; self.remote = remote; self.paths = paths
-        self.helperCheck = helperCheck; self.downloader = downloader
+        self.helperCheck = helperCheck; self.downloader = downloader; self.requestGrace = requestGrace
     }
 
     /// Another run holding the lock means leave quietly: no state, record or pid file is touched.
@@ -80,6 +87,7 @@ public final class RunCoordinator: Sendable {
         do { try await problems.retryPending() } catch { Self.log.error("retrying notifications failed") }
         let ran = await runPairs(command)
         prune()
+        await settleRequests()
         return ran
     }
 
@@ -253,6 +261,7 @@ public final class RunCoordinator: Sendable {
                 end = absorb(error, job, state: &state, tally: &tally, expired: &expired)
             }
         }
+        alertUnverifiable(job, state: &state, tally: &tally)
         if state != loaded, !save(state, pair), tally.status != .failed, tally.status != .verificationFailed {
             // The next run would act on the old state, so this run can't claim what it did.
             tally.status = .failed
@@ -579,12 +588,61 @@ public final class RunCoordinator: Sendable {
         for path in state.mismatched.keys {
             state.mismatched[path]?.evicted = verifier.isFreed(mirror.appendingPathComponent(path))
         }
-        let waiting = state.mismatched.filter(\.value.evicted).keys.sorted()
-        for path in waiting {
-            do { try downloader.requestDownload(of: mirror.appendingPathComponent(path)) } catch {
-                Self.log.error("iCloud refused a download request")
+        // A file gone from the source has nothing to be verified against. The next full pass clears it.
+        let waiting = state.mismatched.filter { $0.value.evicted && Self.existsInSource($0.key, set.source) }.keys.sorted()
+        // After the last one asked for, wrapping, so a file that never arrives can't hold the rest back.
+        let start = waiting.firstIndex { $0 > state.downloadCursor ?? "" } ?? 0
+        let batch = (0..<min(Self.maxDownloadsPerRun, waiting.count)).map { waiting[(start + $0) % waiting.count] }
+        state.downloadCursor = batch.last
+        if !batch.isEmpty { request(batch.map { mirror.appendingPathComponent($0) }, onlyWithRoomOn: mirror) }
+    }
+
+    static func hasRoomForDownloads(free: Int64, capacity: Int64) -> Bool {
+        free >= max(minFreeBytes, Int64(Double(capacity) * minFreeShare))
+    }
+
+    /// Asks iCloud for files, off the cooperative pool. Nothing in the run waits for this, as a request
+    /// can stall in iCloud. Asking again is harmless, so a refusal is left for the next wake-up, and a
+    /// file that arrives is hashed by the run after.
+    private func request(_ urls: [URL], onlyWithRoomOn volume: URL? = nil) {
+        let downloader = self.downloader
+        DispatchQueue.global(qos: .utility).async(group: requests) {
+            if let volume {
+                guard let space = downloader.space(at: volume),
+                      Self.hasRoomForDownloads(free: space.free, capacity: space.capacity) else {
+                    Self.log.notice("too little free disk to request downloads")
+                    return
+                }
+            }
+            for url in urls {
+                do { try downloader.requestDownload(of: url) } catch { Self.log.error("iCloud refused a download request") }
             }
         }
+    }
+
+    /// Exiting would drop requests under way, so they get a moment, and any still stuck are left behind.
+    private func settleRequests() async {
+        let (requests, grace) = (self.requests, requestGrace)
+        await withCheckedContinuation { continuation in
+            DispatchQueue.global(qos: .utility).async {
+                _ = requests.wait(timeout: .now() + grace)
+                continuation.resume()
+            }
+        }
+    }
+
+    /// Once per file, however many wake-ups it goes on waiting. Runs last, so a hash that just passed
+    /// can't be followed by an alert about the file it cleared.
+    private func alertUnverifiable(_ job: Job, state: inout SetState, tally: inout Tally) {
+        let cutoff = clock().addingTimeInterval(-Self.verifyPatience)
+        let late = state.mismatched.filter {
+            $0.value.evicted && !$0.value.alerted && $0.value.since <= cutoff && Self.existsInSource($0.key, job.set.source)
+        }.keys.sorted()
+        guard let first = late.first else { return }
+        for path in late { state.mismatched[path]?.alerted = true }
+        let detail = "\(late.count == 1 ? first : "\(late.count) files") couldn't be verified for 7 days"
+        restate(.verificationFailed, job, set: job.set, detail: detail)
+        tally.notices.append((.verificationFailed, job.pair, detail))
     }
 
     /// Takes on an audit's findings without re-reading anything. `reconcileUploads` applies the rules.
@@ -685,10 +743,9 @@ public final class RunCoordinator: Sendable {
         // Reading an evicted marker would wait on a download, and this runs at every wake-up.
         if job.destination.kind == .iCloudFolder, verifier.isFreed(URL(fileURLWithPath: path)) {
             try await requireICloud(job, at: URL(fileURLWithPath: path))
-            guard Self.hasRun(state) else {
-                try? downloader.requestDownload(of: URL(fileURLWithPath: path))
-                throw Stop.markerNotLocal
-            }
+            // Small, and it lets a later wake-up read the claim this one had to take on trust.
+            request([URL(fileURLWithPath: path)])
+            guard Self.hasRun(state) else { throw Stop.markerNotLocal }
             clear([.destinationMissing, .signInExpired, .iCloudUnavailable], job.pair)
             state.stoppedBy = nil
             return
