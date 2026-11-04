@@ -1,1 +1,4 @@
 .superpowers/
+.build/
+dist/
+vendor/rclone/
