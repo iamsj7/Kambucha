@@ -98,7 +98,7 @@ private struct Env {
         let v = Verifier(rclone: FakeRclone(), auditor: au)
         let r = try await v.quick(source: e.src, destination: e.dst.path, profile: profile(.iCloudFolder), context: ctx(),
                                   filter: e.filter, copied: ["a"], oneWay: false, logDir: e.logs)
-        #expect(r.passed); #expect(r.audit.pending == ["a"])
+        #expect(r.checksClean); #expect(!r.backedUp); #expect(r.audit.pending == ["a"])
         #expect(au.calls.first == [e.dst.appendingPathComponent("a")])
     }
 
@@ -109,7 +109,7 @@ private struct Env {
         let v = Verifier(rclone: FakeRclone(), auditor: au)
         let r = try await v.quick(source: e.src, destination: e.dst.path, profile: profile(.iCloudFolder), context: ctx(),
                                   filter: e.filter, copied: ["a.tmp"], oneWay: false, logDir: e.logs)
-        #expect(r.audit.refused == ["a.tmp"])
+        #expect(r.audit.refused == ["a.tmp"]); #expect(r.checksClean); #expect(!r.backedUp)
     }
 
     @Test func differencesFail() async throws {
@@ -119,7 +119,7 @@ private struct Env {
         let v = Verifier(rclone: rc, auditor: FakeAuditor())
         let r = try await v.quick(source: e.src, destination: e.dst.path, profile: profile(.iCloudFolder), context: ctx(),
                                   filter: e.filter, copied: ["a"], oneWay: false, logDir: e.logs)
-        #expect(r.differences == 3); #expect(!r.passed)
+        #expect(r.differences == 3); #expect(!r.checksClean); #expect(!r.backedUp)
     }
 
     @Test func failedCheckRunThrowsNeverPasses() async throws {
@@ -175,9 +175,9 @@ private struct Env {
         let v = Verifier(rclone: rc, auditor: FakeAuditor(), isDataless: { $0.lastPathComponent.hasPrefix("freed") })
         _ = try await v.deep(source: e.src, destination: e.dst.path, profile: profile(.iCloudFolder), context: ctx(),
                              filter: e.filter, sampleFreed: 0, logDir: e.logs)
-        #expect(rc.lists.count == 1)
-        #expect(rc.lists[0].sorted() == ["d/ok", "keep.txt"])
-        #expect(rc.checks[0].filterFile == nil)
+        #expect(rc.checks.count == 2)
+        #expect(rc.lists[1].sorted() == ["d/ok", "keep.txt"])
+        #expect(rc.checks[1].filterFile == nil)
     }
 
     @Test func deepSamplesAtMostRequested() async throws {
@@ -187,8 +187,8 @@ private struct Env {
         let v = Verifier(rclone: rc, auditor: FakeAuditor(), isDataless: { $0.lastPathComponent.hasPrefix("freed") })
         _ = try await v.deep(source: e.src, destination: e.dst.path, profile: profile(.iCloudFolder), context: ctx(),
                              filter: e.filter, sampleFreed: 2, logDir: e.logs)
-        let freed = rc.lists[0].filter { $0.hasPrefix("freed") }
-        #expect(freed.count == 2); #expect(rc.lists[0].contains("ok"))
+        let freed = rc.lists[1].filter { $0.hasPrefix("freed") }
+        #expect(freed.count == 2); #expect(rc.lists[1].contains("ok"))
     }
 
     @Test func auditorMarksNonICloudFileRefused() throws {
@@ -196,6 +196,60 @@ private struct Env {
         try e.mirror(["a.txt"])
         let f = e.dst.appendingPathComponent("a.txt")
         let r = ICloudAuditor().audit([f])
-        #expect(r.refused == [f.path]); #expect(r.pending.isEmpty)
+        #expect(r.refused == [f.path]); #expect(r.pending.isEmpty); #expect(r.missing.isEmpty)
+    }
+
+    @Test func auditorReportsVanishedPathAsMissingNotRefused() throws {
+        let e = try Env(); defer { e.cleanup() }
+        let gone = e.dst.appendingPathComponent("gone.txt")
+        let r = ICloudAuditor().audit([gone])
+        #expect(r.missing == [gone.path]); #expect(r.refused.isEmpty); #expect(r.pending.isEmpty)
+    }
+
+    @Test func auditorTreatsDanglingLinkAsItselfNotMissing() throws {
+        let e = try Env(); defer { e.cleanup() }
+        let l = e.dst.appendingPathComponent("dangling")
+        try FileManager.default.createSymbolicLink(atPath: l.path, withDestinationPath: "/nonexistent/x")
+        let r = ICloudAuditor().audit([l])
+        #expect(r.missing.isEmpty)   // lstat sees the link; it is judged itself, never via its target
+    }
+
+    @Test func backedUpRequiresNothingPendingRefusedOrMissing() {
+        let none = AuditResult(pending: [], refused: [])
+        #expect(VerifyResult(differences: 0, audit: none).backedUp)
+        #expect(!VerifyResult(differences: 0, audit: AuditResult(pending: ["a"], refused: [])).backedUp)
+        #expect(!VerifyResult(differences: 0, audit: AuditResult(pending: [], refused: ["a"])).backedUp)
+        #expect(!VerifyResult(differences: 0, audit: AuditResult(pending: [], refused: [], missing: ["a"])).backedUp)
+        #expect(!VerifyResult(differences: 1, audit: none).backedUp)
+    }
+
+    @Test func deepOnMissingMirrorThrows() async throws {
+        let e = try Env(); defer { e.cleanup() }
+        let v = Verifier(rclone: FakeRclone(), auditor: FakeAuditor())
+        await #expect(throws: VerifyError.self) {
+            _ = try await v.deep(source: e.src, destination: e.root.appendingPathComponent("nope").path,
+                                 profile: profile(.iCloudFolder), context: ctx(), filter: e.filter,
+                                 sampleFreed: 0, logDir: e.logs)
+        }
+    }
+
+    @Test func deepOnEmptyMirrorFailsWhenSourceHasFiles() async throws {
+        let e = try Env(); defer { e.cleanup() }
+        let rc = FakeRclone(differences: [3])   // size-only filtered check sees the missing files
+        let v = Verifier(rclone: rc, auditor: FakeAuditor())
+        let r = try await v.deep(source: e.src, destination: e.dst.path, profile: profile(.iCloudFolder),
+                                 context: ctx(), filter: e.filter, sampleFreed: 0, logDir: e.logs)
+        #expect(!r.checksClean); #expect(r.differences == 3)
+        #expect(rc.checks[0].sizeOnly && rc.checks[0].filterFile == e.filter && rc.checks[0].filesFrom == nil)
+    }
+
+    @Test func quickDropsDatalessCopied() async throws {
+        let e = try Env(); defer { e.cleanup() }
+        try e.mirror(["ok", "freed"])
+        let rc = FakeRclone()
+        let v = Verifier(rclone: rc, auditor: FakeAuditor(), isDataless: { $0.lastPathComponent == "freed" })
+        _ = try await v.quick(source: e.src, destination: e.dst.path, profile: profile(.iCloudFolder), context: ctx(),
+                              filter: e.filter, copied: ["ok", "freed"], oneWay: false, logDir: e.logs)
+        #expect(rc.lists[1] == ["ok"])
     }
 }
