@@ -4,8 +4,11 @@
 # Generated data only. Deletes only ~/Documents/.mirror-proof-tmp and "Mac Backup Test" in iCloud Drive.
 set -euo pipefail
 cd "${0:A:h}/.."
-RCLONE="${RCLONE:-$PWD/dist/Mirror.app/Contents/Helpers/rclone}"
-AGENT="$PWD/dist/Mirror.app/Contents/MacOS/MirrorAgent"
+# Bundle under test (a --proofs build). Override only with MIRROR_APP, never the tool paths.
+APP="${MIRROR_APP:-$PWD/dist/Mirror.app}"
+RCLONE="$APP/Contents/Helpers/rclone"
+AGENT="$APP/Contents/MacOS/MirrorAgent"
+[[ -x "$RCLONE" && -x "$AGENT" ]] || { echo "not a bundle: $APP" >&2; exit 1; }
 SRC="$HOME/Documents/.mirror-proof-tmp"
 BASE="$HOME/Library/Mobile Documents/com~apple~CloudDocs/Mac Backup Test"
 [[ -e "$BASE" ]] && { echo "refusing: $BASE exists" >&2; exit 1; }
@@ -18,9 +21,14 @@ echo small > "$SRC/src/small.txt"
 ln -s big1.bin "$SRC/src/link-to-file"; ln -s sub "$SRC/src/link-to-dir"; ln -s nowhere "$SRC/src/broken"
 S="$SRC/src"
 
-same() {  # src file, dest file -> SHARED / NOT SHARED
-  local a b; a=$("$AGENT" --probe-blocks "$1"); b=$("$AGENT" --probe-blocks "$2")
-  echo "   src : $a"; echo "   dest: $b"
+same() {  # src file, dest file -> SHARED / NOT SHARED; aborts the proof if offsets cannot be read
+  local a b
+  a=$("$AGENT" --probe-blocks "$1") || { echo "PROOF ERROR: cannot read blocks of $1: $a" >&2; exit 2; }
+  b=$("$AGENT" --probe-blocks "$2") || { echo "PROOF ERROR: cannot read blocks of $2: $b" >&2; exit 2; }
+  for v in "$a" "$b"; do
+    [[ "$v" == *err* || ! "$v" =~ '[0-9]+:[0-9]+' ]] && { echo "PROOF ERROR: no valid offsets: $v" >&2; exit 2; }
+  done
+  echo "   src : $a (sampled every 16 MiB)"; echo "   dest: $b"
   [[ "$a" == "$b" ]] && echo "   => SHARED" || echo "   => NOT SHARED"
 }
 

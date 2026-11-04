@@ -148,15 +148,16 @@ enum Probe {
         let size = Int64(st.st_size)
         let step: Int64 = 16 * 1024 * 1024
         var out: [String] = []
+        var failed = false
         var off: Int64 = 0
         while off < size {
             var l = log2phys(l2p_flags: 0, l2p_contigbytes: 0, l2p_devoffset: off)
-            if fcntl(fd, F_LOG2PHYS_EXT, &l) == -1 { out.append("\(off):err\(errno)") }
+            if fcntl(fd, F_LOG2PHYS_EXT, &l) == -1 { out.append("\(off):err\(errno)"); failed = true }
             else { out.append("\(off):\(l.l2p_devoffset)") }
             off += step
         }
         print(out.joined(separator: " "))
-        return 0
+        return failed || out.isEmpty ? 1 : 0
     }
 
     /// `--probe-ubiq <path>...`: ubiquity keys read on the item itself (no symlink following).

@@ -3,8 +3,11 @@
 # Creates and deletes only: a temp source, a temp restore folder, and "Mac Backup Test/links".
 set -euo pipefail
 cd "${0:A:h}/.."
-RCLONE="${RCLONE:-$PWD/dist/Mirror.app/Contents/Helpers/rclone}"
-AGENT="$PWD/dist/Mirror.app/Contents/MacOS/MirrorAgent"
+# Bundle under test (a --proofs build). Override only with MIRROR_APP, never the tool paths.
+APP="${MIRROR_APP:-$PWD/dist/Mirror.app}"
+RCLONE="$APP/Contents/Helpers/rclone"
+AGENT="$APP/Contents/MacOS/MirrorAgent"
+[[ -x "$RCLONE" && -x "$AGENT" ]] || { echo "not a bundle: $APP" >&2; exit 1; }
 WORK="$(mktemp -d)"
 SRC="$WORK/src"
 BASE="$HOME/Library/Mobile Documents/com~apple~CloudDocs/Mac Backup Test"
@@ -25,7 +28,8 @@ ln -s ../file.txt "$SRC/dir/up-link"          # relative, parent
 
 # Variant A: --links on both sides. The destination (a local path in iCloud Drive) gets real symlinks.
 # Variant B: links only on the source side. iCloud Drive stores plain ".rclonelink" files.
-# The engine will use B (links stay as files in the mirror), so B is the gate; A is recorded for information.
+# Decision (spec commit 503e04b): the engine uses A (keeps clones; B does not clone) plus a per-set symlink manifest in
+# "Mac Backup/Manifests". Both variants are recorded; neither exercises iCloud-side storage of symlinks (restore reads the local folder).
 phase() {  # name, srcspec, destspec, dest path, restore-source, restore-dest
   local name="$1" srcspec="$2" destspec="$3" dest="$4" restoresrc="$5" restoredest="$6" out="$WORK/restored-$1"
   mkdir -p "$out"
