@@ -4214,25 +4214,15 @@ private struct ThrowingCapture: RcloneRunning {
         #expect(try h.latest()?.status == .partial)
     }
 
-    private func looksInAScopedRun() async throws -> Int {
-        let h = try Harness()
-        let (d, v) = try h.useDrive()
-        _ = try settled(h, d, v)
-        h.change("flowapp/a.txt")
-        h.volumes.gone(after: 1000)
-        await h.run()
-        return h.volumes.reads
-    }
-
     @Test func noManifestIsWrittenToADriveThatJustLeft() async throws {
-        let looks = try await looksInAScopedRun()
         let h = try Harness()
         try FileManager.default.createSymbolicLink(atPath: h.source.appendingPathComponent("flowapp/link").path, withDestinationPath: "a.txt")
         let (d, v) = try h.useDrive()
         _ = try settled(h, d, v)
         h.change("flowapp/a.txt")
-        h.volumes.gone(after: looks - 1)   // it leaves between housekeeping's first look and the write
-        await h.run()
+        // Housekeeping's opening look still finds it, so only the look right before the write can stop this.
+        let spy = LeavesAfterOneMoreLook(wrapping: h.rclone, volumes: h.volumes)
+        await h.coordinator(rclone: spy).runAll(command: RunCommand())
         #expect(!FileManager.default.fileExists(atPath: root(v).appendingPathComponent("Manifests").path))
         #expect(try h.latest()?.errors == [])
     }
@@ -4265,5 +4255,20 @@ private struct ThrowingCapture: RcloneRunning {
     @Test func aFailedPriorityChangeIsToldApart() {
         #expect(AgentPriority.succeeded(0))
         #expect(!AgentPriority.succeeded(-1))
+    }
+}
+
+/// After each check the drive answers one more look, so it goes during housekeeping.
+private struct LeavesAfterOneMoreLook: RcloneRunning {
+    let wrapping: FakeRclone
+    let volumes: FakeVolumes
+    func sync(_ r: SyncRequest) async throws -> RcloneResult { try await wrapping.sync(r) }
+    func check(_ r: CheckRequest) async throws -> RcloneResult {
+        let result = try await wrapping.check(r)
+        volumes.gone(after: 1)
+        return result
+    }
+    func capture(_ arguments: [String], context: RcloneContext) async throws -> RcloneCapture {
+        try await wrapping.capture(arguments, context: context)
     }
 }
