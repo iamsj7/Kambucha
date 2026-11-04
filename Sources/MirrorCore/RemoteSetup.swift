@@ -16,13 +16,14 @@ public struct RemoteSetup: Sendable {
     private static let restoreRemote = "mirrorrestore"
     private let binary: URL
     private let secrets: any SecretStoring
+    private let helper: any HelperValidating
     private let workDir: URL
 
-    public init(binary: URL, secrets: any SecretStoring) {
-        self.init(binary: binary, secrets: secrets, workDir: RcloneSession.interactiveWorkDir)
+    public init(binary: URL, secrets: any SecretStoring, helper: any HelperValidating) {
+        self.init(binary: binary, secrets: secrets, helper: helper, workDir: RcloneSession.interactiveWorkDir)
     }
-    init(binary: URL, secrets: any SecretStoring, workDir: URL) {
-        self.binary = binary; self.secrets = secrets; self.workDir = workDir
+    init(binary: URL, secrets: any SecretStoring, helper: any HelperValidating, workDir: URL) {
+        self.binary = binary; self.secrets = secrets; self.helper = helper; self.workDir = workDir
     }
 
     /// First sign-in. Also creates the crypt keys of a new encrypted destination. Existing keys are
@@ -64,6 +65,7 @@ public struct RemoteSetup: Sendable {
             case .absent:
                 guard vaultBefore == .absent else { throw RemoteSetupError.vaultLostNeedsRecoveryKit }
                 try secrets.saveVault(.generate(), for: destination)
+                try secrets.write(SecretKeys.firstRevealPending, key: SecretKeys.firstReveal(destination.id))
             }
         }
         try secrets.saveSignIn(signedIn, for: destination)
@@ -93,7 +95,9 @@ public struct RemoteSetup: Sendable {
     ///
     /// Seeing nothing proves nothing: under `drive.file` a wrong client or account sees an empty
     /// root. So that passes only for a surviving sign-in with the kit's client on an unconfirmed
-    /// destination. Otherwise it throws `kitUnproven`, and `acceptUnproven` is the owner's answer.
+    /// destination. Otherwise it throws `kitUnproven`, and `acceptUnproven` is the owner's answer,
+    /// which the agent gates on user presence. A new sign-in is held apart until then, so yes needs no
+    /// second browser trip. Retrying without accepting signs in afresh: the account may be the mistake.
     public func restore(_ destination: Destination, from kit: RecoveryKit, acceptUnproven: Bool = false) async throws {
         guard destination.encrypted, kit.kind == destination.kind, kit.rootPath == MirrorPaths.rootFolderName,
               kit.filenameEncoding == RcloneCrypt.filenameEncoding(for: destination.kind) else {
@@ -111,7 +115,15 @@ public struct RemoteSetup: Sendable {
             if RcloneBackend.hasUsableToken(existing) { surviving = existing }
         }
         var options = client
-        if let surviving { options = surviving } else { options = try await signIn(destination, options: client) }
+        if let surviving {
+            options = surviving
+        } else if acceptUnproven, let held = try secrets.heldSignIn(for: destination), Self.sameClient(held, client),
+                  RcloneBackend.hasUsableToken(held) {
+            options = held
+        } else {
+            options = try await signIn(destination, options: client)
+            try secrets.saveHeldSignIn(options, for: destination)
+        }
 
         let section = try RcloneBackend.section(for: destination, options: options)
         let dir = try RcloneTool.makePrivateDirectory(in: workDir)
@@ -131,9 +143,9 @@ public struct RemoteSetup: Sendable {
         }
         func keepRefresh() throws {
             let now = latest()
-            if let surviving, now != surviving, try secrets.signIn(for: destination) == surviving {
-                try secrets.saveSignIn(now, for: destination)
-            }
+            guard now != options else { return }
+            if surviving == nil { try secrets.saveHeldSignIn(now, for: destination) }
+            else if try secrets.signIn(for: destination) == surviving { try secrets.saveSignIn(now, for: destination) }
         }
         let proof: KitProof
         do { proof = try await kitOpens(kit, encryptedRoot: root, context: context) } catch {
@@ -144,14 +156,19 @@ public struct RemoteSetup: Sendable {
 
         switch proof {
         case .opens: break
-        case .doesNotOpen: throw RemoteSetupError.kitDoesNotOpenBackup
+        case .doesNotOpen:
+            try? secrets.delete(SecretKeys.heldSignIn(destination.id))
+            throw RemoteSetupError.kitDoesNotOpenBackup
         case .nothingThere:
             let shortcut = surviving != nil && !destination.recoveryKitConfirmed
             guard shortcut || acceptUnproven else { throw RemoteSetupError.kitUnproven }
         }
         try refuseOtherKeys(keys, destination)   // the browser and the proof took time
         try secrets.saveVault(keys, for: destination)
-        if surviving == nil { try secrets.saveSignIn(latest(), for: destination) }
+        if surviving == nil {
+            try secrets.saveSignIn(latest(), for: destination)
+            try secrets.delete(SecretKeys.heldSignIn(destination.id))
+        }
     }
 
     enum KitProof: Equatable { case opens, doesNotOpen, nothingThere }
@@ -162,7 +179,7 @@ public struct RemoteSetup: Sendable {
         guard let raw = try await list(encryptedRoot, context: context), !raw.isEmpty else { return .nothingThere }
         var environment = context.environment
         environment.merge(try RcloneCrypt.environment(remote: Self.restoreRemote, over: encryptedRoot, passphrase: kit.passphrase,
-                                                      salt: kit.salt, filenameEncoding: kit.filenameEncoding, binary: binary)) { $1 }
+                                                      salt: kit.salt, filenameEncoding: kit.filenameEncoding, binary: binary, helper: helper)) { $1 }
         let view = RcloneContext(configPath: context.configPath, environment: environment)
         guard let opened = try await list("\(Self.restoreRemote):", context: view), !opened.isEmpty else { return .doesNotOpen }
         return .opens
@@ -194,7 +211,7 @@ public struct RemoteSetup: Sendable {
     /// Nil when the folder doesn't exist. Any other failure leaves the kit unproven.
     private func list(_ path: String, context: RcloneContext) async throws -> Data? {
         let (code, output) = try await RcloneTool.execute(["lsf", path, "--max-depth", "1", "--config", context.configPath],
-                                                          binary: binary, context: context, capture: true)
+                                                          binary: binary, helper: helper, context: context, capture: true)
         if code == 3 { return nil }
         guard code == 0 else { throw RemoteSetupError.couldNotVerifyKit }
         return output
@@ -209,7 +226,8 @@ public struct RemoteSetup: Sendable {
 
         let remote = RcloneBackend.remoteName(destination)
         let code = try await RcloneTool.run(["config", "reconnect", "\(remote):", "--auto-confirm", "--config", config.path],
-                                            binary: binary, context: RcloneContext(configPath: config.path, environment: [:]))
+                                            binary: binary, helper: helper,
+                                            context: RcloneContext(configPath: config.path, environment: [:]))
         guard code == 0 else { throw RemoteSetupError.signInFailed(exitCode: code) }
         guard let text = try? String(contentsOf: config, encoding: .utf8),
               let result = RcloneBackend.parse(text, remote: remote),

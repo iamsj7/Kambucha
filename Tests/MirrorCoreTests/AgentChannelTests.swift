@@ -27,8 +27,12 @@ private func fakeCloudRclone(in dir: URL) throws -> URL {
 private final class FakeTrust: AgentTrust, @unchecked Sendable {
     var callerFailure: AgentFailure?
     var helperFailure: AgentFailure?
+    private(set) var helperChecks = 0
     func verifyCaller() throws { if let callerFailure { throw callerFailure } }
-    func verifyHelper(at: URL) throws { if let helperFailure { throw helperFailure } }
+    func verifyHelper(at: URL) throws {
+        helperChecks += 1
+        if let helperFailure { throw helperFailure }
+    }
 }
 
 private final class FakePresence: UserPresence, @unchecked Sendable {
@@ -177,40 +181,107 @@ private struct ServiceRig {
         #expect(rig.secrets.reads == 0)
     }
 
-    @Test func confirmedKitRevealNeedsThePresentOwner() async throws {
-        let rig = try ServiceRig()
-        try await rig.connected()
-        let confirmed = try rig.store(confirmed: true)
-        rig.presence.refuses = true
-        let reads = rig.secrets.reads
-        let refused = try await rig.send(.recoveryKit(destination: confirmed))
-        #expect(refused.failure == .presenceRefused && refused.kitText == nil)
-        #expect(rig.secrets.reads == reads)   // asked before any secret is read
+    // MARK: - Kit reveal
 
-        rig.presence.refuses = false
-        #expect(try await rig.send(.recoveryKit(destination: confirmed)).kitText != nil)
-        #expect(rig.presence.asked == 2)
-    }
-
-    /// The first showing happens during setup, before there's anything to confirm.
-    @Test func unconfirmedKitNeedsNoPresence() async throws {
+    @Test func onlyTheFirstRevealSkipsTheOwnerCheck() async throws {
         let rig = try ServiceRig()
         try await rig.connected()
         #expect(try await rig.send(.recoveryKit(destination: rig.drive)).kitText != nil)
         #expect(rig.presence.asked == 0)
+        #expect(try await rig.send(.recoveryKit(destination: rig.drive)).kitText != nil)
+        #expect(rig.presence.asked == 1)
+    }
+
+    @Test func refusedPresenceRevealsNothing() async throws {
+        let rig = try ServiceRig()
+        try await rig.connected()
+        try rig.secrets.delete(SecretKeys.firstReveal(rig.drive.id))
+        rig.presence.refuses = true
+        let refused = try await rig.send(.recoveryKit(destination: rig.drive))
+        #expect(refused.failure == .presenceRefused && refused.kitText == nil)
+        // Asked before any key or client is read.
+        let vaultKey = SecretKeys.vault(rig.drive.id), signInKey = SecretKeys.signIn(rig.drive.id)
+        let afterConnect = rig.secrets.readKeys.suffix(1)
+        #expect(afterConnect == [SecretKeys.firstReveal(rig.drive.id)])
+        #expect(!afterConnect.contains(vaultKey) && !afterConnect.contains(signInKey))
+    }
+
+    /// The whole point: a missing marker means ask. Nothing has to be proven to demand presence.
+    @Test func noMarkerMeansPresenceWhateverTheConfigSays() async throws {
+        let rig = try ServiceRig()
+        try await rig.connected()
+        try rig.secrets.delete(SecretKeys.firstReveal(rig.drive.id))
+        _ = try rig.store(confirmed: false)
+        rig.presence.refuses = true
+        #expect(try await rig.send(.recoveryKit(destination: rig.drive)).failure == .presenceRefused)
+    }
+
+    @Test func aDamagedMarkerIsNoMarker() async throws {
+        let rig = try ServiceRig()
+        try await rig.connected()
+        try rig.secrets.write("anything else", key: SecretKeys.firstReveal(rig.drive.id))
+        rig.presence.refuses = true
+        #expect(try await rig.send(.recoveryKit(destination: rig.drive)).failure == .presenceRefused)
+    }
+
+    @Test func markerIsSpentBeforeTheTextReturns() async throws {
+        let rig = try ServiceRig()
+        try await rig.connected()
+        rig.secrets.failDeletes = true
+        let failed = try await rig.send(.recoveryKit(destination: rig.drive))
+        #expect(failed.kitText == nil && failed.failure != nil)
+        rig.secrets.failDeletes = false
+        #expect(try await rig.send(.recoveryKit(destination: rig.drive)).kitText != nil)
+        #expect(try rig.secrets.read(SecretKeys.firstReveal(rig.drive.id)) == nil)
+    }
+
+    @Test func aFailedRevealKeepsTheMarker() async throws {
+        let rig = try ServiceRig()
+        try await rig.connected()
+        let vault = try #require(try rig.secrets.read(SecretKeys.vault(rig.drive.id)))
+        try rig.secrets.delete(SecretKeys.vault(rig.drive.id))
+        #expect(try await rig.send(.recoveryKit(destination: rig.drive)).failure == .session(.encryptionKeysMissing))
+        try rig.secrets.write(vault, key: SecretKeys.vault(rig.drive.id))
+        #expect(try await rig.send(.recoveryKit(destination: rig.drive)).kitText != nil)
+        #expect(rig.presence.asked == 0)
+    }
+
+    @Test func aRestoredVaultAlwaysAsks() async throws {
+        let rig = try ServiceRig()
+        try await rig.connected()
+        let text = try #require(try await rig.send(.recoveryKit(destination: rig.drive)).kitText)
+        try rig.secrets.delete(SecretKeys.vault(rig.drive.id))
+        #expect(try await rig.send(.restoreFromKit(destination: try rig.store(confirmed: true), kitText: text, acceptUnproven: false)).failure == nil)
+        rig.presence.refuses = true
+        #expect(try await rig.send(.recoveryKit(destination: rig.drive)).failure == .presenceRefused)
+    }
+
+    // MARK: - Accepting an unproven kit
+
+    private func kitText(_ rig: ServiceRig) async throws -> String {
+        try await rig.connected()
+        return try #require(try await rig.send(.recoveryKit(destination: rig.drive)).kitText)
+    }
+
+    @Test func acceptingAnUnprovenKitNeedsPresence() async throws {
+        let rig = try ServiceRig()
+        let text = try await kitText(rig)
+        try rig.secrets.delete(SecretKeys.vault(rig.drive.id))
+        rig.presence.refuses = true
+        let r = try await rig.send(.restoreFromKit(destination: rig.drive, kitText: text, acceptUnproven: true))
+        #expect(r.failure == .presenceRefused)
+        #expect(try rig.secrets.vault(for: rig.drive) == nil)
+    }
+
+    @Test func provenRestoreDoesNotAskForPresence() async throws {
+        let rig = try ServiceRig()
+        let text = try await kitText(rig)
+        try rig.secrets.delete(SecretKeys.vault(rig.drive.id))
+        let r = try await rig.send(.restoreFromKit(destination: rig.drive, kitText: text, acceptUnproven: false))
+        #expect(r.failure == nil && rig.presence.asked == 0)
     }
 
     // MARK: - The stored Destination wins
-
-    @Test func requestCannotLowerConfirmationForTheKit() async throws {
-        let rig = try ServiceRig()
-        try await rig.connected()
-        _ = try rig.store(confirmed: true)
-        rig.presence.refuses = true
-        var lowered = rig.drive
-        lowered.recoveryKitConfirmed = false
-        #expect(try await rig.send(.recoveryKit(destination: lowered)).failure == .presenceRefused)
-    }
 
     @Test func requestCannotLowerConfirmationForConnect() async throws {
         let rig = try ServiceRig()
@@ -263,6 +334,7 @@ private struct ServiceRig {
         let original = rig.tmp.url.appendingPathComponent("n.txt")
         for r: AgentRequest in [.connect(destination: rig.drive, clientID: "id", clientSecret: "s"),
                                 .reconnect(destination: rig.drive),
+                                .recoveryKit(destination: rig.drive),
                                 .restoreFromKit(destination: rig.drive, kitText: "x", acceptUnproven: false),
                                 .drill(destination: rig.drive, kitText: "x", relativePath: "n.txt", original: original)] {
             #expect(try await rig.sendOnce(r).failure == .busy)
@@ -279,12 +351,27 @@ private struct ServiceRig {
         close(fd)
     }
 
-    @Test func kitReadDoesNotWaitForAWriter() async throws {
+    /// `kit` spends the marker, so two at once mustn't both get the free reveal.
+    @Test func kitTakesTheLock() async throws {
         let rig = try ServiceRig()
         try await rig.connected()
         let fd = try await holdLock(rig)
         defer { close(fd) }
-        #expect(try await rig.send(.recoveryKit(destination: rig.drive)).kitText != nil)
+        let r = try await rig.sendOnce(.recoveryKit(destination: rig.drive))
+        #expect(r.failure == .busy)
+        #expect(try rig.secrets.read(SecretKeys.firstReveal(rig.drive.id)) == SecretKeys.firstRevealPending)
+    }
+
+    @Test func aBrokenLockIsNotBusy() async throws {
+        let rig = try ServiceRig()
+        try FileManager.default.createDirectory(at: rig.lockFile, withIntermediateDirectories: true)   // open() fails: it's a folder
+        #expect(try await rig.sendOnce(.reconnect(destination: rig.drive)).failure == .lockFailed)
+    }
+
+    @Test func onlyContentionIsBusy() {
+        #expect(SecretsLock.failure(errno: EWOULDBLOCK) == .busy)
+        #expect(SecretsLock.failure(errno: ENOLCK) == .lockFailed)
+        #expect(SecretsLock.failure(errno: EIO) == .lockFailed)
     }
 
     /// An orphaned rclone that inherited the lock would block every later command until it died.
@@ -313,6 +400,15 @@ private struct ServiceRig {
         try await rig.connected()
         #expect(try mode(rig.lockFile) == 0o600)
         #expect(try mode(rig.lockFile.deletingLastPathComponent()) == 0o700)
+    }
+
+    /// The agent's own helper check runs before each spawn too, not only once at the start.
+    @Test func agentRevalidatesTheHelperBeforeEachSpawn() async throws {
+        let rig = try ServiceRig()
+        try await rig.connected()
+        let before = rig.trust.helperChecks
+        #expect(try await rig.send(.reconnect(destination: rig.drive)).failure == nil)
+        #expect(rig.trust.helperChecks >= before + 2)   // once on entry, once before the sign-in
     }
 
     @Test func oldInteractiveLeftoversAreWiped() async throws {

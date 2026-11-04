@@ -59,8 +59,9 @@ private struct Rig {
         #expect(try realRclone(["copy", source.path, "up:Sets/Docs", "--config", "/dev/null"], env: env).code == 0)
     }
 
-    func drill(_ runner: any RcloneRunning = RcloneRunner(binary: vendoredRclone), binary: URL = vendoredRclone) -> RestoreDrill {
-        RestoreDrill(rclone: runner, binary: binary, workDir: scratch)
+    func drill(_ runner: any RcloneRunning = RcloneRunner(binary: vendoredRclone, helper: AnyHelper()), binary: URL = vendoredRclone,
+               helper: any HelperValidating = AnyHelper()) -> RestoreDrill {
+        RestoreDrill(rclone: runner, binary: binary, helper: helper, workDir: scratch)
     }
     func run(_ k: RecoveryKit? = nil, relative r: String? = nil, root: String? = nil) async throws -> Bool {
         try await drill().run(kit: k ?? kit, encryptedRoot: root ?? encryptedRoot, context: context,
@@ -240,6 +241,36 @@ private struct Rig {
         let rig = try await Rig()
         let fake = try fakeCloud(rig, lsf: "exit 0")
         #expect(try await rig.run(with: StubRunner(outcome: .permanent), binary: fake) == false)
+    }
+
+    /// Five spawns get the kit's keys or the sign-in: two obscures, the look, cryptcheck, the download.
+    @Test func everyDrillSpawnIsValidatedFirst() async throws {
+        let rig = try await Rig()
+        let log = rig.tmp.url.appendingPathComponent("log")
+        try Data().write(to: log)
+        let fake = try fakeRclone(in: rig.tmp.url, body: """
+            echo "spawn $1" >> '\(log.path)'
+            case "$1" in
+              obscure) cat >/dev/null; echo obscured-stand-in ;;
+              copyto) printf 'the original words' > "$3" ;;
+            esac
+            exit 0
+            """)
+        let helper = LoggingHelper(log: log)
+        let drill = RestoreDrill(rclone: RcloneRunner(binary: fake, helper: helper), binary: fake, helper: helper, workDir: rig.scratch)
+        #expect(try await drill.run(kit: rig.kit, encryptedRoot: rig.encryptedRoot, context: rig.context,
+                                    relativePath: rig.relative, original: rig.original))
+        #expect(try everySpawnWasValidated(log))
+        let spawns = try String(contentsOf: log, encoding: .utf8).split(separator: "\n").filter { $0.hasPrefix("spawn") }
+        #expect(spawns.map(String.init) == ["spawn obscure", "spawn obscure", "spawn lsf", "spawn cryptcheck", "spawn copyto"])
+    }
+
+    @Test func untrustedHelperStopsTheDrill() async throws {
+        let rig = try await Rig()
+        await #expect(throws: AgentFailure.untrustedHelper) {
+            try await rig.drill(helper: RefusingHelper()).run(kit: rig.kit, encryptedRoot: rig.encryptedRoot, context: rig.context,
+                                                              relativePath: rig.relative, original: rig.original)
+        }
     }
 
     @Test func pathsThatEscapeTheRootAreRefused() async throws {

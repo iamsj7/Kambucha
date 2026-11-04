@@ -14,6 +14,9 @@ enum SecretCommands {
         terminated.setEventHandler { cancel.fire() }
         terminated.resume()
 
+        // The environment comes from whoever spawned us, so nothing below may depend on it.
+        MirrorPaths.scrubEnvironment()
+
         // Never derive the executable path from argv: resolve it from the enclosing bundle.
         let rclone = Bundle.main.bundleURL.appendingPathComponent("Contents/Helpers/rclone")
         let service = AgentService(secrets: KeychainStore(), binary: rclone, trust: SignedCodeTrust(),

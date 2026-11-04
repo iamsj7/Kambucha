@@ -48,6 +48,13 @@ public struct VaultSecrets: Codable, Equatable, Sendable, CustomStringConvertibl
 public enum SecretKeys {
     public static func vault(_ destination: UUID) -> String { "vault.\(destination.uuidString)" }
     public static func signIn(_ destination: UUID) -> String { "signin.\(destination.uuidString)" }
+    /// A sign-in kept from a restore that couldn't prove its kit, until the owner answers. Apart from
+    /// `signIn` on purpose: there it would pass as a sign-in that survived.
+    public static func heldSignIn(_ destination: UUID) -> String { "heldsignin.\(destination.uuidString)" }
+    /// Waives the owner check for the one reveal at creation. Written with a new vault and spent by
+    /// that reveal. Its absence means ask, so losing it can only ever cost a prompt.
+    public static func firstReveal(_ destination: UUID) -> String { "firstreveal.\(destination.uuidString)" }
+    public static let firstRevealPending = "pending"
 }
 
 extension SecretStoring {
@@ -78,5 +85,15 @@ extension SecretStoring {
 
     func saveSignIn(_ options: [String: String], for destination: Destination) throws {
         try write(String(decoding: try JSONEncoder().encode(options), as: UTF8.self), key: SecretKeys.signIn(destination.id))
+    }
+
+    /// Nil also for an item that won't decode: it's only a convenience, and signing in again replaces it.
+    func heldSignIn(for destination: Destination) throws -> [String: String]? {
+        guard let json = try read(SecretKeys.heldSignIn(destination.id)) else { return nil }
+        return try? JSONDecoder().decode([String: String].self, from: Data(json.utf8))
+    }
+
+    func saveHeldSignIn(_ options: [String: String], for destination: Destination) throws {
+        try write(String(decoding: try JSONEncoder().encode(options), as: UTF8.self), key: SecretKeys.heldSignIn(destination.id))
     }
 }

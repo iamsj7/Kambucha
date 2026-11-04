@@ -13,13 +13,14 @@ public struct RestoreDrill: Sendable {
     private static let remote = "mirrordrill"
     private let rclone: any RcloneRunning
     private let binary: URL
+    private let helper: any HelperValidating
     private let workDir: URL
 
-    public init(rclone: any RcloneRunning, binary: URL) {
-        self.init(rclone: rclone, binary: binary, workDir: RcloneSession.interactiveWorkDir)
+    public init(rclone: any RcloneRunning, binary: URL, helper: any HelperValidating) {
+        self.init(rclone: rclone, binary: binary, helper: helper, workDir: RcloneSession.interactiveWorkDir)
     }
-    init(rclone: any RcloneRunning, binary: URL, workDir: URL) {
-        self.rclone = rclone; self.binary = binary; self.workDir = workDir
+    init(rclone: any RcloneRunning, binary: URL, helper: any HelperValidating, workDir: URL) {
+        self.rclone = rclone; self.binary = binary; self.helper = helper; self.workDir = workDir
     }
 
     /// - Parameters:
@@ -37,7 +38,7 @@ public struct RestoreDrill: Sendable {
 
         var environment = context.environment
         environment.merge(try RcloneCrypt.environment(remote: Self.remote, over: encryptedRoot, passphrase: kit.passphrase,
-                                                      salt: kit.salt, filenameEncoding: kit.filenameEncoding, binary: binary)) { $1 }
+                                                      salt: kit.salt, filenameEncoding: kit.filenameEncoding, binary: binary, helper: helper)) { $1 }
         let drillContext = RcloneContext(configPath: context.configPath, environment: environment)
 
         let dir = try RcloneTool.makePrivateDirectory(in: workDir)   // the decrypted copy lives here briefly
@@ -70,7 +71,7 @@ public struct RestoreDrill: Sendable {
         // Then the real thing: download, decrypt, compare byte for byte.
         let restored = dir.appendingPathComponent("restored")
         let code = try await RcloneTool.run(["copyto", "\(Self.remote):\(relativePath)", restored.path, "--config", context.configPath],
-                                            binary: binary, context: drillContext)
+                                            binary: binary, helper: helper, context: drillContext)
         guard code == 0 else {
             if RcloneLogParser.outcome(exitCode: code) == .transient { throw RestoreDrillError.couldNotRun }
             _ = try await cloudAnswers()
@@ -94,7 +95,7 @@ public struct RestoreDrill: Sendable {
     private func reachable(_ root: String, context: RcloneContext, log: URL) async throws -> Bool {
         try? FileManager.default.removeItem(at: log)
         let code = try await RcloneTool.run(["lsf", root, "--max-depth", "1", "--use-json-log", "--log-file", log.path,
-                                             "--config", context.configPath], binary: binary, context: context)
+                                             "--config", context.configPath], binary: binary, helper: helper, context: context)
         if code == 0 { return true }
         if code == 3 { return false }
         if RcloneLogParser.outcome(exitCode: code, log: (try? Data(contentsOf: log)) ?? Data()) == .authExpired {

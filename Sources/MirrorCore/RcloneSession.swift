@@ -25,15 +25,22 @@ public final class RcloneSession {
     private let destination: Destination
     private let secrets: any SecretStoring
     private let binary: URL
+    private let helper: any HelperValidating
     private let workDir: URL
     private var runDir: URL?
     private var openedWith: [String: String] = [:]
 
-    public init(destination: Destination, secrets: any SecretStoring, binary: URL, workDir: URL) {
-        self.destination = destination; self.secrets = secrets; self.binary = binary; self.workDir = workDir
+    /// `helper` is required, so no caller can forget it. It's `SignedCodeTrust` outside tests.
+    public init(destination: Destination, secrets: any SecretStoring, binary: URL, helper: any HelperValidating, workDir: URL) {
+        self.destination = destination; self.secrets = secrets; self.binary = binary
+        self.helper = helper; self.workDir = workDir
     }
 
     deinit { if let runDir { try? FileManager.default.removeItem(at: runDir) } }
+
+    /// Proves the rclone this session would run. `open()` does this itself before it reads the
+    /// Keychain, which covers scheduled runs, as `AgentService.respond` doesn't run for those.
+    public func verifyHelper() throws { try helper.verifyHelper(at: binary) }
 
     /// The folder holding the ciphertext, for `RestoreDrill`. Nil when there's no encryption.
     public var encryptedRoot: String? {
@@ -53,6 +60,7 @@ public final class RcloneSession {
         case .googleDrive, .oneDrive:
             break
         }
+        try verifyHelper()
         var environment: [String: String] = [:]
         var endpoint = "\(RcloneBackend.remoteName(destination)):\(MirrorPaths.rootFolderName)"
         if destination.encrypted {
@@ -62,7 +70,7 @@ public final class RcloneSession {
             guard let vault = try secrets.vault(for: destination) else { throw RcloneSessionError.encryptionKeysMissing }
             let crypt = RcloneBackend.cryptName(destination)
             environment = try RcloneCrypt.environment(remote: crypt, over: root, passphrase: vault.passphrase,
-                                                      salt: vault.salt, filenameEncoding: encoding, binary: binary)
+                                                      salt: vault.salt, filenameEncoding: encoding, binary: binary, helper: helper)
             endpoint = "\(crypt):"
         } else if try secrets.vault(for: destination) != nil {
             // Keys exist, so this root holds ciphertext. Plain files must not land beside it.
@@ -74,6 +82,7 @@ public final class RcloneSession {
     /// The sign-in alone, with no crypt, for a drill that must rely on the kit's keys and nothing else.
     func openSignInOnly() throws -> RcloneContext {
         guard runDir == nil else { throw RcloneSessionError.alreadyOpen }
+        try verifyHelper()
         return RcloneContext(configPath: try writeConfig().path, environment: [:])
     }
 
@@ -205,15 +214,15 @@ enum RcloneCrypt {
     }
 
     static func environment(remote: String, over target: String, passphrase: String, salt: String,
-                            filenameEncoding: String, binary: URL) throws -> [String: String] {
+                            filenameEncoding: String, binary: URL, helper: any HelperValidating) throws -> [String: String] {
         let prefix = "RCLONE_CONFIG_\(remote.uppercased())_"
         return [prefix + "TYPE": "crypt",
                 prefix + "REMOTE": target,
                 prefix + "FILENAME_ENCRYPTION": filenameEncryption,
                 prefix + "DIRECTORY_NAME_ENCRYPTION": directoryNameEncryption,
                 prefix + "FILENAME_ENCODING": filenameEncoding,
-                prefix + "PASSWORD": try RcloneTool.obscure(passphrase, binary: binary),
-                prefix + "PASSWORD2": try RcloneTool.obscure(salt, binary: binary)]
+                prefix + "PASSWORD": try RcloneTool.obscure(passphrase, binary: binary, helper: helper),
+                prefix + "PASSWORD2": try RcloneTool.obscure(salt, binary: binary, helper: helper)]
     }
 }
 
@@ -228,10 +237,11 @@ enum RcloneTool {
     /// Through stdin, so the value is never in argv. `rclone obscure -` reads one line and turns
     /// empty input into a literal hyphen, so anything but one non-empty line is refused rather than
     /// quietly becoming a different key.
-    static func obscure(_ value: String, binary: URL) throws -> String {
+    static func obscure(_ value: String, binary: URL, helper: any HelperValidating) throws -> String {
         guard !value.isEmpty, !value.contains(where: \.isNewline), value.utf8.count < maxStdin else {
             throw RcloneSessionError.invalidSecret
         }
+        try helper.verifyHelper(at: binary)
         let (code, out) = try capture(["obscure", "-", "--config", "/dev/null"], binary: binary, stdin: Data((value + "\n").utf8))
         let obscured = String(decoding: out, as: UTF8.self).trimmingCharacters(in: .whitespacesAndNewlines)
         guard code == 0, !obscured.isEmpty, !obscured.contains(where: \.isNewline) else {
@@ -273,14 +283,15 @@ enum RcloneTool {
     }
 
     /// Runs rclone with all output discarded, so nothing it prints can reach a log or an error.
-    static func run(_ args: [String], binary: URL, context: RcloneContext) async throws -> Int32 {
-        try await execute(args, binary: binary, context: context, capture: false).code
+    static func run(_ args: [String], binary: URL, helper: any HelperValidating, context: RcloneContext) async throws -> Int32 {
+        try await execute(args, binary: binary, helper: helper, context: context, capture: false).code
     }
 
     /// Runs a child with the minimal environment, and stderr discarded. Input must fit `maxStdin`.
-    /// Cancelling the task stops the child.
-    static func execute(_ args: [String], binary: URL, context: RcloneContext, stdin: Data? = nil, capture: Bool,
-                        killGrace: TimeInterval = killGrace) async throws -> (code: Int32, output: Data) {
+    /// Cancelling the task stops the child. `helper` is nil only for a child that isn't rclone.
+    static func execute(_ args: [String], binary: URL, helper: (any HelperValidating)?, context: RcloneContext, stdin: Data? = nil,
+                        capture: Bool, killGrace: TimeInterval = killGrace) async throws -> (code: Int32, output: Data) {
+        try helper?.verifyHelper(at: binary)
         let process = Process()
         process.executableURL = binary
         process.arguments = args

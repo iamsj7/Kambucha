@@ -23,7 +23,9 @@ codesign --verify --strict -R="identifier \"com.shaikjaleel.mirror\" and $pin" "
 codesign --verify --strict -R="identifier \"com.shaikjaleel.mirror.rclone\" and $pin" "$app/Contents/Helpers/rclone" || fail "rclone doesn't meet the helper requirement"
 
 # Keychain rule: only MirrorAgent may touch it.
-if nm -u "$app/Contents/MacOS/Mirror" | grep -qE '_SecItem|_SecKeychain'; then fail "Mirror references the Keychain"; fi
+symbols="$(nm -u "$app/Contents/MacOS/Mirror")" || fail "nm failed on Mirror"
+[[ -n "$symbols" ]] || fail "nm found no symbols in Mirror"
+if grep -qE '_SecItem|_SecKeychain' <<<"$symbols"; then fail "Mirror references the Keychain"; fi
 
 # Privileged binaries must not ship proof modes. Opt out only for a --proofs build.
 if (( ! proofs )); then

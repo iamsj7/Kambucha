@@ -11,13 +11,16 @@ final class MemorySecrets: SecretStoring, @unchecked Sendable {
     private let lock = NSLock()
     private var values: [String: String] = [:]
     var failWrites = false
+    var failDeletes = false
     /// Stands in for another command writing during a long step: the first read of `key` sees what
     /// was there, and `value` is in place straight after. A later save would overwrite it, visibly.
     var appearsAfterFirstRead: (key: String, value: String)?
     private(set) var reads = 0
+    private(set) var readKeys: [String] = []
     func read(_ key: String) throws -> String? {
         lock.withLock {
             reads += 1
+            readKeys.append(key)
             let found = values[key]
             if let a = appearsAfterFirstRead, a.key == key {
                 values[key] = a.value
@@ -31,7 +34,11 @@ final class MemorySecrets: SecretStoring, @unchecked Sendable {
         if failWrites { throw WriteFailed() }
         lock.withLock { values[key] = value }
     }
-    func delete(_ key: String) throws { lock.withLock { values[key] = nil } }
+    func delete(_ key: String) throws {
+        struct DeleteFailed: Error {}
+        if failDeletes { throw DeleteFailed() }
+        lock.withLock { values[key] = nil }
+    }
     var isEmpty: Bool { lock.withLock { values.isEmpty } }
 }
 
@@ -47,6 +54,33 @@ final class TempDir {
         try FileManager.default.createDirectory(at: u, withIntermediateDirectories: true)
         return u
     }
+}
+
+/// For tests that use the unsigned vendored rclone: the real check would refuse it, correctly.
+struct AnyHelper: HelperValidating {
+    func verifyHelper(at: URL) throws {}
+}
+
+struct RefusingHelper: HelperValidating {
+    func verifyHelper(at: URL) throws { throw AgentFailure.untrustedHelper }
+}
+
+/// Logs each validation beside the fake rclone's `spawn` lines, so their order can be checked.
+struct LoggingHelper: HelperValidating {
+    let log: URL
+    func verifyHelper(at: URL) throws {
+        let handle = try FileHandle(forWritingTo: log)
+        try handle.seekToEnd()
+        try handle.write(contentsOf: Data("validate\n".utf8))
+        try handle.close()
+    }
+}
+
+/// True when every spawn in the log came straight after a validation of its own.
+func everySpawnWasValidated(_ log: URL) throws -> Bool {
+    let lines = try String(contentsOf: log, encoding: .utf8).split(separator: "\n").map(String.init)
+    guard lines.contains(where: { $0.hasPrefix("spawn") }) else { return false }
+    return lines.indices.allSatisfy { i in !lines[i].hasPrefix("spawn") || (i > 0 && lines[i - 1] == "validate") }
 }
 
 /// Runs the real vendored rclone with only the given environment.
@@ -73,7 +107,7 @@ func realRclone(_ args: [String], env: [String: String] = [:], stdin: String? = 
 
 /// `rclone reveal` has no stdin form. Only made-up test values go through here.
 func reveal(_ obscured: String) throws -> String {
-    try realRclone(["reveal", obscured]).out.trimmingCharacters(in: .newlines)
+    try realRclone(["reveal", "--", obscured]).out.trimmingCharacters(in: .newlines)   // obscured text can start with a hyphen
 }
 
 func mode(_ url: URL) throws -> Int {
@@ -99,14 +133,14 @@ private struct Fixture {
     init() throws { tmp = try TempDir(); work = try tmp.sub("work") }
 
     func session(_ kind: DestinationKind, encrypted: Bool? = nil, signedIn: Bool = true, vaulted: Bool = true,
-                 binary: URL = vendoredRclone) throws -> (RcloneSession, Destination) {
+                 binary: URL = vendoredRclone, helper: any HelperValidating = AnyHelper()) throws -> (RcloneSession, Destination) {
         let d = Destination(name: "My Cloud: Personal", kind: kind, encrypted: encrypted)
         if signedIn {
             try secrets.saveSignIn(["client_id": "client-id-not-real", "client_secret": "client-secret-not-real",
                                     "token": fakeToken], for: d)
         }
         if vaulted { try secrets.saveVault(vault, for: d) }
-        return (RcloneSession(destination: d, secrets: secrets, binary: binary, workDir: work), d)
+        return (RcloneSession(destination: d, secrets: secrets, binary: binary, helper: helper, workDir: work), d)
     }
 
     var runDirs: [String] { (try? FileManager.default.contentsOfDirectory(atPath: work.path)) ?? [] }
@@ -447,7 +481,7 @@ private func cryptName(_ endpoint: String) -> String {
     /// dropped: either way the backup would be keyed to something other than the stored secret.
     @Test func obscureRefusesValuesItWouldMangle() {
         for bad in ["", "two\nlines", "cr\rhere"] {
-            #expect(throws: RcloneSessionError.invalidSecret) { try RcloneTool.obscure(bad, binary: vendoredRclone) }
+            #expect(throws: RcloneSessionError.invalidSecret) { try RcloneTool.obscure(bad, binary: vendoredRclone, helper: AnyHelper()) }
         }
     }
 
@@ -455,8 +489,79 @@ private func cryptName(_ endpoint: String) -> String {
         let f = try Fixture()
         let fake = try fakeRclone(in: f.tmp.url, body: "exit 9")
         #expect(throws: RcloneSessionError.obscureFailed(exitCode: 9)) {
-            try RcloneTool.obscure(String(repeating: "a", count: 4096), binary: fake)
+            try RcloneTool.obscure(String(repeating: "a", count: 4096), binary: fake, helper: AnyHelper())
         }
+    }
+
+    // MARK: - The helper is checked before secrets go near it
+
+    /// This is the scheduled path: `AgentService.respond` doesn't run here.
+    @Test func openRefusesAnUntrustedHelperBeforeTheKeychain() throws {
+        let f = try Fixture()
+        let (s, _) = try f.session(.googleDrive, helper: RefusingHelper())
+        let reads = f.secrets.reads
+        #expect(throws: AgentFailure.untrustedHelper) { try s.open() }
+        #expect(f.secrets.reads == reads && f.runDirs.isEmpty)
+    }
+
+    @Test func eachObscureIsValidatedFirst() throws {
+        let f = try Fixture()
+        let log = f.tmp.url.appendingPathComponent("log")
+        try Data().write(to: log)
+        let fake = try fakeRclone(in: f.tmp.url, body: "echo \"spawn $1\" >> '\(log.path)'; cat >/dev/null; echo obscured-stand-in")
+        let (s, _) = try f.session(.googleDrive, binary: fake, helper: LoggingHelper(log: log))
+        defer { try? s.close() }
+        _ = try s.open()
+        #expect(try everySpawnWasValidated(log))
+        let spawns = try String(contentsOf: log, encoding: .utf8).components(separatedBy: "spawn obscure").count - 1
+        #expect(spawns == 2)
+    }
+
+    @Test func helperValidationIsExposedForTheScheduledPath() throws {
+        let f = try Fixture()
+        let (good, _) = try f.session(.googleDrive)
+        try good.verifyHelper()
+        let (bad, _) = try f.session(.googleDrive, helper: RefusingHelper())
+        #expect(throws: AgentFailure.untrustedHelper) { try bad.verifyHelper() }
+    }
+
+    /// An iCloud run hands rclone nothing secret, so there's nothing to protect and no check.
+    @Test func iCloudOpenNeedsNoHelperCheck() throws {
+        let f = try Fixture()
+        let (s, _) = try f.session(.iCloudFolder, signedIn: false, vaulted: false, helper: RefusingHelper())
+        _ = try s.open()
+    }
+
+    @Test func runnerRefusesSecretsWithoutAHelperCheck() async throws {
+        let f = try Fixture()
+        let filter = f.tmp.url.appendingPathComponent("f")
+        try "+ **\n".write(to: filter, atomically: true, encoding: .utf8)
+        func request(_ context: RcloneContext) -> SyncRequest {
+            SyncRequest(source: f.tmp.url, destination: "x:", backupDir: "x:b", filterFile: filter,
+                        logFile: f.tmp.url.appendingPathComponent("l"), mode: .copyOnly,
+                        profile: .profile(for: Destination(name: "t", kind: .iCloudFolder)), context: context)
+        }
+        let unchecked = RcloneRunner(binary: vendoredRclone)
+        await #expect(throws: RcloneRunnerError.helperNotChecked) {
+            try await unchecked.sync(request(RcloneContext(configPath: "/dev/null", environment: ["A": "b"])))
+        }
+        await #expect(throws: RcloneRunnerError.helperNotChecked) {
+            try await unchecked.sync(request(RcloneContext(configPath: "/tmp/x.conf", environment: [:])))
+        }
+        await #expect(throws: AgentFailure.untrustedHelper) {
+            try await RcloneRunner(binary: vendoredRclone, helper: RefusingHelper())
+                .sync(request(RcloneContext(configPath: "/dev/null", environment: ["A": "b"])))
+        }
+    }
+
+    // MARK: - Home
+
+    /// Foundation honours CFFIXED_USER_HOME, and the agent's environment comes from its caller.
+    @Test func ownerHomeComesFromTheUserDatabase() throws {
+        let entry = try #require(getpwuid(getuid()))
+        #expect(MirrorPaths.ownerHome.path == String(cString: entry.pointee.pw_dir))
+        #expect(MirrorPaths.support.path.hasPrefix(MirrorPaths.ownerHome.path + "/"))
+        #expect(MirrorPaths.logs.path.hasPrefix(MirrorPaths.ownerHome.path + "/"))
     }
 
     // MARK: - Real crypt
@@ -484,7 +589,7 @@ private func cryptName(_ endpoint: String) -> String {
         let request = SyncRequest(source: src, destination: endpoint + "Sets/t", backupDir: endpoint + "Archive/t/1",
                                   filterFile: filter, logFile: f.tmp.url.appendingPathComponent("up.log"), mode: .copyOnly,
                                   profile: .profile(for: Destination(name: "t", kind: .iCloudFolder)), context: context)
-        let result = try await RcloneRunner(binary: vendoredRclone).sync(request)
+        let result = try await RcloneRunner(binary: vendoredRclone, helper: AnyHelper()).sync(request)
         #expect(result.outcome == .success)
         let log = try String(contentsOf: request.logFile, encoding: .utf8)
         #expect(!log.contains(f.vault.passphrase) && !log.contains(f.vault.salt))
@@ -517,7 +622,7 @@ private func cryptName(_ endpoint: String) -> String {
 
         // A wrong passphrase sees nothing it can decrypt.
         var wrong = env
-        wrong["RCLONE_CONFIG_\(name)_PASSWORD"] = try RcloneTool.obscure("wrong-passphrase", binary: vendoredRclone)
+        wrong["RCLONE_CONFIG_\(name)_PASSWORD"] = try RcloneTool.obscure("wrong-passphrase", binary: vendoredRclone, helper: AnyHelper())
         let failed = try realRclone(["copy", endpoint + "Sets/t", try f.tmp.sub("nope").path, "--config", context.configPath], env: wrong)
         #expect(failed.code != 0)
         #expect(try FileManager.default.contentsOfDirectory(atPath: f.tmp.url.appendingPathComponent("nope").path).isEmpty)
@@ -558,7 +663,8 @@ private func cryptName(_ endpoint: String) -> String {
                 """)
         }
         func read(_ name: String) throws -> String { try String(contentsOf: record.appendingPathComponent(name), encoding: .utf8) }
-        var setup: RemoteSetup { RemoteSetup(binary: binary, secrets: secrets) }
+        /// Its own folder: the real interactive one is shared with the app and with other worktrees' runs.
+        var setup: RemoteSetup { RemoteSetup(binary: binary, secrets: secrets, helper: AnyHelper(), workDir: tmp.url) }
     }
 
     @Test func connectBuildsCommandWithoutSecretsInArgv() async throws {
@@ -601,6 +707,45 @@ private func cryptName(_ endpoint: String) -> String {
         let vault = try #require(try rig.secrets.vault(for: d))
         try await rig.setup.connect(d, clientID: "id", clientSecret: "s")
         #expect(try rig.secrets.vault(for: d) == vault)   // new keys would strand every existing backup
+    }
+
+    // MARK: - First reveal
+
+    private func marker(_ rig: Rig, _ d: Destination) throws -> String? {
+        try rig.secrets.read(SecretKeys.firstReveal(d.id))
+    }
+
+    @Test func newVaultMarksItsFirstReveal() async throws {
+        let rig = try Rig()
+        let d = Destination(name: "Drive", kind: .googleDrive)
+        try await rig.setup.connect(d, clientID: "id", clientSecret: "s")
+        #expect(try marker(rig, d) == SecretKeys.firstRevealPending)
+    }
+
+    @Test func existingVaultGetsNoMarker() async throws {
+        let rig = try Rig()
+        let d = Destination(name: "Drive", kind: .googleDrive)
+        try await rig.setup.connect(d, clientID: "id", clientSecret: "s")
+        try rig.secrets.delete(SecretKeys.firstReveal(d.id))
+        try await rig.setup.connect(d, clientID: "id", clientSecret: "s")
+        #expect(try marker(rig, d) == nil)
+    }
+
+    /// The marker waives the owner check. Being able to re-run setup must not earn another waiver.
+    @Test func vaultAppearingDuringTheBrowserGetsNoMarker() async throws {
+        let rig = try Rig()
+        let d = Destination(name: "Drive", kind: .googleDrive)
+        let json = String(decoding: try JSONEncoder().encode(VaultSecrets.generate()), as: UTF8.self)
+        rig.secrets.appearsAfterFirstRead = (SecretKeys.vault(d.id), json)
+        try await rig.setup.connect(d, clientID: "id", clientSecret: "s")
+        #expect(try marker(rig, d) == nil)
+    }
+
+    @Test func unencryptedDestinationGetsNoMarker() async throws {
+        let rig = try Rig()
+        let d = Destination(name: "O", kind: .oneDrive, encrypted: false)
+        try await rig.setup.connect(d, clientID: nil, clientSecret: nil)
+        #expect(try marker(rig, d) == nil)
     }
 
     @Test func connectLeavesUnencryptedDestinationWithoutVault() async throws {
@@ -805,7 +950,7 @@ private func cryptName(_ endpoint: String) -> String {
         var d = Destination(name: "Drive", kind: .googleDrive)
         d.recoveryKitConfirmed = false
         await #expect(throws: RemoteSetupError.kitUnproven) { try await rig.setup.restore(d, from: kit(.generate())) }
-        #expect(rig.secrets.isEmpty)
+        #expect(try rig.secrets.vault(for: d) == nil && rig.secrets.signIn(for: d) == nil)
     }
 
     @Test(arguments: [emptyCloud, missingCloud])
@@ -862,6 +1007,107 @@ private func cryptName(_ endpoint: String) -> String {
         try rig.secrets.saveSignIn(["client_id": "kit-id", "client_secret": "kit-secret", "token": fakeToken], for: d)
         do { try await rig.setup.restore(d, from: kit(.generate())) } catch { #expect(!opens) }
         #expect(try rig.secrets.signIn(for: d)?["token"] == newToken)
+    }
+
+    @Test func restoreNeverMarksAFirstReveal() async throws {
+        let rig = try Rig(prelude: Self.listing)
+        let d = confirmed()
+        try await rig.setup.restore(d, from: kit(.generate()))
+        #expect(try rig.secrets.read(SecretKeys.firstReveal(d.id)) == nil)
+    }
+
+    private func browserRan(_ rig: Rig) -> Bool {
+        FileManager.default.fileExists(atPath: rig.record.appendingPathComponent("args").path)
+    }
+
+    /// Yes to "use it anyway" shouldn't mean a second trip through the browser.
+    @Test func acceptingReusesTheSignInFromTheFailedAttempt() async throws {
+        let rig = try Rig(prelude: Self.emptyCloud)
+        let d = confirmed(), k = kit(.generate())
+        await #expect(throws: RemoteSetupError.kitUnproven) { try await rig.setup.restore(d, from: k) }
+        #expect(browserRan(rig))
+        try FileManager.default.removeItem(at: rig.record.appendingPathComponent("args"))
+
+        try await rig.setup.restore(d, from: k, acceptUnproven: true)
+        #expect(!browserRan(rig))
+        #expect(try rig.secrets.signIn(for: d)?["token"] == newToken)
+        #expect(try rig.secrets.read(SecretKeys.heldSignIn(d.id)) == nil)   // no spare copy left behind
+    }
+
+    /// Held apart from the real sign-in, or a retry would pass as "surviving" and skip the owner's answer.
+    @Test func heldSignInDoesNotCountAsSurviving() async throws {
+        let rig = try Rig(prelude: Self.emptyCloud)
+        let d = Destination(name: "Drive", kind: .googleDrive), k = kit(.generate())
+        await #expect(throws: RemoteSetupError.kitUnproven) { try await rig.setup.restore(d, from: k) }
+        #expect(try rig.secrets.signIn(for: d) == nil)
+        await #expect(throws: RemoteSetupError.kitUnproven) { try await rig.setup.restore(d, from: k) }
+        #expect(try rig.secrets.vault(for: d) == nil)
+    }
+
+    /// "No, wrong account" is a retry without accepting, and it must reach the browser again.
+    @Test func retryingWithoutAcceptingSignsInAgain() async throws {
+        let rig = try Rig(prelude: Self.emptyCloud)
+        let d = confirmed(), k = kit(.generate())
+        await #expect(throws: RemoteSetupError.kitUnproven) { try await rig.setup.restore(d, from: k) }
+        try FileManager.default.removeItem(at: rig.record.appendingPathComponent("args"))
+        await #expect(throws: RemoteSetupError.kitUnproven) { try await rig.setup.restore(d, from: k) }
+        #expect(browserRan(rig))
+    }
+
+    @Test func heldSignInMustBeTheKitsClient() async throws {
+        let rig = try Rig(prelude: Self.emptyCloud)
+        let d = confirmed()
+        await #expect(throws: RemoteSetupError.kitUnproven) { try await rig.setup.restore(d, from: kit(.generate())) }
+        try FileManager.default.removeItem(at: rig.record.appendingPathComponent("args"))
+        var other = kit(.generate())
+        other.clientID = "another-id"
+        try await rig.setup.restore(d, from: other, acceptUnproven: true)
+        #expect(browserRan(rig))
+        #expect(try rig.secrets.signIn(for: d)?["client_id"] == "another-id")
+    }
+
+    @Test func aKitThatFailsLeavesNoHeldSignIn() async throws {
+        let rig = try Rig(prelude: Self.obscure + """
+
+            if [ "$1" = lsf ]; then
+              case "$2" in mirrorrestore*) ;; *) echo raw-name ;; esac
+              exit 0
+            fi
+            """)
+        let d = confirmed()
+        await #expect(throws: RemoteSetupError.kitDoesNotOpenBackup) { try await rig.setup.restore(d, from: kit(.generate())) }
+        #expect(try rig.secrets.read(SecretKeys.heldSignIn(d.id)) == nil)
+    }
+
+    @Test func everyRestoreSpawnIsValidatedFirst() async throws {
+        let tmp = try TempDir()
+        let log = tmp.url.appendingPathComponent("log")
+        try Data().write(to: log)
+        let fake = try fakeRclone(in: tmp.url, body: """
+            echo "spawn $1" >> '\(log.path)'
+            prev=''
+            for a in "$@"; do [ "$prev" = "--config" ] && cfg="$a"; prev="$a"; done
+            case "$1" in
+              obscure) cat >/dev/null; echo obscured-stand-in ;;
+              lsf) echo a-name ;;
+              config) echo 'token = {"access_token":"a"}' >> "$cfg" ;;
+            esac
+            exit 0
+            """)
+        let setup = RemoteSetup(binary: fake, secrets: MemorySecrets(), helper: LoggingHelper(log: log), workDir: tmp.url)
+        try await setup.restore(confirmed(), from: kit(.generate()))
+        #expect(try everySpawnWasValidated(log))
+        let text = try String(contentsOf: log, encoding: .utf8)
+        for step in ["spawn config", "spawn lsf", "spawn obscure"] { #expect(text.contains(step)) }
+    }
+
+    @Test func untrustedHelperNeverReceivesTheClientSecret() async throws {
+        let rig = try Rig()
+        let setup = RemoteSetup(binary: rig.binary, secrets: rig.secrets, helper: RefusingHelper(), workDir: rig.tmp.url)
+        await #expect(throws: AgentFailure.untrustedHelper) {
+            try await setup.connect(Destination(name: "D", kind: .googleDrive), clientID: "id", clientSecret: "s")
+        }
+        #expect(!browserRan(rig))
     }
 
     @Test func kitRestoreUsesExistingSignInWithoutABrowser() async throws {
@@ -930,12 +1176,12 @@ private func cryptName(_ endpoint: String) -> String {
         let conf = tmp.url.appendingPathComponent("c.conf")
         try "[base]\ntype = alias\nremote = \(tmp.url.appendingPathComponent("cloud").path)\n".write(to: conf, atomically: true, encoding: .utf8)
         let context = RcloneContext(configPath: conf.path, environment: [:])
-        let setup = RemoteSetup(binary: vendoredRclone, secrets: MemorySecrets())
+        let setup = RemoteSetup(binary: vendoredRclone, secrets: MemorySecrets(), helper: AnyHelper(), workDir: tmp.url)
         let v = VaultSecrets.generate()
 
         #expect(try await setup.kitOpens(kit(.generate()), encryptedRoot: "base:Mac Backup", context: context) == .nothingThere)
         let env = try RcloneCrypt.environment(remote: "up", over: cloud.path, passphrase: v.passphrase, salt: v.salt,
-                                              filenameEncoding: "base32", binary: vendoredRclone)
+                                              filenameEncoding: "base32", binary: vendoredRclone, helper: AnyHelper())
         #expect(try realRclone(["copy", src.path, "up:Sets/s", "--config", "/dev/null"], env: env).code == 0)
         #expect(try await setup.kitOpens(kit(v), encryptedRoot: "base:Mac Backup", context: context) == .opens)
         #expect(try await setup.kitOpens(kit(.generate()), encryptedRoot: "base:Mac Backup", context: context) == .doesNotOpen)

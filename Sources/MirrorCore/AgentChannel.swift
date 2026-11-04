@@ -28,15 +28,6 @@ public enum AgentRequest: Codable, Sendable, CustomStringConvertible, CustomDebu
         }
     }
 
-    /// Changes the Keychain, so overlapping commands must not interleave. A drill counts, because
-    /// closing its session can save a refreshed token.
-    var writesSecrets: Bool {
-        switch self {
-        case .recoveryKit: false
-        case .connect, .reconnect, .restoreFromKit, .drill: true
-        }
-    }
-
     public var description: String { "AgentRequest(\(subcommand), redacted)" }
     public var debugDescription: String { description }
     public var customMirror: Mirror { Mirror(self, children: [:]) }
@@ -46,7 +37,7 @@ public enum AgentRequest: Codable, Sendable, CustomStringConvertible, CustomDebu
 public enum AgentFailure: Error, Equatable, Codable, Sendable {
     case session(RcloneSessionError), setup(RemoteSetupError), kit(RecoveryKitError)
     case drill(RestoreDrillError), keychain(SecretStoreError)
-    case untrustedCaller, untrustedHelper, presenceRefused, configUnreadable, busy
+    case untrustedCaller, untrustedHelper, presenceRefused, configUnreadable, busy, lockFailed
     case invalidRequest, cancelled, other
 
     init(_ error: any Error) {
@@ -89,11 +80,13 @@ public struct AgentResponse: Codable, Sendable, CustomStringConvertible, CustomD
 }
 
 /// Who may use the agent. Any process of the owner can spawn it, so being spawned proves nothing.
-public protocol AgentTrust: Sendable {
+/// `verifyHelper` throws `AgentFailure.untrustedHelper` unless `url` is our signed rclone.
+///
+/// The caller check is defence in depth, not a boundary: a process of the same user can exec the
+/// signed Mirror binary and pass it. User presence is what guards a Kit reveal (spec section 8a).
+public protocol AgentTrust: HelperValidating {
     /// Throws `AgentFailure.untrustedCaller` unless the parent process is Mirror.app.
     func verifyCaller() throws
-    /// Throws `AgentFailure.untrustedHelper` unless `url` is our signed rclone.
-    func verifyHelper(at url: URL) throws
 }
 
 /// Asks the person at the Mac to prove they're the owner.
@@ -107,13 +100,16 @@ public protocol UserPresence: Sendable {
 enum SecretsLock {
     static func withLock<T>(in support: URL, _ body: () async throws -> T) async throws -> T {
         let folder = support.appendingPathComponent("locks", isDirectory: true)
-        try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
+        try? FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
         let fd = open(folder.appendingPathComponent("secrets.lock").path, O_CREAT | O_RDWR | O_CLOEXEC | O_NOFOLLOW, mode_t(0o600))
-        guard fd >= 0 else { throw AgentFailure.other }
+        guard fd >= 0 else { throw AgentFailure.lockFailed }
         defer { close(fd) }
-        guard flock(fd, LOCK_EX | LOCK_NB) == 0 else { throw AgentFailure.busy }
+        guard flock(fd, LOCK_EX | LOCK_NB) == 0 else { throw failure(errno: errno) }
         return try await body()
     }
+
+    /// Only contention is `busy`. Anything else won't clear by trying again later.
+    static func failure(errno code: Int32) -> AgentFailure { code == EWOULDBLOCK ? .busy : .lockFailed }
 }
 
 /// The agent's side: one request in, one response out. Always answers, even to bad input.
@@ -147,11 +143,8 @@ public struct AgentService: Sendable {
                 throw AgentFailure.invalidRequest
             }
             let destination = try resolve(request.destination)
-            if request.writesSecrets {
-                response = try await SecretsLock.withLock(in: support) { try await handle(request, destination) }
-            } else {
-                response = try await handle(request, destination)
-            }
+            // Every command writes: `kit` spends its marker, and closing a drill's session can save a token.
+            response = try await SecretsLock.withLock(in: support) { try await handle(request, destination) }
         } catch {
             response = AgentResponse(failure: AgentFailure(error))
         }
@@ -167,7 +160,7 @@ public struct AgentService: Sendable {
 
     private func handle(_ request: AgentRequest, _ destination: Destination) async throws -> AgentResponse {
         try? RcloneSession.wipeLeftovers(in: workDir, olderThan: Self.leftoverAge)
-        let setup = RemoteSetup(binary: binary, secrets: secrets, workDir: workDir)
+        let setup = RemoteSetup(binary: binary, secrets: secrets, helper: trust, workDir: workDir)
         switch request {
         case .connect(_, let clientID, let clientSecret):
             try await setup.connect(destination, clientID: clientID, clientSecret: clientSecret)
@@ -176,12 +169,11 @@ public struct AgentService: Sendable {
             try await setup.reconnect(destination)
             return AgentResponse()
         case .recoveryKit:
-            // After confirmation the Kit is only ever a reveal of the backup's keys. The first showing
-            // comes during setup, before there's a backup to protect.
-            if destination.recoveryKitConfirmed { try await presence.confirm(reason: "show the Recovery Kit") }
-            return AgentResponse(kitText: try RecoveryKit.make(for: destination, secrets: secrets, binary: binary).text())
+            return AgentResponse(kitText: try await reveal(destination))
         case .restoreFromKit(_, let kitText, let acceptUnproven):
-            try await setup.restore(destination, from: try RecoveryKit(parsing: kitText), acceptUnproven: acceptUnproven)
+            let kit = try RecoveryKit(parsing: kitText)
+            if acceptUnproven { try await presence.confirm(reason: "use a Recovery Kit that couldn't be checked") }
+            try await setup.restore(destination, from: kit, acceptUnproven: acceptUnproven)
             return AgentResponse()
         case .drill(_, let kitText, let relativePath, let original):
             let kit = try RecoveryKit(parsing: kitText)
@@ -189,13 +181,25 @@ public struct AgentService: Sendable {
         }
     }
 
+    /// Presence is the real guard here, as the caller check can be beaten by a process of the same
+    /// user. It doesn't depend on `destinations.json`, which that process could edit. The one reveal
+    /// without it is the one at creation, and the marker is spent before the text leaves.
+    private func reveal(_ destination: Destination) async throws -> String {
+        let marker = SecretKeys.firstReveal(destination.id)
+        let isFirst = try secrets.read(marker) == SecretKeys.firstRevealPending
+        if !isFirst { try await presence.confirm(reason: "show the Recovery Kit") }
+        let text = try RecoveryKit.make(for: destination, secrets: secrets, binary: binary).text()
+        if isFirst { try secrets.delete(marker) }
+        return text
+    }
+
     /// The session supplies the sign-in alone, so a lost vault can't stop a kit proving itself.
     private func drill(_ destination: Destination, kit: RecoveryKit, relativePath: String, original: URL) async throws -> Bool {
-        let session = RcloneSession(destination: destination, secrets: secrets, binary: binary, workDir: workDir)
+        let session = RcloneSession(destination: destination, secrets: secrets, binary: binary, helper: trust, workDir: workDir)
         guard let root = session.encryptedRoot else { throw RcloneSessionError.encryptionNotSupported }
         let context = try session.openSignInOnly()
         do {
-            let passed = try await RestoreDrill(rclone: RcloneRunner(binary: binary), binary: binary, workDir: workDir)
+            let passed = try await RestoreDrill(rclone: RcloneRunner(binary: binary, helper: trust), binary: binary, helper: trust, workDir: workDir)
                 .run(kit: kit, encryptedRoot: root, context: context, relativePath: relativePath, original: original)
             try session.close()
             return passed
@@ -252,7 +256,7 @@ public struct AgentClient: Sendable {
     private func send(_ request: AgentRequest) async throws -> AgentResponse {
         let input = try JSONEncoder().encode(request)
         guard input.count < RcloneTool.maxStdin else { throw AgentClientError.requestTooLarge }
-        let (code, output) = try await RcloneTool.execute([request.subcommand], binary: executable,
+        let (code, output) = try await RcloneTool.execute([request.subcommand], binary: executable, helper: nil,
                                                           context: RcloneContext(configPath: "/dev/null", environment: [:]),
                                                           stdin: input, capture: true, killGrace: Self.killGrace)
         guard let response = try? JSONDecoder().decode(AgentResponse.self, from: output) else {

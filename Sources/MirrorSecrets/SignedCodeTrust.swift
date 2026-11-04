@@ -3,7 +3,9 @@ import LocalAuthentication
 import MirrorCore
 import Security
 
-/// Pins the agent's caller and helper to our signature. Team ID is the certificate's OU, not the code
+/// Pins the agent's caller and helper to our signature. The caller check is defence in depth: a
+/// process of the same user can exec the signed Mirror binary and pass it. See spec section 8a.
+/// Team ID is the certificate's OU, not the code
 /// in its name. The two identifiers differ on purpose: rclone can run commands (`--password-command`),
 /// so if it could pass as the caller, anyone could use it to launder a request.
 public struct SignedCodeTrust: AgentTrust {
@@ -50,16 +52,43 @@ public struct SignedCodeTrust: AgentTrust {
     }
 }
 
-/// Touch ID or the login password, shown by the system.
+/// One prompt to the person at the Mac. `invalidate` dismisses it, and its reply then says false.
+public protocol PresencePrompt: AnyObject, Sendable {
+    func evaluate(reason: String, reply: @escaping @Sendable (Bool) -> Void)
+    func invalidate()
+}
+
+private final class SystemPrompt: PresencePrompt, @unchecked Sendable {
+    private let context = LAContext()
+    func evaluate(reason: String, reply: @escaping @Sendable (Bool) -> Void) {
+        context.evaluatePolicy(.deviceOwnerAuthentication, localizedReason: reason) { success, _ in reply(success) }
+    }
+    func invalidate() { context.invalidate() }
+}
+
+/// Touch ID or the login password, shown by the system. It holds the secrets lock while it waits, so
+/// it gives up after `timeout`, and cancelling (SIGTERM from the app) dismisses it at once.
 public struct DevicePresence: UserPresence {
-    public init() {}
+    private let timeout: TimeInterval
+    private let prompt: @Sendable () -> any PresencePrompt
+
+    public init(timeout: TimeInterval = 120) { self.init(timeout: timeout, prompt: { SystemPrompt() }) }
+    init(timeout: TimeInterval, prompt: @escaping @Sendable () -> any PresencePrompt) {
+        self.timeout = timeout; self.prompt = prompt
+    }
 
     public func confirm(reason: String) async throws {
-        let passed: Bool = await withCheckedContinuation { continuation in
-            LAContext().evaluatePolicy(.deviceOwnerAuthentication, localizedReason: reason) { success, _ in
-                continuation.resume(returning: success)
+        try Task.checkCancellation()
+        let current = prompt()
+        let expiry = DispatchWorkItem { current.invalidate() }
+        DispatchQueue.global().asyncAfter(deadline: .now() + timeout, execute: expiry)
+        defer { expiry.cancel() }
+        let passed = await withTaskCancellationHandler {
+            await withCheckedContinuation { (continuation: CheckedContinuation<Bool, Never>) in
+                current.evaluate(reason: reason) { continuation.resume(returning: $0) }
             }
-        }
+        } onCancel: { current.invalidate() }
+        try Task.checkCancellation()
         guard passed else { throw AgentFailure.presenceRefused }
     }
 }
