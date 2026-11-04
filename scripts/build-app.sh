@@ -15,6 +15,8 @@ mkdir -p "$app/Contents/MacOS" "$app/Contents/Helpers" "$app/Contents/Library/La
 cp "$bin/Mirror" "$app/Contents/MacOS/Mirror"
 cp "$bin/MirrorAgent" "$app/Contents/MacOS/MirrorAgent"
 cp vendor/rclone/rclone "$app/Contents/Helpers/rclone"
+# SwiftPM resource bundle (presets.json); Bundle.module finds it in Contents/Resources
+cp -R "$bin/Mirror_MirrorCore.bundle" "$app/Contents/Resources/"
 cp Resources/Info.plist "$app/Contents/Info.plist"
 cp Resources/com.shaikjaleel.mirror.agent.plist "$app/Contents/Library/LaunchAgents/"
 

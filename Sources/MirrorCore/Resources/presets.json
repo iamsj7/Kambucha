@@ -1,0 +1,170 @@
+[
+  {
+    "id": "node",
+    "name": "Node and TypeScript",
+    "markers": [
+      "package.json"
+    ],
+    "alwaysExclude": [
+      "node_modules/",
+      ".turbo/",
+      ".cache/",
+      ".parcel-cache/",
+      "*.tsbuildinfo"
+    ],
+    "ambiguousExclude": [
+      "coverage/",
+      "dist/"
+    ]
+  },
+  {
+    "id": "web",
+    "name": "Next.js, Nuxt, Svelte",
+    "markers": [
+      "next.config.js",
+      "next.config.mjs",
+      "next.config.ts",
+      "nuxt.config.ts",
+      "nuxt.config.js",
+      "svelte.config.js"
+    ],
+    "alwaysExclude": [
+      ".next/",
+      ".nuxt/",
+      ".output/",
+      ".svelte-kit/",
+      ".vercel/"
+    ],
+    "ambiguousExclude": []
+  },
+  {
+    "id": "expo",
+    "name": "Expo, React Native",
+    "markers": [
+      "app.json",
+      "app.config.js",
+      "app.config.ts",
+      "metro.config.js"
+    ],
+    "alwaysExclude": [
+      ".expo/",
+      ".expo-shared/",
+      "android/.cxx/"
+    ],
+    "ambiguousExclude": [
+      "ios/build/",
+      "android/build/"
+    ]
+  },
+  {
+    "id": "flutter",
+    "name": "Flutter, Dart",
+    "markers": [
+      "pubspec.yaml"
+    ],
+    "alwaysExclude": [
+      ".dart_tool/",
+      ".flutter-plugins",
+      ".flutter-plugins-dependencies"
+    ],
+    "ambiguousExclude": [
+      "build/"
+    ]
+  },
+  {
+    "id": "ios",
+    "name": "iOS",
+    "markers": [
+      "*.xcodeproj",
+      "*.xcworkspace",
+      "Podfile",
+      "Package.swift"
+    ],
+    "alwaysExclude": [
+      "Pods/",
+      "DerivedData/",
+      "*.xcuserstate",
+      "xcuserdata/"
+    ],
+    "ambiguousExclude": []
+  },
+  {
+    "id": "android",
+    "name": "Android, Gradle",
+    "markers": [
+      "build.gradle",
+      "build.gradle.kts",
+      "settings.gradle",
+      "settings.gradle.kts"
+    ],
+    "alwaysExclude": [
+      ".gradle/",
+      ".cxx/",
+      ".kotlin/"
+    ],
+    "ambiguousExclude": [
+      "build/"
+    ]
+  },
+  {
+    "id": "php",
+    "name": "PHP",
+    "markers": [
+      "composer.json"
+    ],
+    "alwaysExclude": [
+      ".phpunit.cache/"
+    ],
+    "ambiguousExclude": [
+      "vendor/"
+    ]
+  },
+  {
+    "id": "python",
+    "name": "Python",
+    "markers": [
+      "pyproject.toml",
+      "requirements.txt",
+      "setup.py",
+      "Pipfile"
+    ],
+    "alwaysExclude": [
+      ".venv/",
+      "venv/",
+      "__pycache__/",
+      ".pytest_cache/",
+      ".mypy_cache/",
+      ".ruff_cache/"
+    ],
+    "ambiguousExclude": []
+  },
+  {
+    "id": "ruby",
+    "name": "Ruby",
+    "markers": [
+      "Gemfile"
+    ],
+    "alwaysExclude": [
+      "vendor/bundle/",
+      ".bundle/"
+    ],
+    "ambiguousExclude": []
+  },
+  {
+    "id": "rust-go-java-dotnet",
+    "name": "Rust, Go, Java, .NET",
+    "markers": [
+      "Cargo.toml",
+      "go.mod",
+      "pom.xml",
+      "*.csproj",
+      "*.sln"
+    ],
+    "alwaysExclude": [],
+    "ambiguousExclude": [
+      "target/",
+      "bin/",
+      "obj/"
+    ]
+  }
+]
