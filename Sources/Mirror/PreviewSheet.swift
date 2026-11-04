@@ -42,7 +42,7 @@ struct PreviewSheet: View {
         }
         .padding(20)
         .frame(minWidth: 620, minHeight: 460)
-        .task { await controller.load() }
+        .task { await controller.open() }
         .onAppear { controller.onSetChanged = { model.save(set: $0) } }
         .confirmationDialog(
             "New rule matches files already backed up",

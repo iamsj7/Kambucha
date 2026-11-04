@@ -180,6 +180,7 @@ struct SetDetailView: View {
         .onChange(of: draft.presets) { requestPreview() }
         .onChange(of: draft.backupSecrets) { requestPreview() }
         .onChange(of: draft.backupGit) { requestPreview() }
+        .onChange(of: draft.rules.map(\.action)) { requestPreview() }
         .task { presets = (try? PresetCatalog.all()) ?? [] }
         .onAppear { network.start() }
         .onDisappear { network.stop() }

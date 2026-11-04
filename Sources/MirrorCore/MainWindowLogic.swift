@@ -57,6 +57,21 @@ public final class PreviewController {
         catch { loadError = SetupFailureText.message(for: error) }
     }
 
+    /// The sheet opening. Every way of changing a set's rules leads here, as a change needs a new acceptance:
+    /// a stack, a switch or a typed rule. So this is where they all ask about files already mirrored.
+    public func open() async {
+        await load()
+        guard !set.isPreviewAccepted else { return }
+        await askAboutMirrored(set.rules.filter { $0.action == .exclude })
+    }
+
+    private func askAboutMirrored(_ excludes: [UserRule]) async {
+        pendingImpact = nil
+        if let inspector, let files = try? await inspector.mirroredFiles(matching: excludes, set: set), !files.isEmpty {
+            pendingImpact = files
+        }
+    }
+
     /// Unticking saves an exclude rule and ticking an include rule, replacing any earlier rule for the
     /// same pattern. Every change recomputes the preview.
     public func setIncluded(_ included: Bool, for group: PreviewGroup) async {
@@ -66,10 +81,7 @@ public final class PreviewController {
         if persistsEdits { onSetChanged?(set) }
         await load()
         pendingImpact = nil
-        if rule.action == .exclude, let inspector,
-           let files = try? await inspector.mirroredFiles(matching: [rule], set: set), !files.isEmpty {
-            pendingImpact = files
-        }
+        if rule.action == .exclude { await askAboutMirrored([rule]) }
     }
 
     public func resolveImpact(_ choice: ExcludeResolution) async {

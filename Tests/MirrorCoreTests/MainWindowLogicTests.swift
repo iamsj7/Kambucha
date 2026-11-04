@@ -124,6 +124,51 @@ private func aSet() -> BackupSet { BackupSet(name: "Projects", source: URL(fileU
 private let driveA = Destination(name: "Drive", kind: .googleDrive)
 private let driveB = Destination(name: "iCloud", kind: .iCloudFolder)
 
+// MARK: Any rule change asks about what's already mirrored (final review S11)
+
+@MainActor private func changedSet(_ change: (inout BackupSet) -> Void) -> BackupSet {
+    var set = aSet()
+    set.acceptPreview()
+    change(&set)
+    return set
+}
+
+@MainActor @Test func aPresetTurnedOnAsksAboutMirroredFiles() async {
+    let inspector = FakeInspector(matches: ["a/node_modules/x"])
+    let c = PreviewController(set: changedSet { $0.presets.insert("node") }, provider: FakePreview(groups: groups), inspector: inspector)
+    await c.open()
+    #expect(c.pendingImpact == ["a/node_modules/x"])
+    await c.resolveImpact(.moveToArchive)
+    #expect(inspector.archived == ["a/node_modules/x"])
+}
+
+@MainActor @Test func theSecretsSwitchAsksAboutMirroredFiles() async {
+    let c = PreviewController(set: changedSet { $0.backupSecrets = false }, provider: FakePreview(groups: groups),
+                              inspector: FakeInspector(matches: [".env"]))
+    await c.open()
+    #expect(c.pendingImpact == [".env"])
+}
+
+@MainActor @Test func aTypedRuleAsksAboutMirroredFiles() async {
+    let set = changedSet { $0.rules.append(UserRule(pattern: "*.log", action: .exclude)) }
+    let c = PreviewController(set: set, provider: FakePreview(groups: groups), inspector: FakeInspector(matches: ["a.log"]))
+    await c.open()
+    #expect(c.pendingImpact == ["a.log"])
+}
+
+/// A set the owner already accepted changed nothing, so what they left in place isn't asked about again.
+@MainActor @Test func openingAnUnchangedSetAsksNothing() async {
+    let c = PreviewController(set: changedSet { _ in }, provider: FakePreview(groups: groups), inspector: FakeInspector(matches: ["a.log"]))
+    await c.open()
+    #expect(c.result != nil && c.pendingImpact == nil)
+}
+
+@MainActor @Test func aFirstPreviewWithNothingMirroredAsksNothing() async {
+    let c = PreviewController(set: aSet(), provider: FakePreview(groups: groups), inspector: FakeInspector(matches: []))
+    await c.open()
+    #expect(c.pendingImpact == nil)
+}
+
 @MainActor @Test func deletionReviewShowsEachHeldDestinationSeparately() async {
     let set = aSet()
     let r = DeletionReview(set: set, destinations: [driveA, driveB], provider: FakeDryRun(files: ["a", "b", "c"]))
