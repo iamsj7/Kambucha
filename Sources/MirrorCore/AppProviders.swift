@@ -38,7 +38,7 @@ public protocol ArchiveAgentCalling: Sendable {
     /// `path` is the entry's path below the backup root (`Archive/<set>/<stamp>/...`). The agent pins the backup root
     /// itself, or the crypt endpoint for an encrypted destination.
     func archiveRestore(set: UUID, destination: UUID, path: String, to: URL) async throws
-    func dryRunDeletions(set: UUID, destination: UUID) async throws -> [String]
+    func dryRunDeletions(set: UUID, destination: UUID) async throws -> HeldFiles
 }
 
 /// Subcommands `archive-list`, `archive-restore` and `dry-run-deletions`.
@@ -73,10 +73,10 @@ public struct AgentArchiveClient: ArchiveAgentCalling {
         _ = try await ask(AgentWire.archiveRestore, AgentWire.RestoreRequest(set: set, destination: destination, path: path, to: to.path))
     }
 
-    public func dryRunDeletions(set: UUID, destination: UUID) async throws -> [String] {
+    public func dryRunDeletions(set: UUID, destination: UUID) async throws -> HeldFiles {
         let answer = try await ask(AgentWire.dryRunDeletions, AgentWire.PairRequest(set: set, destination: destination))
         guard let files = answer.files else { throw AgentClientError.noResponse(exitCode: 0) }
-        return files
+        return HeldFiles(files: files, gitCount: answer.gitFiles ?? 0)
     }
 }
 
@@ -106,8 +106,10 @@ public struct AgentDeletionDryRun: DeletionDryRunProviding {
     private let client: any ArchiveAgentCalling
     public init(client: any ArchiveAgentCalling) { self.client = client }
 
-    public func heldDeletions(set: BackupSet, destination: Destination) async throws -> [String] {
-        try await client.dryRunDeletions(set: set.id, destination: destination.id).sorted()
+    public func heldDeletions(set: BackupSet, destination: Destination) async throws -> HeldFiles {
+        var held = try await client.dryRunDeletions(set: set.id, destination: destination.id)
+        held.files.sort()
+        return held
     }
 }
 

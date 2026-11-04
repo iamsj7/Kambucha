@@ -375,6 +375,7 @@ private let stamp = "2026-11-04T10-00-00"
         #expect(answer.ok == true)
         #expect(answer.files == ["gone1.txt", "p/gone2.txt"])
         #expect(AgentWire.nonGitCount(answer.files ?? []) == answer.files?.count)
+        #expect(answer.gitFiles == 2)
     }
 
     @Test func aDryRunChangesNothing() async throws {

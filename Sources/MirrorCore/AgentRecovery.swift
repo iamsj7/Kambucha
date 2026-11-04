@@ -181,6 +181,7 @@ struct AgentRecovery: Sendable {
             default: throw AgentFailure.archive
             }
         }
-        return AgentWire.Response(ok: true, files: files.filter { !DeletionGate.isUnderGit($0) }.sorted())
+        let counted = files.filter { !DeletionGate.isUnderGit($0) }
+        return AgentWire.Response(ok: true, files: counted.sorted(), gitFiles: files.count - counted.count)
     }
 }

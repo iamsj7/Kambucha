@@ -4330,6 +4330,29 @@ private struct LeavesAfterOneMoreLook: RcloneRunning {
     }
 }
 
+/// A hold with nothing countable in it, from the review to the run (final review S9).
+@Suite struct EmptyHoldTests {
+    @Test func approvingZeroReleasesAHoldOverOnlyGitFiles() async throws {
+        let h = try Harness(); try h.prime()
+        var st = try h.state; st.heldDeletions = 1
+        try h.store.save(st, for: h.pair)
+        try h.problems.store(.deletionsHeld, pair: h.pair, setName: "x", detail: "d")
+        h.rclone.script(dryDeletions: [".git/refs/old", "p/.git/x"])
+        await h.run(RunCommand(setID: h.set.id, approvedDeletions: 0, approvedDestination: h.iCloudDest.id, force: true))
+        #expect(try h.state.heldDeletions == 0)
+        #expect(try !h.active.contains(.deletionsHeld))
+    }
+
+    @Test func approvingZeroDoesNotCoverARealDeletionThatArrivedSince() async throws {
+        let h = try Harness(); try h.prime()
+        var st = try h.state; st.heldDeletions = 1
+        try h.store.save(st, for: h.pair)
+        h.rclone.script(dryDeletions: ["real.txt"])
+        await h.run(RunCommand(setID: h.set.id, approvedDeletions: 0, approvedDestination: h.iCloudDest.id, force: true))
+        #expect(try h.state.heldDeletions == 1)
+    }
+}
+
 @Suite struct LivePairsTests {
     @Test func aRunDropsProblemsOfPairsThatAreGone() async throws {
         let h = try Harness(); try h.prime()

@@ -35,7 +35,8 @@ private final class FakeInspector: MirroredExcludeInspecting, @unchecked Sendabl
 
 private struct FakeDryRun: DeletionDryRunProviding {
     var files: [String]
-    func heldDeletions(set: BackupSet, destination: Destination) async throws -> [String] { files }
+    var gitCount = 0
+    func heldDeletions(set: BackupSet, destination: Destination) async throws -> HeldFiles { HeldFiles(files: files, gitCount: gitCount) }
 }
 
 private let groups = [
@@ -139,19 +140,25 @@ private let driveB = Destination(name: "iCloud", kind: .iCloudFolder)
     #expect(r.allowOnceArguments(for: driveB.id) == nil)
 }
 
-@MainActor @Test func allowOnceIsNilUntilThatDestinationListLoadedAndNonEmpty() async {
+@MainActor @Test func allowOnceIsNilUntilThatDestinationListLoaded() async {
     let r = DeletionReview(set: aSet(), destinations: [driveA], provider: FakeDryRun(files: ["a"]))
     #expect(r.allowOnceArguments(for: driveA.id) == nil)
-    let empty = DeletionReview(set: aSet(), destinations: [driveA], provider: FakeDryRun(files: [".git/x"]))
+}
+
+/// A hold over nothing but `.git`, or with nothing left to delete, has to be releasable too.
+@MainActor @Test func anEmptyListCanStillBeReleasedWithACountOfZero() async {
+    let set = aSet()
+    let empty = DeletionReview(set: set, destinations: [driveA], provider: FakeDryRun(files: [], gitCount: 12))
     await empty.load()
-    #expect(empty.allowOnceArguments(for: driveA.id) == nil)   // nothing outside .git: nothing to approve
+    #expect(empty.allowOnceArguments(for: driveA.id) == ["--allow-deletes", set.id.uuidString, driveA.id.uuidString, "0"])
+    #expect(empty.entries[0].gitCount == 12)
 }
 
 @MainActor @Test func oneDestinationFailingDoesNotApproveItsSibling() async {
     struct Half: DeletionDryRunProviding {
-        func heldDeletions(set: BackupSet, destination: Destination) async throws -> [String] {
+        func heldDeletions(set: BackupSet, destination: Destination) async throws -> HeldFiles {
             if destination.id == driveA.id { throw AgentFailure.busy }
-            return ["z"]
+            return HeldFiles(files: ["z"], gitCount: 0)
         }
     }
     let r = DeletionReview(set: aSet(), destinations: [driveA, driveB], provider: Half())

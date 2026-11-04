@@ -47,10 +47,10 @@ private func utcStamp(_ s: String) -> Date { ISO8601DateFormatter().date(from: s
 
 @Test func dryRunReturnsTheFiles() async throws {
     let t = FakeTransport()
-    t.response = json(#"{"ok":true,"files":["a","b/c"]}"#)
-    let files = try await AgentArchiveClient(transport: t).dryRunDeletions(set: UUID(), destination: UUID())
+    t.response = json(#"{"ok":true,"files":["a","b/c"],"gitFiles":7}"#)
+    let held = try await AgentArchiveClient(transport: t).dryRunDeletions(set: UUID(), destination: UUID())
     #expect(t.calls[0].subcommand == "dry-run-deletions")
-    #expect(files == ["a", "b/c"])
+    #expect(held == HeldFiles(files: ["a", "b/c"], gitCount: 7))
 }
 
 @Test func anAgentFailureComesBackAsTheSameTypedError() async throws {
@@ -76,9 +76,9 @@ private func utcStamp(_ s: String) -> Date { ISO8601DateFormatter().date(from: s
     try "#!/bin/sh\necho \"$#:$1\" > '\(log.path)'\ncat > '\(stdin.path)'\necho '{\"ok\":true,\"files\":[\"x\"]}'\n"
         .write(to: script, atomically: true, encoding: .utf8)
     try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: script.path)
-    let files = try await AgentArchiveClient(transport: AgentProcessTransport(executable: script))
+    let held = try await AgentArchiveClient(transport: AgentProcessTransport(executable: script))
         .dryRunDeletions(set: UUID(), destination: UUID())
-    #expect(files == ["x"])
+    #expect(held.files == ["x"])
     #expect(try String(contentsOf: log, encoding: .utf8) == "1:dry-run-deletions\n")
     #expect(try String(contentsOf: stdin, encoding: .utf8).contains("\"set\""))
 }
@@ -136,8 +136,8 @@ private func scriptTransport(_ box: ArchiveSandbox, exit code: Int, output: Stri
     let a = Destination(name: "iCloud", kind: .iCloudFolder)
     let set = makeSet("Docs")
     let client = FakeDryRunClient(files: [a.id: ["x", "y"]])
-    let files = try await AgentDeletionDryRun(client: client).heldDeletions(set: set, destination: a)
-    #expect(files == ["x", "y"])
+    let held = try await AgentDeletionDryRun(client: client).heldDeletions(set: set, destination: a)
+    #expect(held.files == ["x", "y"])
     #expect(client.asked == [a.id])
 }
 
@@ -147,8 +147,8 @@ private final class FakeDryRunClient: ArchiveAgentCalling, @unchecked Sendable {
     init(files: [UUID: [String]]) { self.files = files }
     func archiveList(set: UUID, destination: UUID) async throws -> [ArchiveEntry] { [] }
     func archiveRestore(set: UUID, destination: UUID, path: String, to: URL) async throws {}
-    func dryRunDeletions(set: UUID, destination: UUID) async throws -> [String] {
-        asked.append(destination); return files[destination] ?? []
+    func dryRunDeletions(set: UUID, destination: UUID) async throws -> HeldFiles {
+        asked.append(destination); return HeldFiles(files: files[destination] ?? [], gitCount: 0)
     }
 }
 

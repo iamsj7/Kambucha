@@ -5,10 +5,17 @@ import Observation
 
 // MARK: Injected services
 
+/// What a run to one destination would delete. `.git` files don't count toward a hold, so they're only counted here.
+public struct HeldFiles: Equatable, Sendable {
+    /// Outside `.git` folders, which is what the gate counts and the owner approves.
+    public var files: [String]
+    public var gitCount: Int
+    public init(files: [String], gitCount: Int) { self.files = files; self.gitCount = gitCount }
+}
+
 /// Supplies the files a held deletion would remove, from a dry run. The engine implements it.
 public protocol DeletionDryRunProviding: Sendable {
-    /// Every file a run to this one destination would delete, `.git` ones included.
-    func heldDeletions(set: BackupSet, destination: Destination) async throws -> [String]
+    func heldDeletions(set: BackupSet, destination: Destination) async throws -> HeldFiles
 }
 
 /// Finds files already mirrored that new exclude rules would now skip, and moves them to the archive
@@ -82,6 +89,7 @@ public final class PreviewController {
 public struct HeldDestination: Identifiable, Equatable, Sendable {
     public var destination: Destination
     public var files: [String] = []
+    public var gitCount = 0
     public var isLoaded = false
     public var loadError: String?
     public var id: UUID { destination.id }
@@ -113,7 +121,9 @@ public final class DeletionReview {
     public func load() async {
         for i in entries.indices {
             do {
-                entries[i].files = try await provider.heldDeletions(set: set, destination: entries[i].destination)
+                let held = try await provider.heldDeletions(set: set, destination: entries[i].destination)
+                entries[i].files = held.files
+                entries[i].gitCount = held.gitCount
                 entries[i].isLoaded = true; entries[i].loadError = nil
             } catch {
                 entries[i].isLoaded = false; entries[i].loadError = SetupFailureText.message(for: error)
@@ -122,9 +132,10 @@ public final class DeletionReview {
     }
 
     /// `--allow-deletes <set> <destination> <count>`: the agent holds again if that pair's live count is larger.
-    /// Nil until that destination's list is shown and has something outside `.git` to approve.
+    /// Nil until that destination's list is shown. A count of 0 is real: a hold over nothing but `.git`, or whose
+    /// files have since come back, can only end with an approval, and it covers no deletion outside `.git`.
     public func allowOnceArguments(for destination: UUID) -> [String]? {
-        guard let e = entries.first(where: { $0.id == destination }), e.isLoaded, e.count > 0 else { return nil }
+        guard let e = entries.first(where: { $0.id == destination }), e.isLoaded else { return nil }
         return ["--allow-deletes", set.id.uuidString, destination.uuidString, String(e.count)]
     }
 }

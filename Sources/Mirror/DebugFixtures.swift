@@ -79,8 +79,9 @@ enum DebugFixtures {
         func rule(for group: PreviewGroup, included: Bool) -> UserRule { UserRule(pattern: group.pattern, action: included ? .include : .exclude) }
     }
     private struct FakeDryRun: DeletionDryRunProviding {
-        func heldDeletions(set: BackupSet, destination: Destination) async throws -> [String] {
-            (0..<240).map { "Old Builds/release-\($0 / 20)/app-\($0).zip" }
+        func heldDeletions(set: BackupSet, destination: Destination) async throws -> HeldFiles {
+            destination.kind == .googleDrive ? HeldFiles(files: [], gitCount: 18)
+                : HeldFiles(files: (0..<6).map { "Old Builds/release-\($0 / 20)/app-\($0).zip" }, gitCount: 3)
         }
     }
     private struct FakeVolumes: VolumeLocating {

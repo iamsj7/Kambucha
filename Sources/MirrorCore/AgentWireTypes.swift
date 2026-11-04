@@ -54,8 +54,10 @@ public enum AgentWire {
         public var failure: AgentFailure?
         public var entries: [Entry]?
         public var files: [String]?
-        public init(ok: Bool? = nil, failure: AgentFailure? = nil, entries: [Entry]? = nil, files: [String]? = nil) {
-            self.ok = ok; self.failure = failure; self.entries = entries; self.files = files
+        /// `dry-run-deletions`: what it would also delete inside `.git` folders, which `files` leaves out.
+        public var gitFiles: Int?
+        public init(ok: Bool? = nil, failure: AgentFailure? = nil, entries: [Entry]? = nil, files: [String]? = nil, gitFiles: Int? = nil) {
+            self.ok = ok; self.failure = failure; self.entries = entries; self.files = files; self.gitFiles = gitFiles
         }
     }
 

@@ -20,6 +20,18 @@ struct DeletionReviewSheet: View {
         _review = State(initialValue: review)
     }
 
+    /// Without this a hold over nothing but `.git` would be a blank list with a button beside it.
+    private static func gitNote(_ entry: HeldDestination) -> String? {
+        let n = entry.gitCount
+        let git = "\(n.formatted()) \(n == 1 ? "file" : "files") inside .git folders"
+        switch (n > 0, entry.files.isEmpty) {
+        case (true, false): return "Also \(git), which Git changes all the time, so they aren't counted."
+        case (true, true): return "Only \(git) would be deleted. Allow Once ends this hold."
+        case (false, true): return "Nothing would be deleted now. Allow Once ends this hold."
+        case (false, false): return nil
+        }
+    }
+
     var body: some View {
         VStack(alignment: .leading, spacing: 14) {
             Label { Text("Deletions held").font(.title2.weight(.semibold)) } icon: { Image(systemName: "pause.circle").font(.title2) }
@@ -41,6 +53,9 @@ struct DeletionReviewSheet: View {
                             ForEach(entry.files, id: \.self) { path in
                                 Label { Text(path).lineLimit(1).truncationMode(.middle) } icon: { Image(systemName: "doc") }
                                     .accessibilityLabel("Would delete \(path)")
+                            }
+                            if let note = Self.gitNote(entry) {
+                                Label(note, systemImage: "info.circle").foregroundStyle(.secondary)
                             }
                         }
                     } header: {
