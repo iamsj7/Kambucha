@@ -12,10 +12,42 @@ public struct AuditResult: Equatable, Sendable {
     }
 }
 
-public protocol UploadAuditing: Sendable { func audit(_: [URL]) -> AuditResult }
+public protocol UploadAuditing: Sendable {
+    func audit(_: [URL]) -> AuditResult
+    /// Whether iCloud holds this item. Nil when that can't be read, which says nothing either way.
+    func ubiquity(of: URL) -> Bool?
+}
+
+public extension UploadAuditing {
+    func ubiquity(of url: URL) -> Bool? { audit([url]).refused.isEmpty }
+}
+
+/// Asks iCloud to bring a file back. Returns at once. The download happens in the background.
+public protocol ICloudDownloading: Sendable {
+    func requestDownload(of: URL) throws
+}
+
+/// Measured from a process with no iCloud entitlement: an evicted file came back within a second.
+public struct ICloudDownloader: ICloudDownloading {
+    public init() {}
+    public func requestDownload(of url: URL) throws {
+        try FileManager.default.startDownloadingUbiquitousItem(at: url)
+    }
+}
 
 public struct ICloudAuditor: UploadAuditing {
     public init() {}
+
+    /// Reads a flag, so an evicted item isn't downloaded (measured). An item outside iCloud reads
+    /// successfully with no value, which is why only a failed read counts as unknown.
+    public func ubiquity(of original: URL) -> Bool? {
+        var st = stat()
+        guard lstat(original.path, &st) == 0 else { return nil }
+        var url = URL(fileURLWithPath: original.path)
+        url.removeAllCachedResourceValues()
+        guard let values = try? url.resourceValues(forKeys: [.isUbiquitousItemKey]) else { return nil }
+        return values.isUbiquitousItem == true
+    }
 
     public func audit(_ urls: [URL]) -> AuditResult {
         var result = AuditResult(pending: [], refused: [])

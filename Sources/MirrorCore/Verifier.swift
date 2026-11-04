@@ -48,12 +48,11 @@ public struct Verifier: Sendable {
             oneWay: oneWay, cryptCheck: false, context: context, logFile: logDir.appendingPathComponent("quick-size.log")).applying(profile))
         var differences = size.differences
         var differing = size.flagged
-        var toHash = copied
         let root = URL(fileURLWithPath: destination)
-        var skipped: [String] = []
-        if audits(profile) {
-            toHash = copied.filter { !isDataless(root.appendingPathComponent($0)) }
-            skipped = copied.filter { isDataless(root.appendingPathComponent($0)) }
+        // One read decides each file, as iCloud can evict between two.
+        var toHash: [String] = [], skipped: [String] = []
+        for path in copied {
+            if audits(profile), isDataless(root.appendingPathComponent(path)) { skipped.append(path) } else { toHash.append(path) }
         }
         if !toHash.isEmpty {
             let list = try writeList(toHash, to: logDir.appendingPathComponent("quick-copied.list"))
@@ -81,6 +80,14 @@ public struct Verifier: Sendable {
 
     /// Re-reads files already known to be pending or refused.
     public func audit(_ urls: [URL]) async throws -> AuditResult { try await runAudit(urls) }
+
+    /// Off the cooperative pool, like the audit it belongs with.
+    public func ubiquity(of url: URL) async -> Bool? {
+        let auditor = self.auditor
+        return await withCheckedContinuation { continuation in
+            Self.auditQueue.async { continuation.resume(returning: auditor.ubiquity(of: url)) }
+        }
+    }
 
     /// True when iCloud has evicted this file, so hashing it would download it.
     public func isFreed(_ url: URL) -> Bool { isDataless(url) }

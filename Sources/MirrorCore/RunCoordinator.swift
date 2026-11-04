@@ -37,16 +37,18 @@ public final class RunCoordinator: Sendable {
     private let remote: any RemoteFileAccessing
     private let paths: RunPaths
     private let helperCheck: @Sendable () throws -> Void
+    private let downloader: any ICloudDownloading
 
     public init(store: ConfigStore, records: RunRecordStore, problems: ProblemCenter, rclone: any RcloneRunning,
                 feed: any ChangeFeeding, verifier: Verifier, guard pathGuard: PathGuard, detector: StackDetector,
                 filters: FilterBuilder, clock: @escaping @Sendable () -> Date,
                 sessions: @escaping @Sendable (Destination) -> any RunSession, remote: any RemoteFileAccessing,
-                paths: RunPaths, helperCheck: @escaping @Sendable () throws -> Void = {}) {
+                paths: RunPaths, helperCheck: @escaping @Sendable () throws -> Void = {},
+                downloader: any ICloudDownloading = ICloudDownloader()) {
         self.store = store; self.records = records; self.problems = problems; self.rclone = rclone
         self.feed = feed; self.verifier = verifier; self.pathGuard = pathGuard; self.detector = detector
         self.filters = filters; self.clock = clock; self.sessions = sessions; self.remote = remote; self.paths = paths
-        self.helperCheck = helperCheck
+        self.helperCheck = helperCheck; self.downloader = downloader
     }
 
     /// Another run holding the lock means leave quietly: no state, record or pid file is touched.
@@ -165,6 +167,7 @@ public final class RunCoordinator: Sendable {
         case changedDuringRun
         case stateNotSaved
         case iCloudSignedOut
+        case markerNotLocal
     }
 
     /// How one pair's run leaves the rest. `stop` is a cancelled run. `agentFailed` also fails the agent.
@@ -638,7 +641,7 @@ public final class RunCoordinator: Sendable {
         let differing = verified.differingPaths
         guard !differing.isEmpty, differing.count >= verified.differences,
               let later = try? await feed.changes(in: set.source, since: since) else { return false }
-        return differing.allSatisfy { path in later.paths.contains { $0.hasSuffix("/" + path) } }
+        return Set(differing).isSubset(of: ScopeMapper.relative(later.paths, to: set.source))
     }
 
     // MARK: Claiming a destination
@@ -654,6 +657,17 @@ public final class RunCoordinator: Sendable {
                               state: inout SetState) async throws {
         let set = job.set
         let path = Self.join(endpoint, RootMarker.fileName)
+        // Reading an evicted marker would wait on a download, and this runs at every wake-up.
+        if job.destination.kind == .iCloudFolder, verifier.isFreed(URL(fileURLWithPath: path)) {
+            try await requireICloud(job, at: URL(fileURLWithPath: path))
+            guard Self.hasRun(state) else {
+                try? downloader.requestDownload(of: URL(fileURLWithPath: path))
+                throw Stop.markerNotLocal
+            }
+            clear([.destinationMissing, .signInExpired, .iCloudUnavailable], job.pair)
+            state.stoppedBy = nil
+            return
+        }
         var marker: RootMarker?
         if let data = try await files.read(path, context: context) {
             guard let parsed = try? JSONDecoder().decode(RootMarker.self, from: data) else { throw GuardFailure.destinationUnclaimed }
@@ -662,9 +676,7 @@ public final class RunCoordinator: Sendable {
             try await requireICloud(job, at: URL(fileURLWithPath: path))
         }
         if marker?.claims(set.id) != true {
-            guard state.lastFinished == nil, state.lastEventID == nil, state.lastFullPass == nil else {
-                throw GuardFailure.destinationUnclaimed
-            }
+            guard !Self.hasRun(state) else { throw GuardFailure.destinationUnclaimed }
             let others = try store.loadSets().filter { $0.id != set.id }
             try pathGuard.validateNewSet(set, existing: others)
             if marker == nil, let entries = try await files.list(endpoint, context: context),
@@ -690,12 +702,17 @@ public final class RunCoordinator: Sendable {
         state.stoppedBy = nil
     }
 
+    private static func hasRun(_ state: SetState) -> Bool {
+        state.lastFinished != nil || state.lastEventID != nil || state.lastFullPass != nil
+    }
+
     /// One resource read. Measured in a real iCloud Drive: the folder and a marker are ubiquitous from
     /// the moment they're written, so "not ubiquitous" means iCloud has let go of this folder. The
     /// agent has no iCloud entitlement, so `ubiquityIdentityToken` can't be relied on here.
     private func requireICloud(_ job: Job, at url: URL) async throws {
         guard job.destination.kind == .iCloudFolder else { return }
-        if try await !verifier.audit([url]).refused.isEmpty { throw Stop.iCloudSignedOut }
+        // Nil is a failed read, which proves nothing. Only a clear "no" stops the pair.
+        if await verifier.ubiquity(of: url) == false { throw Stop.iCloudSignedOut }
     }
 
     // MARK: Projects
@@ -837,6 +854,9 @@ public final class RunCoordinator: Sendable {
         case Stop.iCloudSignedOut:
             stop(.iCloudUnavailable, "iCloud Drive may be signed out",
                  detail: "iCloud Drive may be signed out, so backups are paused. Nothing was deleted.")
+        case Stop.markerNotLocal:
+            // Nothing is wrong: a new pair needs the marker's contents, and iCloud is fetching them.
+            tally.status = .skipped; tally.scope = "waiting for iCloud to download the marker"
         case Stop.stateNotSaved:
             fail("State could not be saved", job, state: &state, tally: &tally)
         case VerifyError.mirrorUnreadable:

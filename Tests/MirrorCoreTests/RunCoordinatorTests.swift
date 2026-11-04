@@ -104,6 +104,12 @@ private final class FakeFeed: ChangeFeeding, @unchecked Sendable {
 
 private final class FakeAuditor: UploadAuditing, @unchecked Sendable {
     private let lock = NSLock()
+    private var _unreadable = Set<String>()
+    func set(unreadable: Set<String>) { lock.withLock { _unreadable = unreadable } }
+    func ubiquity(of url: URL) -> Bool? {
+        if lock.withLock({ _unreadable.contains(url.lastPathComponent) }) { return nil }
+        return audit([url]).refused.isEmpty
+    }
     private var _pending = Set<String>(), _refused = Set<String>(), _calls: [[URL]] = []
     var calls: [[URL]] { lock.withLock { _calls } }
     func set(pending: Set<String> = [], refused: Set<String> = []) { lock.withLock { _pending = pending; _refused = refused } }
@@ -117,6 +123,20 @@ private final class FakeAuditor: UploadAuditing, @unchecked Sendable {
                 else if !FileManager.default.fileExists(atPath: u.path) && u.lastPathComponent.hasPrefix("gone") { r.missing.append(u.path) }
             }
             return r
+        }
+    }
+}
+
+private final class FakeDownloader: ICloudDownloading, @unchecked Sendable {
+    private let lock = NSLock()
+    private var _requested: [URL] = []
+    private var _error: (any Error)?
+    var requested: [URL] { lock.withLock { _requested } }
+    func fail(_ e: (any Error)?) { lock.withLock { _error = e } }
+    func requestDownload(of url: URL) throws {
+        try lock.withLock {
+            _requested.append(url)
+            if let _error { throw _error }
         }
     }
 }
@@ -181,6 +201,7 @@ private final class FakeFiles: RemoteFileAccessing, @unchecked Sendable {
 private final class Harness: @unchecked Sendable {
     let root: URL, iCloud: URL, backupRoot: URL, support: URL, logs: URL, work: URL, source: URL
     let rclone = FakeRclone(), feed = FakeFeed(), auditor = FakeAuditor(), notifier = RecordingNotifier(), files = FakeFiles()
+    let downloader = FakeDownloader()
     private let lock = NSLock()
     private var _sessions: [UUID: FakeSession] = [:]
     var now = Date(timeIntervalSince1970: 2_000_000_000)
@@ -242,7 +263,7 @@ private final class Harness: @unchecked Sendable {
                 }
             },
             remote: files, paths: RunPaths(support: support, logs: logs, work: work),
-            helperCheck: { [self] in if let helperError { throw helperError } })
+            helperCheck: { [self] in if let helperError { throw helperError } }, downloader: downloader)
     }
 
     @discardableResult
@@ -1638,6 +1659,87 @@ private final class Harness: @unchecked Sendable {
         await h.run()
         #expect(h.notifier.posted == [.deletionsHeld])
         #expect(seen.closes == 1)
+    }
+}
+
+/// Fix round 3, the self-contained items.
+@Suite struct RoundThreeSmallTests {
+    @Test func changedPathsAreMatchedInFullNotBySuffix() async throws {
+        let h = try Harness(); try h.prime()
+        let root = h.source.appendingPathComponent("a.txt").path
+        let deep = h.source.appendingPathComponent("flowapp/a.txt").path   // same name, a different file
+        h.feed.set(ChangeBatch(paths: [root], mustRescan: false, latestEventID: 10),
+                   changedLater: ChangeBatch(paths: [deep], mustRescan: false, latestEventID: 11))
+        h.rclone.script(differences: 1, differing: ["a.txt"])
+        await h.run()
+        #expect(h.notifier.posted == [.verificationFailed])
+    }
+
+    @Test func anUnreadableMarkerValueIsNotSignOut() async throws {
+        let h = try Harness(); try h.prime(); h.change("flowapp/a.txt")
+        h.auditor.set(refused: [RootMarker.fileName])   // what the audit would call it, not knowing better
+        h.auditor.set(unreadable: [RootMarker.fileName])
+        await h.run()
+        #expect(try h.active.isEmpty)
+        #expect(h.rclone.realSyncs.count == 1)
+    }
+
+    @Test func aMarkerReadingUbiquitousAgainClearsTheStopAndRuns() async throws {
+        let h = try Harness(); try h.prime(); h.change("flowapp/a.txt")
+        h.auditor.set(refused: [RootMarker.fileName])
+        await h.run()
+        #expect(try h.state.stoppedBy == .iCloudUnavailable)
+        h.auditor.set()
+        await h.run()
+        #expect(try h.state.stoppedBy == nil)
+        #expect(try h.active.isEmpty)
+        #expect(try h.state.lastEventID == 10)
+    }
+
+    @Test func aDatalessMarkerIsAcceptedWithoutBeingRead() async throws {
+        let h = try Harness(); try h.prime(); h.change("flowapp/a.txt")
+        // Unparsable on purpose: reading it would stop the pair.
+        try Data("not json".utf8).write(to: RootMarker.url(backupRoot: h.backupRoot))
+        h.freed = [RootMarker.fileName]
+        await h.run()
+        #expect(try h.active.isEmpty)
+        #expect(h.rclone.realSyncs.count == 1)
+    }
+
+    @Test func aDatalessMarkerStillHasToBeInICloud() async throws {
+        let h = try Harness(); try h.prime(); h.change("flowapp/a.txt")
+        h.freed = [RootMarker.fileName]
+        h.auditor.set(refused: [RootMarker.fileName])
+        await h.run()
+        #expect(try h.active == [.iCloudUnavailable])
+        #expect(h.rclone.allCalls == 0)
+    }
+
+    @Test func aNewPairWaitsForADatalessMarkerWithoutReadingOrFailing() async throws {
+        let h = try Harness()
+        try RootMarker(sets: [UUID(): "other"]).save(backupRoot: h.backupRoot)
+        h.freed = [RootMarker.fileName]
+        await h.run()
+        #expect(h.rclone.allCalls == 0)
+        #expect(try h.latest()?.status == .skipped)
+        #expect(try h.state.consecutiveFailures == 0)
+        #expect(h.downloader.requested.map(\.lastPathComponent) == [RootMarker.fileName])
+    }
+
+    @Test func uploadLimitDoesNotOutrankARealFailure() {
+        let limit = #"{"level":"error","msg":"Failed to copy: googleapi: Error 403: User rate limit exceeded., userRateLimitExceeded","object":"a.bin"}"#
+        let real = #"{"level":"error","msg":"Failed to copy: permission denied","object":"b.bin"}"#
+        let summary = #"{"level":"error","msg":"Attempt 1/3 failed with 2 errors and: limit"}"#
+        #expect(RcloneLogParser.outcome(exitCode: 7, log: Data((limit + "\n" + real).utf8)) == .permanent)
+        #expect(RcloneLogParser.outcome(exitCode: 7, log: Data((limit + "\n" + summary).utf8)) == .partial)
+    }
+
+    @Test func iCloudAuditorTellsUnreadableFromNotUbiquitous() throws {
+        let dir = FileManager.default.temporaryDirectory.appendingPathComponent("ubq-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: dir) }
+        #expect(ICloudAuditor().ubiquity(of: dir) == false)
+        #expect(ICloudAuditor().ubiquity(of: dir.appendingPathComponent("nope")) == nil)
     }
 }
 
