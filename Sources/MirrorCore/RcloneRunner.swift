@@ -3,6 +3,31 @@ import Foundation
 public protocol RcloneRunning: Sendable {
     func sync(_: SyncRequest) async throws -> RcloneResult
     func check(_: CheckRequest) async throws -> RcloneResult
+    /// Runs rclone with exactly these arguments (the caller adds `--config` and the log flags) and parses the log.
+    func execute(_ arguments: [String], context: RcloneContext, logFile: URL) async throws -> RcloneResult
+    /// Runs a listing or size command and returns what it printed.
+    func capture(_ arguments: [String], context: RcloneContext) async throws -> RcloneCapture
+}
+
+public struct RcloneCapture: Equatable, Sendable {
+    public var exitCode: Int32
+    public var stdout: String
+    public var stderr: String
+    public init(exitCode: Int32, stdout: String, stderr: String) {
+        self.exitCode = exitCode; self.stdout = stdout; self.stderr = stderr
+    }
+}
+
+public struct RcloneUnsupported: Error, Equatable, Sendable {}
+
+/// Runners that only sync and check (test fakes) need not implement the extra commands.
+public extension RcloneRunning {
+    func execute(_ arguments: [String], context: RcloneContext, logFile: URL) async throws -> RcloneResult {
+        throw RcloneUnsupported()
+    }
+    func capture(_ arguments: [String], context: RcloneContext) async throws -> RcloneCapture {
+        throw RcloneUnsupported()
+    }
 }
 
 /// Runs the bundled rclone. `binary` is an absolute path chosen by the caller (the app derives it
@@ -20,6 +45,46 @@ public struct RcloneRunner: RcloneRunning {
 
     public func check(_ r: CheckRequest) async throws -> RcloneResult {
         try await run(RcloneCommand.arguments(r), context: r.context, logFile: r.logFile, isCheck: true)
+    }
+
+    public func execute(_ arguments: [String], context: RcloneContext, logFile: URL) async throws -> RcloneResult {
+        try await run(arguments, context: context, logFile: logFile, isCheck: false)
+    }
+
+    public func capture(_ arguments: [String], context: RcloneContext) async throws -> RcloneCapture {
+        let process = Process()
+        process.executableURL = binary
+        process.arguments = arguments
+        process.environment = Self.childEnvironment(context)
+        process.qualityOfService = Self.qos(Task.currentPriority)
+        let out = Pipe(), err = Pipe()
+        process.standardOutput = out
+        process.standardError = err
+        process.standardInput = FileHandle.nullDevice
+        let state = RunState(process, killGrace: killGrace)
+        // Both pipes are drained concurrently so a full pipe never blocks the child.
+        let outTask = Task.detached { () -> Data in (try? out.fileHandleForReading.readToEnd()) ?? Data() }
+        let errTask = Task.detached { () -> Data in (try? err.fileHandleForReading.readToEnd()) ?? Data() }
+        let exitCode: Int32
+        do {
+            exitCode = try await withTaskCancellationHandler {
+                try await withCheckedThrowingContinuation { (cont: CheckedContinuation<Int32, Error>) in
+                    process.terminationHandler = { p in cont.resume(returning: p.terminationStatus) }
+                    do { try state.start() } catch {
+                        process.terminationHandler = nil
+                        try? out.fileHandleForWriting.close(); try? err.fileHandleForWriting.close()
+                        cont.resume(throwing: error)
+                    }
+                }
+            } onCancel: { state.cancel() }
+        } catch {
+            _ = await outTask.value; _ = await errTask.value
+            throw error
+        }
+        let o = await outTask.value, e = await errTask.value
+        if state.wasCancelled { throw CancellationError() }
+        return RcloneCapture(exitCode: exitCode, stdout: String(decoding: o, as: UTF8.self),
+                             stderr: String(decoding: e, as: UTF8.self))
     }
 
     /// Explicit minimal environment: PATH, HOME and the context's variables. The parent's

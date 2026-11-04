@@ -1,0 +1,172 @@
+import Foundation
+
+public enum ArchiveError: Error, Equatable, Sendable {
+    case outsideArchive(String)
+    case rcloneFailed(String)
+}
+
+/// Keeps archive work inside `Archive/`. Textual checks for every endpoint; for a local folder the path is
+/// also canonicalised through `PathGuard`, so a symlink inside `Archive/` cannot lead out of it.
+enum ArchiveScope {
+    static let folder = "Archive"
+
+    static func checkName(_ name: String) throws {
+        if name.isEmpty || name == "." || name == ".." || name.contains("/") || name.contains("\0") {
+            throw ArchiveError.outsideArchive(name)
+        }
+    }
+
+    static func join(_ base: String, _ parts: String...) -> String {
+        parts.reduce(base) { acc, p in (acc.hasSuffix(":") || acc.hasSuffix("/")) ? acc + p : acc + "/" + p }
+    }
+
+    private static func parse(_ s: String) -> (remote: String?, comps: [String]) {
+        var rest = s, remote: String?
+        if !s.hasPrefix("/"), let i = s.firstIndex(of: ":"), !s[..<i].contains("/") {
+            remote = String(s[..<i]); rest = String(s[s.index(after: i)...])
+        }
+        return (remote, rest.split(separator: "/", omittingEmptySubsequences: true).map(String.init))
+    }
+
+    /// Throws unless `path` lies strictly below an `Archive` folder. With `archiveRoot` it must lie below
+    /// exactly that folder; without it, below the first `Archive` component.
+    static func validate(_ path: String, archiveRoot: String? = nil) throws {
+        let p = parse(path)
+        guard !p.comps.contains(".."), !p.comps.contains("."), !path.contains("\0") else {
+            throw ArchiveError.outsideArchive(path)
+        }
+        var rootComps: [String]
+        if let archiveRoot {
+            let r = parse(archiveRoot)
+            guard r.remote == p.remote else { throw ArchiveError.outsideArchive(path) }
+            rootComps = r.comps
+        } else {
+            guard let i = p.comps.firstIndex(of: folder) else { throw ArchiveError.outsideArchive(path) }
+            rootComps = Array(p.comps.prefix(i + 1))
+        }
+        guard p.comps.count > rootComps.count, Array(p.comps.prefix(rootComps.count)) == rootComps else {
+            throw ArchiveError.outsideArchive(path)
+        }
+        if p.remote == nil, path.hasPrefix("/") {
+            let root = URL(fileURLWithPath: "/" + rootComps.joined(separator: "/"), isDirectory: true)
+            let target = URL(fileURLWithPath: "/" + p.comps.joined(separator: "/"))
+            do { try PathGuard(iCloudDrive: root, backupRoot: root).assertInsideRoot(target) }
+            catch { throw ArchiveError.outsideArchive(path) }
+        }
+    }
+
+    /// Stamp folder names: `2026-11-04T10-00` or `2026-11-04T10-00-30`, UTC.
+    static func parseStamp(_ s: String) -> Date? {
+        let f = DateFormatter()
+        f.locale = Locale(identifier: "en_US_POSIX"); f.timeZone = TimeZone(identifier: "UTC")
+        for fmt in ["yyyy-MM-dd'T'HH-mm-ss", "yyyy-MM-dd'T'HH-mm"] {
+            f.dateFormat = fmt
+            if let d = f.date(from: s) { return d }
+        }
+        return nil
+    }
+
+    static func stampString(_ d: Date) -> String {
+        let f = DateFormatter()
+        f.locale = Locale(identifier: "en_US_POSIX"); f.timeZone = TimeZone(identifier: "UTC")
+        f.dateFormat = "yyyy-MM-dd'T'HH-mm-ss"
+        return f.string(from: d)
+    }
+}
+
+/// Lists, prunes and evicts `Archive/<set>/<stamp>/...` at one destination. `endpoint` is the backup root as
+/// rclone sees it: a folder path for iCloud, a crypt remote such as `mirrorcrypt:` for the cloud kinds.
+public struct ArchiveManager: Sendable {
+    let rclone: any RcloneRunning
+    let endpoint: String
+    let context: RcloneContext
+    let kind: DestinationKind
+    let isUploaded: @Sendable (URL) -> Bool
+    let evict: @Sendable (URL) throws -> Void
+
+    public init(rclone: any RcloneRunning, endpoint: String, context: RcloneContext, kind: DestinationKind) {
+        self.init(rclone: rclone, endpoint: endpoint, context: context, kind: kind,
+                  isUploaded: Self.systemIsUploaded, evict: { try FileManager.default.evictUbiquitousItem(at: $0) })
+    }
+
+    init(rclone: any RcloneRunning, endpoint: String, context: RcloneContext, kind: DestinationKind,
+         isUploaded: @escaping @Sendable (URL) -> Bool, evict: @escaping @Sendable (URL) throws -> Void) {
+        self.rclone = rclone; self.endpoint = endpoint; self.context = context; self.kind = kind
+        self.isUploaded = isUploaded; self.evict = evict
+    }
+
+    static let systemIsUploaded: @Sendable (URL) -> Bool = { url in
+        guard let v = try? url.resourceValues(forKeys: [.isUbiquitousItemKey, .ubiquitousItemIsUploadedKey]) else { return false }
+        return v.isUbiquitousItem == true && v.ubiquitousItemIsUploaded == true
+    }
+
+    var archiveRoot: String { ArchiveScope.join(endpoint, ArchiveScope.folder) }
+
+    /// `Archive/<set>` or `Archive/<set>/<stamp>`, checked to be inside `Archive/` before anything uses it.
+    func target(_ set: BackupSet, stamp: String? = nil) throws -> String {
+        try ArchiveScope.checkName(set.name)
+        var path = ArchiveScope.join(archiveRoot, set.name)
+        if let stamp {
+            guard ArchiveScope.parseStamp(stamp) != nil, !stamp.contains("/") else { throw ArchiveError.outsideArchive(stamp) }
+            path = ArchiveScope.join(path, stamp)
+        }
+        try ArchiveScope.validate(path, archiveRoot: archiveRoot)
+        return path
+    }
+
+    private func args(_ a: [String]) -> [String] { a + ["--config", context.configPath] }
+
+    // rclone reports a missing directory as exit code 3. For an archive that has not been made yet that is empty.
+    private func lsf(_ extra: [String], _ path: String) async throws -> [String] {
+        let out = try await rclone.capture(args(["lsf"] + extra + [path]), context: context)
+        if out.exitCode == 3 { return [] }
+        guard out.exitCode == 0 else { throw ArchiveError.rcloneFailed(out.stderr) }
+        return out.stdout.split(separator: "\n", omittingEmptySubsequences: true).map(String.init)
+    }
+
+    /// Lists through rclone so names on an encrypted destination are decrypted.
+    public func list(set: BackupSet) async throws -> [ArchiveEntry] {
+        let base = try target(set)
+        let lines = try await lsf(["-R", "--files-only", "--format", "sp", "--separator", "\t"], base)
+        var entries: [ArchiveEntry] = []
+        for line in lines {
+            let parts = line.split(separator: "\t", maxSplits: 1, omittingEmptySubsequences: false)
+            guard parts.count == 2, let size = Int64(parts[0]) else { continue }
+            let rel = String(parts[1])
+            guard let stamp = rel.split(separator: "/", maxSplits: 1).first.map(String.init),
+                  let date = ArchiveScope.parseStamp(stamp), rel.contains("/") else { continue }
+            let path = "\(ArchiveScope.folder)/\(set.name)/\(rel)"
+            entries.append(ArchiveEntry(id: "\(set.name)/\(rel)", setName: set.name, stamp: date, path: path, size: size))
+        }
+        return entries.sorted { ($0.stamp, $0.path) > ($1.stamp, $1.path) }
+    }
+
+    /// Purges stamp folders older than the set's keep period. Only `Archive/<set>/<stamp>` is ever passed to purge.
+    public func prune(set: BackupSet, now: Date) async throws {
+        let base = try target(set)
+        let cutoff = now.addingTimeInterval(-Double(set.archiveDays) * 86_400)
+        let stamps = try await lsf(["--dirs-only"], base).map { $0.hasSuffix("/") ? String($0.dropLast()) : $0 }
+        for stamp in stamps {
+            guard let date = ArchiveScope.parseStamp(stamp), date < cutoff else { continue }
+            let path = try target(set, stamp: stamp)
+            let out = try await rclone.capture(args(["purge", path]), context: context)
+            guard out.exitCode == 0 || out.exitCode == 3 else { throw ArchiveError.rcloneFailed(out.stderr) }
+        }
+    }
+
+    /// Frees uploaded archive files on this Mac. iCloud only, and only below `Archive/<set>`; the mirror is
+    /// never visited. Returns how many files were evicted.
+    public func evictUploaded(set: BackupSet) throws -> Int {
+        guard kind == .iCloudFolder, endpoint.hasPrefix("/") else { return 0 }
+        let dir = URL(fileURLWithPath: try target(set), isDirectory: true)
+        guard let walker = FileManager.default.enumerator(
+            at: dir, includingPropertiesForKeys: [.isRegularFileKey], options: []) else { return 0 }
+        var count = 0
+        for case let url as URL in walker {
+            guard (try? url.resourceValues(forKeys: [.isRegularFileKey]))?.isRegularFile == true,
+                  !Dataless.isDataless(url), isUploaded(url) else { continue }
+            do { try evict(url); count += 1 } catch { continue }
+        }
+        return count
+    }
+}
