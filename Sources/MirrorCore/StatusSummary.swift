@@ -84,7 +84,7 @@ public enum StatusSummary {
         // 3. A run in progress, then uploads still pending.
         if running { return .running }
         let pending = pairs.reduce(0) { $0 + (states[$1]?.pendingUploads ?? 0) }
-        let fromRecords = pairs.reduce(0) { $0 + (latest[$1]?.status == .partial ? latest[$1]!.pendingUploads : 0) }
+        let fromRecords = pairs.reduce(0) { $0 + (latest[$1]?.status == .partial && states[$1]?.isBackedUp != true ? latest[$1]!.pendingUploads : 0) }
         if max(pending, fromRecords) > 0 { return .uploading(max(pending, fromRecords)) }
 
         // 4. A destination that's gone says more than anything left to wait for.
@@ -106,6 +106,8 @@ public enum StatusSummary {
         // 7. Backed up only when every pair has finished at least once.
         let finished = pairs.compactMap { states[$0]?.lastFinished }
         if pairs.isEmpty || finished.count != pairs.count { return .attention("Not backed up yet") }
+        // A killed run leaves no record, so only the state knows it never finished.
+        if pairs.contains(where: { states[$0]?.isBackedUp != true }) { return .unfinished }
         let files = pairs.reduce(0) { $0 + (states[$1]?.lastFileCount ?? 0) }
         return .backedUp(last: finished.max()!, files: files)
     }

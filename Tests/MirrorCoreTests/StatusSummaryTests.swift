@@ -87,8 +87,23 @@ struct StatusSummaryTests {
 
     @Test func partialUploadShowsUploading() {
         let s = set([dest])
-        let r = overall(s, [dest], [pair(s, dest): state()], [record(s, dest, .partial, pending: 40)])
+        var st = state()
+        st.syncIncomplete = true   // honest: a state that says it's backed up has nothing left uploading
+        let r = overall(s, [dest], [pair(s, dest): st], [record(s, dest, .partial, pending: 40)])
         #expect(r == .uploading(40))
+    }
+
+    @Test func aFinishedUploadReadsBackedUpWhateverTheOldRecordSays() {
+        let s = set([dest])
+        let r = overall(s, [dest], [pair(s, dest): state()], [record(s, dest, .partial, pending: 40)])
+        #expect(r == .backedUp(last: now, files: 100))
+    }
+
+    @Test func aKilledRunIsNotBackedUpBehindAnOldSuccess() {
+        let s = set([dest])
+        var st = state()
+        st.wholeSetOwed = true   // saved before the sync, then the agent was killed, so no record followed
+        #expect(overall(s, [dest], [pair(s, dest): st], [record(s, dest, .success)]) == .unfinished)
     }
 
     private func waiting(alerted: Bool = false) -> SetState {
