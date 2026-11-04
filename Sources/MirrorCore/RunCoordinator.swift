@@ -24,10 +24,9 @@ public final class RunCoordinator: Sendable {
     private static let notifyAfterFailures = 3
     private static let patience: TimeInterval = 86_400   // refused and stalled files
     static let freedSample = 20
+    static let maxMismatched = 1_000
     /// Past this the list stops being cheap to save at every step, so a flag stands in for it.
     static let maxOwed = 5_000
-    /// Evicted owed files survive an overflow, so they have a bound of their own.
-    static let maxFreed = 5_000
     /// Each is a real download, so a long list is worked through over several wake-ups.
     static let maxDownloadsPerRun = 200
     /// Finder's droppings don't make a source any less empty.
@@ -298,7 +297,7 @@ public final class RunCoordinator: Sendable {
             try await confirmClaim(job, endpoint: pathGuard.backupRoot.path, context: localContext, files: LocalFiles(), state: &state)
         }
 
-        refreshFreed(job, set: set, state: &state)
+        refreshMismatches(job, set: set, state: &state)
 
         // Find changes, with no disk walk and no network when there are none.
         let batch = try await feed.changes(in: set.source, since: state.lastEventID)
@@ -389,7 +388,7 @@ public final class RunCoordinator: Sendable {
         defer { try? FileManager.default.removeItem(at: runDir) }
         let slices = try makeSlices(job, set: set, scope: scope, projects: projects, endpoint: endpoint, stamp: stamp, runDir: runDir)
         // What earlier runs left unproven. Kept apart, as `owe` may give the saved list up to the flag.
-        let carried = state.verifyOwed
+        let carried = Array(Set(state.verifyOwed).union(state.mismatched.keys))
 
         func request(_ s: Slice, mode: SyncMode, dryRun: Bool) -> SyncRequest {
             SyncRequest(source: s.source, destination: s.destination, backupDir: s.backupDir, filterFile: s.filter,
@@ -431,7 +430,7 @@ public final class RunCoordinator: Sendable {
         }
 
         // Saved first, so a kill during the sync can't lose a hold or what it was about to copy.
-        owe(planned, job, set: set, state: &state)
+        owe(planned, state: &state)
         try persist(state, pair)
 
         var perSlice: [LogSummary] = []
@@ -440,7 +439,7 @@ public final class RunCoordinator: Sendable {
             Self.add(result.summary, to: &tally.summary)
             perSlice.append(result.summary)
             // Whatever came of it: a failed sync can still have copied files.
-            owe(Self.touched(by: result.summary).map { Self.inSet($0, slice) }, job, set: set, state: &state)
+            owe(Self.touched(by: result.summary).map { Self.inSet($0, slice) }, state: &state)
             try persist(state, pair)
             switch result.outcome {
             case .success:
@@ -482,7 +481,7 @@ public final class RunCoordinator: Sendable {
             guard result.checksClean else { continue }   // a mismatch stays owed, or the next run would call it clean
             // With a deep check to come nothing has been hashed yet, so nothing is proven yet either.
             if deepFollows { awaitingDeep = (slice, result, names); continue }
-            prove(slice, result, job, set: set, state: &state)
+            prove(slice, result, unhashed: result.skippedFreed, set: set, state: &state)
             try persist(state, pair)
         }
         tally.filesChecked = verified.matchingFiles
@@ -496,34 +495,29 @@ public final class RunCoordinator: Sendable {
             verified.differingPaths += deep.differingPaths
             if verified.checksClean {
                 // Lowered first, so whatever the steps below can't hold raises it again and it stays up.
-                let flagged = state.hashWholeSet
                 state.hashWholeSet = false
                 if let awaitingDeep {
-                    var result = awaitingDeep.result
-                    // Nothing clears unless a hash of that file passed, so what the deep check left out stays.
-                    let hashed = deep.hashedPaths
-                    result.skippedFreed += awaitingDeep.names.filter { name in
-                        !result.skippedFreed.contains(name) && hashed.map { !$0.contains(Self.mirrorName(name)) } ?? false
-                    }
-                    prove(awaitingDeep.slice, result, job, set: set, state: &state)
+                    // What the deep check's list left out, a sampled-out evicted file say, wasn't hashed.
+                    let unhashed = deep.hashedPaths.map { hashed in
+                        awaitingDeep.names.filter { !hashed.contains(Self.mirrorName($0)) }
+                    } ?? []
+                    prove(awaitingDeep.slice, awaitingDeep.result, unhashed: unhashed, set: set, state: &state)
                 }
                 track(deep.audit, mirror: mirrorRoot(set), state: &state)
-                if flagged {
-                    // The flag may have stood for any of these, and no hash reached them.
-                    let live = deep.unhashedFreed.filter { Self.existsInSource($0, set.source) && !matcher.isExcluded($0) }
-                    owe(keepFreed(live, state: &state), job, set: set, state: &state)
-                }
             }
-            flagFreed(state: &state)
             deepRan = true
         }
         guard verified.checksClean else {
             tally.verification = "Quick check found \(verified.differences) differences"
             // A deep check can name files no earlier run owed. What's gone from the source is the sync's to remove.
-            let named = Set(verified.differingPaths).filter { Self.existsInSource($0, set.source) }
-            owe(Array(named), job, set: set, state: &state)
-            if await changedDuringRun(set, verified, since: batch.latestEventID) { throw Stop.changedDuringRun }
-            state.mismatched = Set(state.mismatched).union(named).sorted()
+            let named = Array(Set(verified.differingPaths).filter { Self.existsInSource($0, set.source) })
+            if await changedDuringRun(set, verified, since: batch.latestEventID) {
+                owe(named, state: &state)
+                throw Stop.changedDuringRun
+            }
+            // Recorded first: `owe` keeps what's recorded through an overflow, and only that.
+            recordMismatches(named, job, set: set, state: &state)
+            owe(named, state: &state)
             throw Stop.verificationFailed(differences: verified.differences)
         }
         tally.verification = deepRan ? "Quick and deep checks passed" : "Quick check passed"
@@ -533,92 +527,64 @@ public final class RunCoordinator: Sendable {
         tally.status = holding ? .held : (verified.backedUp && state.isBackedUp ? .success : .partial)
     }
 
-    /// Adds to what's owed. Past the bound the flag takes over from the list, except for files only
-    /// the list can speak for: an evicted file, which a whole-set check can't hash, and a recorded
-    /// mismatch. The flag is the record of an overflow, so no caller has to carry one.
-    private func owe(_ paths: [String], _ job: Job, set: BackupSet, state: inout SetState) {
-        guard !paths.isEmpty else { return }
-        let all = Set(state.verifyOwed).union(paths)
+    /// Adds to what's owed. Past the bound the flag takes over from the list, except for a recorded
+    /// mismatch, which only the list can speak for. The flag is the record of an overflow, so no
+    /// caller has to carry one.
+    private func owe(_ paths: [String], state: inout SetState) {
+        let all = Set(state.verifyOwed).union(paths).union(state.mismatched.keys)
         guard all.count > Self.maxOwed else {
             state.verifyOwed = all.sorted()
             return
         }
         state.hashWholeSet = true
-        if job.isLocal {
-            let mirror = mirrorRoot(set)
-            _ = keepFreed(all.sorted().filter { verifier.isFreed(mirror.appendingPathComponent($0)) }, state: &state)
-        }
-        state.verifyOwed = all.intersection(Set(state.freedSince.keys).union(state.mismatched)).sorted()
+        state.verifyOwed = state.mismatched.keys.sorted()
     }
 
-    /// Enters evicted files in their list and returns those it held. Past the bound the flag stands
-    /// in for the rest, and the next deep check names them again.
-    private func keepFreed(_ paths: [String], state: inout SetState) -> [String] {
-        let now = clock()
-        var kept: [String] = []
-        for path in paths {
-            if state.freedSince[path] != nil || state.freedSince.count < Self.maxFreed {
-                state.freedSince[path] = state.freedSince[path] ?? now
-                kept.append(path)
-            } else {
-                state.hashWholeSet = true
-            }
+    /// Past the bound the flag's whole-set hash finds what's on disk again once the list drains, and
+    /// the owner is told, since an evicted file left off the list has nothing else speaking for it.
+    private func recordMismatches(_ paths: [String], _ job: Job, set: BackupSet, state: inout SetState) {
+        let now = clock(), mirror = mirrorRoot(set)
+        var overflowed = false
+        for path in paths.sorted() where state.mismatched[path] == nil {
+            guard state.mismatched.count < Self.maxMismatched else { overflowed = true; continue }
+            state.mismatched[path] = Mismatch(since: now, evicted: job.isLocal && verifier.isFreed(mirror.appendingPathComponent(path)))
         }
-        return kept
+        guard overflowed else { return }
+        state.hashWholeSet = true
+        restate(.verificationFailed, job, set: set, detail: "More than \(Self.maxMismatched.formatted()) files differ, so not all of them are listed")
     }
 
     /// A slice passed its checks: what it owed is proven, and its audit carries on in the upload
-    /// tracking. What wasn't hashed proves nothing and stays owed, as does a file the audit couldn't
-    /// find. Only one that's really evicted waits for iCloud. The others can be hashed next run.
-    private func prove(_ slice: Slice, _ result: VerifyResult, _ job: Job, set: BackupSet, state: inout SetState) {
+    /// tracking. `unhashed` is what no hash reached. A recorded mismatch among them stays, and so
+    /// does a file on disk, which the next run can hash. An evicted one is done: its size check
+    /// passed, and iCloud only frees what it has uploaded. A file the audit couldn't find stays too.
+    private func prove(_ slice: Slice, _ result: VerifyResult, unhashed: [String], set: BackupSet, state: inout SetState) {
         let mirror = mirrorRoot(set)
         let prefix = slice.folder.map { $0 + "/" } ?? ""
-        let unproven = result.skippedFreed.map { Self.inSet($0, slice) }
-        let unhashed = Set(unproven)
+        let names = unhashed.map { Self.inSet($0, slice) }
+        let open = Set(names.filter { state.mismatched[$0] != nil })
         state.verifyOwed.removeAll { $0.hasPrefix(prefix) }
-        state.mismatched.removeAll { $0.hasPrefix(prefix) && !unhashed.contains($0) }
+        state.mismatched = state.mismatched.filter { !$0.key.hasPrefix(prefix) || open.contains($0.key) }
         track(result.audit, mirror: mirror, state: &state)
         let root = mirror.path + "/"
         let lost = result.audit.missing.map { $0.hasPrefix(root) ? String($0.dropFirst(root.count)) : $0 }
         let missing = Self.within(slice, lost).filter { Self.existsInSource($0, slice.source) }.map { Self.inSet($0, slice) }
-
-        let evicted = unproven.filter { job.isLocal && verifier.isFreed(mirror.appendingPathComponent($0)) }
-        let kept = keepFreed(evicted, state: &state)
-        let onDisk = unproven.filter { !Set(evicted).contains($0) }
-        owe(missing + kept + onDisk, job, set: set, state: &state)
-        let owed = Set(state.verifyOwed)
-        state.freedSince = state.freedSince.filter { owed.contains($0.key) }
+        let onDisk = names.filter { !open.contains($0) && !verifier.isFreed(mirror.appendingPathComponent($0)) }
+        owe(missing + onDisk, state: &state)
     }
 
-    /// One flag read per evicted file, no walk. One that came back is hashed by this or the next run.
-    private func refreshFreed(_ job: Job, set: BackupSet, state: inout SetState) {
+    /// One flag read per recorded mismatch, no walk. One that came back is hashed by this or the next run.
+    private func refreshMismatches(_ job: Job, set: BackupSet, state: inout SetState) {
         guard job.isLocal else { return }
         let mirror = mirrorRoot(set)
-        for path in state.freedSince.keys where !verifier.isFreed(mirror.appendingPathComponent(path)) {
-            state.freedSince[path] = nil
+        for path in state.mismatched.keys {
+            state.mismatched[path]?.evicted = verifier.isFreed(mirror.appendingPathComponent(path))
         }
-        state.reviewItems.removeAll { $0.kind == .unprovenFreed && state.freedSince[$0.path] == nil }
-        requestDownloads(mirror: mirror, state: state)
-    }
-
-    /// Owed files only, never the mirror at large: eviction is what keeps it from using disk. Asking
-    /// again is harmless, so a refusal is left for the next wake-up. A file that arrives is hashed by
-    /// the run after, and clears only if that hash passes.
-    private func requestDownloads(mirror: URL, state: SetState) {
-        let oldest = state.freedSince.sorted { ($0.value, $0.key) < ($1.value, $1.key) }.prefix(Self.maxDownloadsPerRun)
-        for path in oldest.map(\.key) {
+        let waiting = state.mismatched.filter(\.value.evicted).keys.sorted()
+        for path in waiting {
             do { try downloader.requestDownload(of: mirror.appendingPathComponent(path)) } catch {
                 Self.log.error("iCloud refused a download request")
             }
-        }
-    }
-
-    /// Whatever a deep check couldn't prove has outlasted it, so the owner hears about it.
-    private func flagFreed(state: inout SetState) {
-        state.reviewItems.removeAll { $0.kind == .unprovenFreed && state.freedSince[$0.path] == nil }
-        for path in state.freedSince.keys.sorted()
-        where !state.reviewItems.contains(where: { $0.kind == .unprovenFreed && $0.path == path }) {
-            state.reviewItems.append(ReviewItem(id: "unproven:\(path)", path: path, kind: .unprovenFreed))
         }
     }
 
@@ -654,7 +620,7 @@ public final class RunCoordinator: Sendable {
         if deepRan { state.lastDeepCheck = now }
         var solved: [Problem] = [.repeatedFailures, .signInExpired]
         // A mismatch stands until that file's own hash passes, however clean the rest of the run was.
-        if state.mismatched.isEmpty { solved.append(.verificationFailed) }
+        if state.mismatched.isEmpty, !state.hashWholeSet { solved.append(.verificationFailed) }
         if !holding {
             state.heldDeletions = 0
             solved.append(.deletionsHeld)
@@ -955,6 +921,13 @@ public final class RunCoordinator: Sendable {
     /// Saves a problem without posting it, for when a notification mustn't delay anything.
     private func keep(_ problem: Problem, _ pair: PairID, _ set: BackupSet, detail: String) {
         do { try problems.store(problem, pair: pair, setName: set.name, detail: detail) } catch {
+            Self.log.error("could not record a problem")
+        }
+    }
+
+    /// For news an open alert doesn't carry. Saved now, and posted with the run's other notices.
+    private func restate(_ problem: Problem, _ job: Job, set: BackupSet, detail: String) {
+        do { try problems.restate(problem, pair: job.pair, setName: set.name, detail: detail) } catch {
             Self.log.error("could not record a problem")
         }
     }

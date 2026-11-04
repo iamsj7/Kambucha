@@ -164,6 +164,40 @@ private struct SlowNotifier: Notifying {
     }
 }
 
+@Suite struct ProblemCenterRestateTests {
+    private final class Posts: Notifying, @unchecked Sendable {
+        let lock = NSLock(); var details: [String] = []
+        func post(_: Problem, pair: PairID, setName: String, detail: String) async -> Bool {
+            lock.withLock { details.append(detail) }
+            return true
+        }
+    }
+
+    @Test func newsOnAnOpenProblemIsPostedOnceAndDoesNotReopenIt() async throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent("pc-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: root) }
+        let posts = Posts()
+        let center = ProblemCenter(root: root, notifier: posts)
+        let pair = PairID(set: UUID(), destination: UUID())
+        try await center.raise(.verificationFailed, pair: pair, setName: "x", detail: "first")
+        let since = try center.active().first?.since
+        try center.restate(.verificationFailed, pair: pair, setName: "x", detail: "second")
+        try await center.raise(.verificationFailed, pair: pair, setName: "x", detail: "ignored")
+        try await center.raise(.verificationFailed, pair: pair, setName: "x", detail: "ignored")
+        #expect(posts.details == ["first", "second"])
+        #expect(try center.active().count == 1)
+        #expect(try center.active().first?.since == since)
+    }
+
+    @Test func aRestatedProblemWithNothingOpenIsNew() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent("pc-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: root) }
+        let center = ProblemCenter(root: root, notifier: Posts())
+        try center.restate(.verificationFailed, pair: PairID(set: UUID(), destination: UUID()), setName: "x", detail: "news")
+        #expect(try center.active().map(\.detail) == ["news"])
+    }
+}
+
 @Suite struct ProblemCenterTimeoutTests {
     /// No wall clock is read: the same answer loses to a shorter timeout and beats a longer one, so
     /// the value must be what decides, and load can only delay the answer. A timer that ignored the

@@ -89,6 +89,21 @@ public struct ProblemCenter: Sendable {
         }
     }
 
+    /// News an open problem's first alert couldn't carry: its detail changes and the next `raise` or
+    /// `retryPending` posts it again. With nothing open, it's a new problem.
+    public func restate(_ problem: Problem, pair: PairID, setName: String, detail: String) throws {
+        try locked {
+            var all = try load()
+            if let i = all.firstIndex(where: { $0.problem == problem && $0.pair == pair }) {
+                all[i].detail = detail
+                all[i].notified = false
+            } else {
+                all.append(ActiveProblem(problem: problem, pair: pair, setName: setName, detail: detail, since: Date()))
+            }
+            try save(all)
+        }
+    }
+
     public func raise(_ problem: Problem, pair: PairID, setName: String, detail: String) async throws {
         let toPost: Bool = try locked {
             var all = try load()

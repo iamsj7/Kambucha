@@ -14,8 +14,6 @@ public struct VerifyResult: Equatable, Sendable {
     public var skippedFreed: [String] = []
     /// What a deep check's hash list held. Nil when it compared everything, as on a cloud destination.
     public var hashedPaths: Set<String>?
-    /// Evicted files a deep check left out of its sample, so never hashed.
-    public var unhashedFreed: [String] = []
     /// The only value that may drive "Backed Up": clean checks and nothing pending, refused or missing.
     public var backedUp: Bool {
         checksClean && audit.pending.isEmpty && audit.refused.isEmpty && audit.missing.isEmpty
@@ -139,7 +137,6 @@ public struct Verifier: Sendable {
         var result = VerifyResult(differences: differences, audit: audit)
         result.differingPaths = differing
         result.hashedPaths = Set(list)
-        result.unhashedFreed = Array(Set(freed).subtracting(sampled)).sorted()
         return result
     }
 
