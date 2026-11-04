@@ -1763,6 +1763,66 @@ private final class Harness: @unchecked Sendable {
     }
 }
 
+/// Fix round 4: what the owner sees, from the records, problems and state real runs leave behind.
+@Suite struct WaitingStatusTests {
+    private func status(_ h: Harness) throws -> OverallStatus {
+        StatusSummary.overall(sets: [h.set], destinations: [h.iCloudDest], states: [h.pair: try h.state],
+                              records: try h.records.recent(limit: 50), problems: try h.problems.active(), running: false)
+    }
+
+    /// A real mismatch, then iCloud evicts the file, then a clean run of other work.
+    private func evictedAfterAMismatch(_ h: Harness) async throws {
+        try h.prime(); h.change("flowapp/a.txt")
+        h.rclone.script(copied: ["a.txt"], hashDifferences: 1, differing: ["a.txt"])
+        await h.run()
+        #expect(try status(h) == .attention(Problem.verificationFailed.headline))
+        h.rclone.script()
+        h.freed = ["a.txt"]
+        h.now = h.now.addingTimeInterval(hour)   // records order by time
+        await h.run()
+        #expect(try h.latest()?.status == .partial)
+        #expect(try h.latest()?.pendingUploads == 0)
+    }
+
+    @Test func aRealRunWaitingOnICloudReachesTheOwner() async throws {
+        let h = try Harness(); try await evictedAfterAMismatch(h)
+        #expect(try status(h) == .waitingForDownload(1))
+        #expect(try h.active == [.verificationFailed])   // told at once, and still open until the hash
+    }
+
+    @Test func thePassingHashEndsTheWait() async throws {
+        let h = try Harness(); try await evictedAfterAMismatch(h)
+        h.freed = []
+        h.now = h.now.addingTimeInterval(hour)
+        await h.run()
+        guard case .backedUp = try status(h) else { Issue.record("expected Backed Up"); return }
+    }
+
+    @Test func sevenDaysOfWaitingTurnsToAttention() async throws {
+        let h = try Harness(); try await evictedAfterAMismatch(h)
+        h.now = h.now.addingTimeInterval(7 * 24 * hour)
+        await h.run()
+        #expect(try status(h) == .attention(Problem.verificationFailed.headline))
+    }
+
+    @Test func aRunStoppedByTheTimeLimitNeverShowsUploadingZero() async throws {
+        let h = try Harness(); try h.prime(); h.change("flowapp/a.txt")
+        h.rclone.script(real: [.partial])
+        await h.run()
+        #expect(try h.latest()?.status == .partial)
+        #expect(try status(h) == .running)
+    }
+
+    @Test func aRefusedFileWithNoUploadsNeverShowsUploadingZero() async throws {
+        let h = try Harness(); try h.prime(); h.change("flowapp/a.txt")
+        h.rclone.script(copied: ["a.txt"])
+        h.auditor.set(refused: ["a.txt"])
+        await h.run()
+        #expect(try h.latest()?.status == .partial)
+        #expect(try status(h) == .running)
+    }
+}
+
 /// Fix round 4: downloads are for recorded mismatches, and never at the cost of the disk or the wake-up.
 @Suite struct DownloadLimitTests {
     private func waiting(_ h: Harness, _ names: [String] = ["a.txt"], since: Date? = nil) throws {
@@ -2154,6 +2214,7 @@ private final class Harness: @unchecked Sendable {
         let m = h.backupRoot.appendingPathComponent("Sets/x/flowapp")
         try FileManager.default.createDirectory(at: m, withIntermediateDirectories: true)
         try FileManager.default.createSymbolicLink(atPath: h.source.appendingPathComponent("flowapp/link").path, withDestinationPath: "a.txt")
+        try Data().write(to: m.appendingPathComponent("a.txt"))   // so the deep list is never empty
         if inMirror { try FileManager.default.createSymbolicLink(atPath: m.appendingPathComponent("link").path, withDestinationPath: "a.txt") }
         h.rclone.script(copied: ["flowapp/link.rclonelink"])
     }

@@ -91,6 +91,70 @@ struct StatusSummaryTests {
         #expect(r == .uploading(40))
     }
 
+    private func waiting(alerted: Bool = false) -> SetState {
+        var st = state()
+        st.verifyOwed = ["a"]
+        st.mismatched = ["a": Mismatch(since: now, evicted: true)]
+        st.mismatched["a"]?.alerted = alerted
+        return st
+    }
+
+    @Test func aPartialRunWaitingOnICloudSaysSoNotUploadingZero() {
+        let s = set([dest])
+        let r = overall(s, [dest], [pair(s, dest): waiting()], [record(s, dest, .partial, pending: 0)])
+        #expect(r == .waitingForDownload(1))
+    }
+
+    @Test func aPartialRunWithNothingToCountNeverSaysUploadingZero() {
+        let s = set([dest])
+        #expect(overall(s, [dest], [pair(s, dest): state()], [record(s, dest, .partial, pending: 0)]) == .running)
+    }
+
+    @Test func realUploadsOutrankTheWait() {
+        let s = set([dest])
+        var st = waiting(); st.pendingUploads = 3
+        #expect(overall(s, [dest], [pair(s, dest): st], [record(s, dest, .partial, pending: 3)]) == .uploading(3))
+    }
+
+    @Test func theOpenAlertAndFailedRecordOfAWaitingFileDontHideTheWait() {
+        let s = set([dest])
+        let r = overall(s, [dest], [pair(s, dest): waiting()], [record(s, dest, .verificationFailed)],
+                        [problem(.verificationFailed, s, dest)])
+        #expect(r == .waitingForDownload(1))
+    }
+
+    @Test func aWaitPastItsTimeNeedsAttention() {
+        let s = set([dest])
+        let r = overall(s, [dest], [pair(s, dest): waiting(alerted: true)], [record(s, dest, .partial)],
+                        [problem(.verificationFailed, s, dest)])
+        #expect(r == .attention(Problem.verificationFailed.headline))
+    }
+
+    @Test func aMismatchOnDiskIsNotAWait() {
+        let s = set([dest])
+        var st = waiting(); st.mismatched["b"] = Mismatch(since: now)
+        let r = overall(s, [dest], [pair(s, dest): st], [record(s, dest, .partial)], [problem(.verificationFailed, s, dest)])
+        #expect(r == .attention(Problem.verificationFailed.headline))
+    }
+
+    @Test func anotherPairsFailureIsNotHiddenByAWait() {
+        let s = set([dest, dest2])
+        let states = [pair(s, dest): waiting(), pair(s, dest2): state()]
+        let r = overall(s, [dest, dest2], states, [record(s, dest, .partial), record(s, dest2, .success)],
+                        [problem(.verificationFailed, s, dest), problem(.verificationFailed, s, dest2)])
+        #expect(r == .attention(Problem.verificationFailed.headline))
+    }
+
+    @Test func theWaitDoesNotOutrankAMissingDestination() {
+        let s = set([dest])
+        let lost = overall(s, [dest], [pair(s, dest): waiting()], [record(s, dest, .partial)], [problem(.destinationMissing, s, dest)])
+        #expect(lost == .attention(Problem.destinationMissing.headline))
+
+        var removed = set([dest]); removed.destinationIDs.append(UUID())
+        let gone = overall(removed, [dest], [PairID(set: removed.id, destination: dest.id): waiting()], [])
+        #expect(gone == .attention("A destination was removed"))
+    }
+
     @Test func drillDueDoesNotBlockBackedUp() {
         let s = set([dest])
         let r = overall(s, [dest], [pair(s, dest): state()], [record(s, dest, .success)], [problem(.drillDue, s, dest)])

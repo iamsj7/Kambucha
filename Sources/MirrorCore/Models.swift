@@ -173,6 +173,11 @@ public struct SetState: Codable, Equatable, Sendable {
     /// Files iCloud must bring back before Mirror can verify them.
     public var waitingForDownload: Int { mismatched.values.filter(\.evicted).count }
 
+    /// Every recorded mismatch is evicted and within its time, so what's left is iCloud's to deliver.
+    public var isOnlyWaiting: Bool {
+        !mismatched.isEmpty && mismatched.values.allSatisfy { $0.evicted && !$0.alerted }
+    }
+
     /// The one source of "Backed Up": the last run finished, checks passed, everything reached iCloud.
     public var isBackedUp: Bool {
         lastFinished != nil && consecutiveFailures == 0 && heldDeletions == 0 && pendingUploads == 0
