@@ -89,7 +89,7 @@ public struct PairID: Codable, Hashable, Sendable {
 }
 
 public struct ReviewItem: Codable, Equatable, Identifiable, Sendable {
-    public enum Kind: String, Codable, Sendable { case trackedInExcluded, secretInExcluded, refusedByICloud, unprovenFreed }
+    public enum Kind: String, Codable, Sendable { case trackedInExcluded, secretInExcluded, refusedByICloud }
     public var id: String
     public var path: String
     public var kind: Kind
@@ -173,7 +173,8 @@ public struct SetState: Codable, Equatable, Sendable {
         heldDeletions = try c.decodeIfPresent(Int.self, forKey: .heldDeletions) ?? 0
         pendingUploads = try c.decodeIfPresent(Int.self, forKey: .pendingUploads) ?? 0
         refusedSince = try c.decodeIfPresent([String: Date].self, forKey: .refusedSince) ?? [:]
-        reviewItems = try c.decodeIfPresent([ReviewItem].self, forKey: .reviewItems) ?? []
+        // One at a time: a kind that's since been retired costs that item, not the pair's whole history.
+        reviewItems = try c.decodeIfPresent([LenientItem].self, forKey: .reviewItems)?.compactMap(\.item) ?? []
         uploadingPaths = try c.decodeIfPresent([String].self, forKey: .uploadingPaths) ?? []
         uploadingSince = try c.decodeIfPresent(Date.self, forKey: .uploadingSince)
         uploadTotal = try c.decodeIfPresent(Int.self, forKey: .uploadTotal) ?? 0
@@ -194,6 +195,11 @@ public struct SetState: Codable, Equatable, Sendable {
     /// Every recorded mismatch is evicted and within its time, so what's left is iCloud's to deliver.
     public var isOnlyWaiting: Bool {
         !mismatched.isEmpty && mismatched.values.allSatisfy { $0.evicted && !$0.alerted }
+    }
+
+    private struct LenientItem: Decodable {
+        var item: ReviewItem?
+        init(from decoder: any Decoder) { item = try? ReviewItem(from: decoder) }
     }
 
     /// The one source of "Backed Up": the last run finished, checks passed, everything reached iCloud.

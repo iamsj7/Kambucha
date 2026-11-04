@@ -310,14 +310,6 @@ private final class FakeEjector: VolumeEjecting, @unchecked Sendable {
 
 // MARK: Review items
 
-@Test func anUnprovenFreedItemNeverProducesARule() {
-    let item = ReviewItem(id: "unproven:a.txt", path: "a.txt", kind: .unprovenFreed)
-    #expect(ReviewActions.rule(for: item, include: true) == nil)
-    #expect(ReviewActions.rule(for: item, include: false) == nil)
-    #expect(!ReviewActions.canChangeRules(.unprovenFreed))
-    #expect(ReviewActions.showsInFinder(.unprovenFreed))
-}
-
 @Test func otherKindsKeepTheirRuleActions() {
     let secret = ReviewItem(id: "1", path: "a/.env", kind: .secretInExcluded)
     #expect(ReviewActions.rule(for: secret, include: true)?.action == .include)
@@ -325,13 +317,6 @@ private final class FakeEjector: VolumeEjecting, @unchecked Sendable {
     let refused = ReviewItem(id: "2", path: "x.tmp", kind: .refusedByICloud)
     #expect(ReviewActions.rule(for: refused, include: true) == nil)   // iCloud won't take it, so Include is not offered
     #expect(ReviewActions.rule(for: refused, include: false)?.action == .exclude)
-}
-
-@Test func waitingForDownloadWording() {
-    #expect(ReviewActions.waitingText(count: 0) == nil)
-    #expect(ReviewActions.waitingText(count: 1) == "Waiting for iCloud to download 1 file to verify")
-    #expect(ReviewActions.waitingText(count: 1200) == "Waiting for iCloud to download 1,200 files to verify")
-    #expect(ReviewActions.downloadingReason == "iCloud is downloading this file so Mirror can verify it")
 }
 
 // MARK: Fix round 1

@@ -3970,3 +3970,16 @@ private struct GoneBeforeTidy: RcloneRunning {
         #expect(h.rclone.realSyncs.last?.mode == .mirror(maxDelete: 350))
     }
 }
+
+@Suite struct ReviewKindMigrationTests {
+    @Test func aRetiredReviewKindLeavesThePairsHistoryReadable() throws {
+        let json = #"""
+        {"lastEventID": 7, "reviewItems": [
+            {"id": "unproven:a.txt", "path": "a.txt", "kind": "unprovenFreed"},
+            {"id": "secret:b/.env", "path": "b/.env", "kind": "secretInExcluded"}]}
+        """#
+        let state = try JSONDecoder().decode(SetState.self, from: Data(json.utf8))
+        #expect(state.lastEventID == 7)
+        #expect(state.reviewItems.map(\.path) == ["b/.env"])
+    }
+}

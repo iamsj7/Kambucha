@@ -19,7 +19,7 @@ extension AppModel {
             let decided = Set(s.rules.map(\.pattern))
             for d in s.destinationIDs {
                 for item in states[PairID(set: s.id, destination: d)]?.reviewItems ?? []
-                where (item.kind == .unprovenFreed || !decided.contains(OverviewRules.pattern(for: item))) && seen.insert("\(s.id)-\(item.id)").inserted {
+                where !decided.contains(OverviewRules.pattern(for: item)) && seen.insert("\(s.id)-\(item.id)").inserted {
                     out.append(ReviewEntry(setID: s.id, setName: s.name, item: item))
                 }
             }
@@ -38,10 +38,6 @@ extension AppModel {
 }
 
 extension AppModel {
-    func showInFinder(_ entry: ReviewEntry) {
-        guard let s = set(entry.setID) else { return }
-        NSWorkspace.shared.activateFileViewerSelecting([s.source.appendingPathComponent(entry.item.path)])
-    }
 }
 
 enum OverviewRules {
@@ -109,9 +105,6 @@ struct OverviewView: View {
 
             Section {
                 let entries = model.reviewEntries
-                if let waiting = ReviewActions.waitingText(count: entries.filter { $0.item.kind == .unprovenFreed }.count) {
-                    Label(waiting, systemImage: "icloud.and.arrow.down")
-                }
                 if entries.isEmpty {
                     Label("Nothing to review", systemImage: "checkmark.circle").foregroundStyle(.secondary)
                 }
@@ -166,7 +159,6 @@ struct ReviewItemRow: View {
         case .trackedInExcluded: "Tracked by git, inside an excluded folder"
         case .secretInExcluded: "Looks like a secret, inside an excluded folder"
         case .refusedByICloud: "iCloud won't accept this file"
-        case .unprovenFreed: ReviewActions.downloadingReason
         }
     }
 
@@ -177,17 +169,12 @@ struct ReviewItemRow: View {
                 Text("\(entry.setName). \(reason)").font(.caption).foregroundStyle(.secondary)
             }
             Spacer()
-            if ReviewActions.showsInFinder(entry.item.kind) {
-                Button("Show in Finder") { model.showInFinder(entry) }
-                    .accessibilityLabel("Show \(entry.item.path) in Finder")
-            } else {
-                if entry.item.kind != .refusedByICloud {
-                    Button("Include") { model.resolve(entry, include: true) }
-                        .accessibilityLabel("Include \(entry.item.path) in the backup")
-                }
-                Button("Keep Excluded") { model.resolve(entry, include: false) }
-                    .accessibilityLabel("Keep \(entry.item.path) excluded")
+            if entry.item.kind != .refusedByICloud {
+                Button("Include") { model.resolve(entry, include: true) }
+                    .accessibilityLabel("Include \(entry.item.path) in the backup")
             }
+            Button("Keep Excluded") { model.resolve(entry, include: false) }
+                .accessibilityLabel("Keep \(entry.item.path) excluded")
         }
         .accessibilityElement(children: .contain)
     }

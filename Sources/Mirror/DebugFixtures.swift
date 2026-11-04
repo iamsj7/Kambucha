@@ -121,7 +121,7 @@ enum DebugFixtures {
         var st = (try? store.state(for: docsPair)) ?? SetState()
         st.reviewItems = [ReviewItem(id: "r1", path: "vendor/config/.env", kind: .secretInExcluded),
                           ReviewItem(id: "r2", path: "build/notes.tmp", kind: .refusedByICloud),
-                          ReviewItem(id: "r3", path: "Photos/holiday.mov", kind: .unprovenFreed)]
+                          ReviewItem(id: "r3", path: "Photos/holiday.nosync", kind: .refusedByICloud)]
         try? store.save(st, for: docsPair)
         let services = AppServices(preview: FakePreview(), dryRun: FakeDryRun(), inspector: nil,
                                    volumes: FakeVolumes(), agent: .bundled(in: Bundle.main.bundleURL),
