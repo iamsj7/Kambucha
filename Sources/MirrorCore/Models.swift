@@ -48,12 +48,32 @@ public struct Destination: Codable, Equatable, Identifiable, Sendable {
     public var recoveryKitConfirmed = false
     /// The drive's volume UUID. Only for `.externalDrive`. Identity is by UUID, never by name or path.
     public var volumeUUID: String?
+    /// The owner confirmed "This looks like an internal disk" for this drive. Runs refuse a drive that looks
+    /// internal while this is false.
+    public var internalDiskConfirmed = false
     /// Encryption defaults to on for Google Drive and OneDrive only. The iCloud folder relies on Advanced
     /// Data Protection and an external drive on its own password protection.
     public init(id: UUID = UUID(), name: String, kind: DestinationKind, encrypted: Bool? = nil,
-                volumeUUID: String? = nil) {
+                volumeUUID: String? = nil, internalDiskConfirmed: Bool = false) {
         self.id = id; self.name = name; self.kind = kind; self.volumeUUID = volumeUUID
+        self.internalDiskConfirmed = internalDiskConfirmed
         self.encrypted = encrypted ?? (kind == .googleDrive || kind == .oneDrive)
+    }
+}
+
+extension Destination {
+    private enum CodingKeys: String, CodingKey {
+        case id, name, kind, encrypted, recoveryKitConfirmed, volumeUUID, internalDiskConfirmed
+    }
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        id = try c.decode(UUID.self, forKey: .id)
+        name = try c.decode(String.self, forKey: .name)
+        kind = try c.decode(DestinationKind.self, forKey: .kind)
+        encrypted = try c.decode(Bool.self, forKey: .encrypted)
+        recoveryKitConfirmed = try c.decodeIfPresent(Bool.self, forKey: .recoveryKitConfirmed) ?? false
+        volumeUUID = try c.decodeIfPresent(String.self, forKey: .volumeUUID)
+        internalDiskConfirmed = try c.decodeIfPresent(Bool.self, forKey: .internalDiskConfirmed) ?? false
     }
 }
 

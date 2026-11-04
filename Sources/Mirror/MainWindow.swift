@@ -257,6 +257,7 @@ extension DestinationKind {
         switch self {
         case .iCloudFolder: "icloud"
         case .googleDrive, .oneDrive: "cloud"
+        case .externalDrive: "externaldrive"
         }
     }
     var title: String {
@@ -264,6 +265,7 @@ extension DestinationKind {
         case .iCloudFolder: "iCloud Drive"
         case .googleDrive: "Google Drive"
         case .oneDrive: "OneDrive"
+        case .externalDrive: "External Drive"
         }
     }
 }
@@ -278,6 +280,10 @@ extension AppModel {
     func destinationStatus(_ d: Destination, now: Date = Date()) -> DestinationStatus {
         let pairs = sets.flatMap { s in s.destinationIDs.contains(d.id) ? [PairID(set: s.id, destination: d.id)] : [] }
         let finished = pairs.compactMap { states[$0]?.lastFinished }.max()
+        if d.kind == .externalDrive, ExternalVolume.find(d, in: services.volumes.mounted()) == nil {
+            return DestinationStatus(symbol: "externaldrive.badge.xmark",
+                                     text: DestinationRules.notConnectedText(lastBackedUp: finished, now: now))
+        }
         if d.encrypted && !d.recoveryKitConfirmed {
             return DestinationStatus(symbol: "exclamationmark.triangle", text: "Save your Recovery Kit")
         }

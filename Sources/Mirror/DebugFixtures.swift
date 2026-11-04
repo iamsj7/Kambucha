@@ -82,10 +82,13 @@ enum DebugFixtures {
             (0..<240).map { "Old Builds/release-\($0 / 20)/app-\($0).zip" }
         }
     }
-    private struct FakeVolumes: VolumeListing {
-        func connectedVolumes() -> [ConnectedVolume] {
-            [ConnectedVolume(id: "A", name: "Backup SSD", filesystem: "ExFAT", freeBytes: 420_000_000_000),
-             ConnectedVolume(id: "B", name: "Archive", filesystem: "APFS", freeBytes: 1_800_000_000_000)]
+    private struct FakeVolumes: VolumeLocating {
+        func mounted() -> [VolumeInfo] {
+            [VolumeInfo(uuid: "A", name: "Backup SSD", mountPoint: URL(fileURLWithPath: "/Volumes/Backup SSD"), fileSystem: "exfat", freeBytes: 420_000_000_000),
+             VolumeInfo(uuid: "B", name: "Archive", mountPoint: URL(fileURLWithPath: "/Volumes/Archive"), fileSystem: "apfs", freeBytes: 1_800_000_000_000, looksInternal: true)]
+        }
+        func unsupported() -> [UnsupportedVolume] {
+            [UnsupportedVolume(name: "Time Machine", mountPoint: URL(fileURLWithPath: "/Volumes/Time Machine"), reason: .timeMachine)]
         }
     }
 

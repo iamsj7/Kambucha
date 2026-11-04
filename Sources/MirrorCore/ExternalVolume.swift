@@ -79,8 +79,11 @@ public struct SystemVolumes: VolumeLocating {
         if t.isTimeMachine { return .unsupported(.timeMachine) }
         if !t.isLocal { return .unsupported(.notLocal) }
         if t.isReadOnly { return .unsupported(.readOnly) }
-        return .target(looksInternal: t.isInternal && !t.isEjectable)
+        return .target(looksInternal: Self.looksInternalValue(isInternal: t.isInternal, isEjectable: t.isEjectable))
     }
+
+    /// A missing `volumeIsInternal` reads as internal, so the drive stays usable but needs confirmation.
+    public static func looksInternalValue(isInternal: Bool?, isEjectable: Bool) -> Bool { (isInternal ?? true) && !isEjectable }
 
     public static func isBackupTarget(_ t: VolumeTraits) -> Bool {
         if case .target = classify(path: t.path, traits: t) { return true }
@@ -125,7 +128,7 @@ public struct SystemVolumes: VolumeLocating {
                 let tm = fm.fileExists(atPath: url.appendingPathComponent(".com.apple.timemachine.supported").path)
                     || fm.fileExists(atPath: url.appendingPathComponent("Backups.backupdb").path)
                 traits = VolumeTraits(path: url.path, isRootFileSystem: v.volumeIsRootFileSystem ?? false, isLocal: local,
-                                      isInternal: v.volumeIsInternal ?? false, isEjectable: v.volumeIsEjectable ?? false,
+                                      isInternal: v.volumeIsInternal ?? true, isEjectable: v.volumeIsEjectable ?? false,
                                       isReadOnly: readOnly, isTimeMachine: tm)
             }
             let name = values?.volumeName ?? url.lastPathComponent

@@ -2,7 +2,7 @@ import Foundation
 
 public enum GuardFailure: Error, Equatable {
     case sourceMissing, sourceUnreadable, sourceInsideICloud, sourceContainsBackupRoot, setsOverlap(String), setNameTaken(String)
-    case iCloudUnavailable, destinationOutsideRoot, destinationUnclaimed, wrongDrive
+    case iCloudUnavailable, destinationOutsideRoot, destinationUnclaimed, wrongDrive, internalDiskNotConfirmed
     case sourceSuspiciouslyEmpty(now: Int, last: Int)
 }
 
@@ -49,6 +49,7 @@ public struct PathGuard: Sendable {
                   let uuid = destination.volumeUUID,
                   volume.uuid.caseInsensitiveCompare(uuid) == .orderedSame,
                   Self.strictlyInsideCanonical(backupRoot, volume.mountPoint) else { throw GuardFailure.wrongDrive }
+            if volume.looksInternal && !destination.internalDiskConfirmed { throw GuardFailure.internalDiskNotConfirmed }
         }
         try assertInsideRoot(mirrorURL(set))
         // Cloud destinations don't live in iCloud Drive, so only the iCloud folder needs it present.
