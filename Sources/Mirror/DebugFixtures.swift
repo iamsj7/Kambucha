@@ -73,13 +73,15 @@ enum DebugFixtures {
             return PreviewResult(includedBytes: inc.reduce(0) { $0 + $1.bytes }, skippedBytes: all.filter { !$0.included }.reduce(0) { $0 + $1.bytes },
                                  includedFiles: inc.reduce(0) { $0 + $1.fileCount }, groups: all,
                                  decisions: [ReviewItem(id: "1", path: "vendor/config/.env", kind: .secretInExcluded),
-                                             ReviewItem(id: "2", path: "vendor/autoload.php", kind: .trackedInExcluded)])
+                                             ReviewItem(id: "2", path: "vendor/autoload.php", kind: .trackedInExcluded)],
+                                 warnings: ["Git couldn't read \"old-client/site\", so files it tracks in excluded folders aren't listed here."])
         }
         func rule(for group: PreviewGroup, included: Bool) -> UserRule { UserRule(pattern: group.pattern, action: included ? .include : .exclude) }
     }
     private struct FakeDryRun: DeletionDryRunProviding {
-        func heldDeletions(set: BackupSet, destination: Destination) async throws -> [String] {
-            (0..<240).map { "Old Builds/release-\($0 / 20)/app-\($0).zip" }
+        func heldDeletions(set: BackupSet, destination: Destination) async throws -> HeldFiles {
+            destination.kind == .googleDrive ? HeldFiles(files: [], gitCount: 18)
+                : HeldFiles(files: (0..<6).map { "Old Builds/release-\($0 / 20)/app-\($0).zip" }, gitCount: 3)
         }
     }
     private struct FakeVolumes: VolumeLocating {
@@ -135,6 +137,24 @@ enum DebugFixtures {
         spin(0.5)
 
         func at(_ n: String) -> URL { dir.appendingPathComponent(n) }
+        // A set whose only destination is a drive that isn't plugged in.
+        let awayRoot = FileManager.default.temporaryDirectory.appendingPathComponent("mirror-away-\(UUID().uuidString)")
+        let away = Destination(name: "Travel SSD", kind: .externalDrive, encrypted: false, volumeUUID: "Z")
+        var awaySet = BackupSet(name: "Photos", source: URL(fileURLWithPath: "/Users/me/Photos"), destinationIDs: [away.id])
+        awaySet.acceptPreview()
+        let awayStore = ConfigStore(root: awayRoot)
+        try? awayStore.saveDestinations([away]); try? awayStore.saveSets([awaySet])
+        var awayState = SetState(); awayState.lastFinished = Date().addingTimeInterval(-6 * 86_400 - 60)
+        try? awayStore.save(awayState, for: PairID(set: awaySet.id, destination: away.id))
+        let awayModel = AppModel(support: awayRoot, services: services)
+        spin(0.5)
+        render(MenuBarPanel(model: awayModel), size: CGSize(width: 320, height: 300), to: at("panel-drive-away"))
+        // A set whose name is still used by a backup in the destination.
+        var conflict = (try? store.state(for: PairID(set: sets[1].id, destination: dests[0].id))) ?? SetState()
+        conflict.stoppedBy = .setNameInUse
+        try? store.save(conflict, for: PairID(set: sets[1].id, destination: dests[0].id))
+        model.reload()
+        render(NavigationStack { SetDetailView(model: model, setID: sets[1].id) }, size: CGSize(width: 620, height: 420), to: at("set-name-in-use"))
         // MainWindow itself shows onboarding until the real system checks pass, so the overview is rendered directly.
         render(NavigationStack { OverviewView(model: model, select: { _ in }) }, size: CGSize(width: 700, height: 900), to: at("main-overview"))
         render(NavigationStack { SetDetailView(model: model, setID: model.sets[0].id) }, size: CGSize(width: 620, height: 2000), to: at("set-detail"))

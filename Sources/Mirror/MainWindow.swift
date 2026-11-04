@@ -10,10 +10,13 @@ enum SidebarItem: Hashable {
     case destination(UUID)
     case archive
     case activity
+    case settings
 }
 
 struct MainWindow: View {
     @Bindable var model: AppModel
+    /// The Settings window's model, so the two never hold different copies of what's saved.
+    let settings: SettingsModel
     @State private var selection: SidebarItem? = .overview
     @State private var addingSet = false
     @State private var addingDestination = false
@@ -22,9 +25,11 @@ struct MainWindow: View {
     @State private var archive: ArchiveModel
     @State private var activity: ActivityModel
     @State private var onboarding: OnboardingModel
+    @State private var firstPreview: ReviewTarget?
 
-    init(model: AppModel) {
+    init(model: AppModel, settings: SettingsModel) {
         self.model = model
+        self.settings = settings
         _archive = State(initialValue: ArchiveModel(provider: model.services.archive, store: ConfigStore(root: model.support)))
         _activity = State(initialValue: ActivityModel(support: model.support))
         _onboarding = State(initialValue: OnboardingModel(store: ConfigStore(root: model.support),
@@ -47,6 +52,17 @@ struct MainWindow: View {
                 try? await Task.sleep(for: .seconds(onboarding.isComplete ? 30 : 2))
             }
         }
+        // The Dock icon shows only while this window is open; the app is otherwise a menu bar item. Here and not on
+        // the split view, or a first-run window would open behind whatever else is on screen.
+        .onAppear { DockPresence.windowOpened(); model.windowAppeared() }
+        .onDisappear { DockPresence.windowClosed(); model.windowDisappeared() }
+        .onChange(of: onboarding.setAwaitingPreview) { _, id in
+            guard let id else { return }
+            model.reload()
+            onboarding.previewShown()
+            selection = .set(id)
+            firstPreview = ReviewTarget(id: id)
+        }
     }
 
     private var split: some View {
@@ -67,6 +83,16 @@ struct MainWindow: View {
         .sheet(item: reviewBinding) { item in
             DeletionReviewSheet(model: model, setID: item.id)
         }
+        .sheet(item: $firstPreview) { item in
+            if let set = model.set(item.id) {
+                PreviewSheet(model: model, set: set) { updated in
+                    var accepted = updated
+                    accepted.acceptPreview()
+                    model.save(set: accepted)
+                    model.runNow(accepted.id)
+                }
+            }
+        }
         .confirmationDialog(removalTitle, isPresented: $confirmingRemoval, titleVisibility: .visible) {
             Button("Remove", role: .destructive) { removeSelection() }
             Button("Cancel", role: .cancel) {}
@@ -74,11 +100,11 @@ struct MainWindow: View {
             Text(removalMessage)
         }
         .safeAreaInset(edge: .bottom) {
-            if let error = model.lastError { ErrorBar(message: error) { model.dismissError() } }
+            VStack(spacing: 0) {
+                if onboarding.accessWarning { AccessWarningBar { onboarding.openFullDiskAccess() } }
+                if let error = model.lastError { ErrorBar(message: error) { model.dismissError() } }
+            }
         }
-        // The Dock icon shows only while this window is open; the app is otherwise a menu bar item.
-        .onAppear { DockPresence.windowOpened(); model.windowAppeared() }
-        .onDisappear { DockPresence.windowClosed(); model.windowDisappeared() }
     }
 
     // MARK: Sidebar
@@ -108,6 +134,7 @@ struct MainWindow: View {
                 Label("Archive", systemImage: "archivebox").tag(SidebarItem.archive)
                 Label("Activity", systemImage: "list.bullet.rectangle").tag(SidebarItem.activity)
             }
+            Label("Settings", systemImage: "gearshape").tag(SidebarItem.settings)
         }
         .toolbar {
             ToolbarItem {
@@ -144,6 +171,8 @@ struct MainWindow: View {
             ArchiveView(model: archive, agent: model.services.agent)
         case .activity:
             ActivityView(model: activity)
+        case .settings:
+            SettingsView(model: settings)
         }
     }
 
@@ -250,6 +279,23 @@ struct ErrorBar: View {
     }
 }
 
+/// The background helper's last check failed. Not a dead end: runs still say what they could and couldn't read.
+struct AccessWarningBar: View {
+    let open: () -> Void
+    var body: some View {
+        HStack {
+            Label("The background helper can't confirm Full Disk Access, so backups may not read every folder.",
+                  systemImage: "exclamationmark.triangle").lineLimit(3)
+            Spacer()
+            Button("Open Settings", action: open)
+                .accessibilityHint("Opens Full Disk Access in System Settings")
+        }
+        .padding(10)
+        .background(.bar)
+        .accessibilityElement(children: .contain)
+    }
+}
+
 // MARK: Shared presentation
 
 extension DestinationKind {
@@ -276,6 +322,27 @@ struct DestinationStatus: Equatable {
     var text: String
 }
 
+extension DestinationStatus {
+    init(_ health: DestinationHealth) {
+        func files(_ n: Int) -> String { "\(n.formatted()) \(n == 1 ? "file" : "files")" }
+        switch health {
+        case .unused: self.init(symbol: "circle.dashed", text: "Not used by any set")
+        case .paused: self.init(symbol: "pause.circle", text: "Paused")
+        case .notBackedUp: self.init(symbol: "circle.dashed", text: "Not backed up yet")
+        case .previewNeeded: self.init(symbol: "eye", text: "Preview needed")
+        case .failing: self.init(symbol: "exclamationmark.icloud", text: "Needs attention")
+        case .unfinished: self.init(symbol: "circle.dashed", text: "Backup not finished")
+        case .stopped(let problem): self.init(symbol: "exclamationmark.icloud", text: problem.headline)
+        case .mismatched(let n): self.init(symbol: "exclamationmark.icloud", text: "\(files(n)) didn't match")
+        case .held(let n): self.init(symbol: "pause.circle", text: "\(n.formatted()) \(n == 1 ? "deletion" : "deletions") held")
+        case .uploading(let n): self.init(symbol: "arrow.clockwise.icloud", text: "Uploading \(files(n))")
+        case .notAccepted(let n): self.init(symbol: "icloud.slash", text: StatusSummary.notAcceptedText(count: n))
+        case .backedUp(let last):
+            self.init(symbol: "checkmark.circle", text: "Backed up \(last.formatted(.relative(presentation: .named)))")
+        }
+    }
+}
+
 extension AppModel {
     func destinationStatus(_ d: Destination, now: Date = Date()) -> DestinationStatus {
         let pairs = sets.flatMap { s in s.destinationIDs.contains(d.id) ? [PairID(set: s.id, destination: d.id)] : [] }
@@ -292,13 +359,6 @@ extension AppModel {
         if d.encrypted && !d.recoveryKitConfirmed {
             return DestinationStatus(symbol: "exclamationmark.triangle", text: "Save your Recovery Kit")
         }
-        if pairs.contains(where: { (states[$0]?.consecutiveFailures ?? 0) > 0 }) {
-            return DestinationStatus(symbol: "exclamationmark.icloud", text: "Needs attention")
-        }
-        if let finished {
-            return DestinationStatus(symbol: "checkmark.circle",
-                                     text: "Backed up \(finished.formatted(.relative(presentation: .named)))")
-        }
-        return DestinationStatus(symbol: "circle.dashed", text: pairs.isEmpty ? "Not used by any set" : "Not backed up yet")
+        return DestinationStatus(StatusSummary.destinationHealth(d.id, sets: sets, states: states))
     }
 }

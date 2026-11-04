@@ -42,7 +42,7 @@ struct PreviewSheet: View {
         }
         .padding(20)
         .frame(minWidth: 620, minHeight: 460)
-        .task { await controller.load() }
+        .task { await controller.open() }
         .onAppear { controller.onSetChanged = { model.save(set: $0) } }
         .confirmationDialog(
             "New rule matches files already backed up",
@@ -64,6 +64,9 @@ struct PreviewSheet: View {
         } else if let r = controller.result {
             ForEach(PreviewWarnings.appleDouble(set: controller.set, destinations: model.destinations,
                                                 volumes: model.volumeCache.volumes), id: \.self) {
+                Label($0, systemImage: "exclamationmark.triangle").font(.callout)
+            }
+            ForEach(r.warnings, id: \.self) {
                 Label($0, systemImage: "exclamationmark.triangle").font(.callout)
             }
             HStack(spacing: 12) {

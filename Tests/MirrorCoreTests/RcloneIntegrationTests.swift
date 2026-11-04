@@ -49,6 +49,71 @@ private final class Sandbox {
 @Suite struct RcloneIntegrationTests {
     let runner = RcloneRunner.localOnly(binary: rcloneBinary)
 
+    /// `ruleFor` is what Include writes. rclone reads the filter first match wins, so only a rule that
+    /// covers the folder's contents can beat the preset's `- /proj/vendor/**`.
+    private func syncTrackedFolder(project: String, scope: String?) async throws -> Bool {
+        let box = try Sandbox()
+        let php = Preset(id: "php", name: "PHP", markers: ["composer.json"], alwaysExclude: [], ambiguousExclude: ["vendor/"])
+        try box.write("\(project)/composer.json", "{}")
+        try box.write("\(project)/vendor/lib/a.php", "tracked")
+        let item = ReviewItem(id: "tracked:\(project)/vendor", path: "\(project)/vendor", kind: .trackedInExcluded)
+        var set = BackupSet(name: "S", source: box.src, presets: ["php"])
+        set.rules = [try #require(ReviewActions.rule(for: item, include: true))]
+        let projects = [DetectedProject(relativePath: project, presetIDs: ["php"])]
+        let lines = FilterBuilder(presets: [php]).lines(for: set, projects: projects, scope: scope)
+        try FilterBuilder(presets: [php]).write(lines, to: box.filter)
+        let source = scope.map { box.src.appendingPathComponent($0) } ?? box.src
+        let destination = scope.map { box.dst.appendingPathComponent($0) } ?? box.dst
+        let result = try await runner.sync(box.request(source: source, destination: destination))
+        #expect(result.outcome == .success)
+        return box.read(box.dst, "\(project)/vendor/lib/a.php") == "tracked"
+    }
+
+    @Test func includingATrackedFolderReallyBacksItUp() async throws {
+        #expect(try await syncTrackedFolder(project: "proj", scope: nil))
+    }
+
+    @Test func includingATrackedFolderHoldsForAScopedSync() async throws {
+        #expect(try await syncTrackedFolder(project: "proj", scope: "proj"))
+    }
+
+    @Test func includingATrackedFolderWithGlobCharactersInItsPath() async throws {
+        #expect(try await syncTrackedFolder(project: "pro[j] {1}", scope: nil))
+    }
+
+    /// Real rclone, real filter order: an Include on a folder holds, and a switch that's off still wins inside it.
+    private func syncIncludedFolder(secrets: Bool, git: Bool) async throws -> (lib: Bool, env: Bool, gitConfig: Bool, log: Bool) {
+        let box = try Sandbox()
+        let php = Preset(id: "php", name: "PHP", markers: ["composer.json"], alwaysExclude: [], ambiguousExclude: ["vendor/"])
+        try box.write("proj/composer.json", "{}")
+        try box.write("proj/vendor/lib/a.php", "tracked")
+        try box.write("proj/vendor/.env", "SECRET=1")
+        try box.write("proj/vendor/.git/config", "[core]")
+        try box.write("proj/vendor/debug.log", "noise")
+        var set = BackupSet(name: "S", source: box.src, presets: ["php"])
+        set.backupSecrets = secrets; set.backupGit = git
+        set.rules = [UserRule(pattern: "*.log", action: .exclude), UserRule(pattern: "/proj/vendor/**", action: .include)]
+        let filters = FilterBuilder(presets: [php])
+        try filters.write(filters.lines(for: set, projects: [DetectedProject(relativePath: "proj", presetIDs: ["php"])], scope: nil), to: box.filter)
+        #expect(try await runner.sync(box.request()).outcome == .success)
+        return (box.exists(box.dst, "proj/vendor/lib/a.php"), box.exists(box.dst, "proj/vendor/.env"),
+                box.exists(box.dst, "proj/vendor/.git/config"), box.exists(box.dst, "proj/vendor/debug.log"))
+    }
+
+    @Test func theSecretsAndGitSwitchesBeatAnIncludedFolder() async throws {
+        let r = try await syncIncludedFolder(secrets: false, git: false)
+        #expect(r.lib && !r.env && !r.gitConfig)
+    }
+
+    @Test func withTheSwitchesOnAnIncludedFolderKeepsItsSecretsAndGit() async throws {
+        let r = try await syncIncludedFolder(secrets: true, git: true)
+        #expect(r.lib && r.env && r.gitConfig)
+    }
+
+    @Test func aUserExcludeStillBeatsALaterInclude() async throws {
+        #expect(try await !syncIncludedFolder(secrets: true, git: true).log)
+    }
+
     @Test func addModifyDelete() async throws {
         let sb = try Sandbox()
         try sb.write("a.txt", "one"); try sb.write("sub/b.txt", "two")

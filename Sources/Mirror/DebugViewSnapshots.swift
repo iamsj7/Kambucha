@@ -16,17 +16,27 @@ enum DebugViewSnapshots {
             return [e("1", "src/App.swift", 0.1, 18_400), e("2", "src/Model.swift", 0.1, 9_200), e("3", "notes/plan.md", 1.2, 4_100),
                     e("4", "assets/logo.png", 3.5, 220_000), e("5", "README.md", 3.5, 2_900)]
         }
-        func restore(entry: ArchiveEntry, set: BackupSet, destination: Destination, to: URL) async throws {}
+        func restore(entry: ArchiveEntry, set: BackupSet, destination: Destination, to: URL, replacing: Bool) async throws {}
+        func browse(path: String, set: BackupSet, destination: Destination) async throws -> [BackupItem] {
+            [BackupItem(name: "client-site", isFolder: true, size: 0), BackupItem(name: "mobile-app", isFolder: true, size: 0),
+             BackupItem(name: "notes.md", isFolder: false, size: 4_100), BackupItem(name: "README.md", isFolder: false, size: 2_900)]
+        }
     }
 
     @MainActor private final class FakeSystem: OnboardingSystem {
-        func fullDiskAccessConfirmed() async -> Bool { true }
-        func checkFullDiskAccessNow() async -> AccessConfirmation.Outcome { .confirmed }
-        func agentStatus() -> SMAppService.Status { .requiresApproval }
+        var access = AgentAccess.Status.confirmed
+        var report: AccessReport?
+        var agent = SMAppService.Status.requiresApproval
+        func fullDiskAccess() async -> AgentAccess.Status { access }
+        func accessReport() -> AccessReport? { report }
+        func checkFullDiskAccessNow() async -> AccessConfirmation.Outcome { access == .confirmed ? .confirmed : .notConfirmed }
+        func agentStatus() -> SMAppService.Status { agent }
         func enableAgent() throws {}
+        func enableOpenAtLogin() throws {}
         func notificationAccess() async -> NotificationAccess { .notDetermined }
         func requestNotifications() async -> NotificationAccess { .allowed }
         func openFullDiskAccessPane() {}
+        func openFilesAndFoldersPane() {}
         func openLoginItemsSettings() {}
         func openNotificationSettings() {}
     }
@@ -65,6 +75,14 @@ enum DebugViewSnapshots {
         write(ArchiveView(model: archive, agent: AgentClient(executable: URL(fileURLWithPath: "/dev/null"))),
               size: CGSize(width: 720, height: 460), name: "archive", to: dir)
 
+        // The latest backup, inside a folder
+        let latest = ArchiveModel(provider: FakeArchive(), store: store)
+        latest.loadConfig()
+        latest.mode = .latest
+        Task { await latest.open("client-site") }
+        settle(0.5)
+        write(ArchiveView(model: latest, agent: nil), size: CGSize(width: 720, height: 460), name: "archive-latest", to: dir)
+
         // Archive, empty and failed states
         let empty = ArchiveModel(provider: EmptyArchive(), store: store); empty.loadConfig()
         Task { await empty.reload() }; settle(0.3)
@@ -100,6 +118,16 @@ enum DebugViewSnapshots {
         Task { await onboarding.refresh() }; settle(0.4)
         write(OnboardingView(model: onboarding), size: CGSize(width: 600, height: 560), name: "onboarding", to: dir)
 
+        // Onboarding: a check that found folders readable and no Full Disk Access, then one that couldn't read them.
+        for (name, folders) in [("onboarding-partial", true), ("onboarding-folders", false)] {
+            let system = FakeSystem()
+            system.agent = .enabled; system.access = .failing
+            system.report = AccessReport(folders: folders, fullDiskAccess: false, checkedAt: Date().addingTimeInterval(60))
+            let model = OnboardingModel(system: system, store: ConfigStore(root: onboardRoot.appendingPathComponent(name)))
+            Task { await model.refresh(); await model.checkAccessNow() }; settle(0.4)
+            write(OnboardingView(model: model), size: CGSize(width: 600, height: 620), name: name, to: dir)
+        }
+
         // Settings
         let settingsRoot = FileManager.default.temporaryDirectory.appendingPathComponent("mirror-settings-\(UUID().uuidString)")
         let settings = SettingsModel(store: SettingsStore(root: settingsRoot), login: FakeLogin())
@@ -122,7 +150,8 @@ enum DebugViewSnapshots {
 
     private struct EmptyArchive: ArchiveProviding {
         func list(set: BackupSet, destination: Destination) async throws -> [ArchiveEntry] { [] }
-        func restore(entry: ArchiveEntry, set: BackupSet, destination: Destination, to: URL) async throws {}
+        func restore(entry: ArchiveEntry, set: BackupSet, destination: Destination, to: URL, replacing: Bool) async throws {}
+        func browse(path: String, set: BackupSet, destination: Destination) async throws -> [BackupItem] { [] }
     }
 }
 

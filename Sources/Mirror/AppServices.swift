@@ -21,6 +21,7 @@ struct AppServices: Sendable {
     var agent: AgentClient
     var archive: any ArchiveProviding
     var ejector: any VolumeEjecting = WorkspaceEjector()
+    var names: any SetNameListing = NoSetNames()
 
     /// Real providers. rclone and the agent come only from the app bundle, never from the environment or argv.
     static var live: AppServices {
@@ -35,6 +36,6 @@ struct AppServices: Sendable {
             preview: preview,
             dryRun: AgentDeletionDryRun(client: calls),
             inspector: LocalMirrorInspector(store: store, preview: preview, volumes: volumes, support: support),
-            volumes: volumes, agent: agent, archive: AgentArchiveProvider(client: calls))
+            volumes: volumes, agent: agent, archive: AgentArchiveProvider(client: calls), names: calls)
     }
 }

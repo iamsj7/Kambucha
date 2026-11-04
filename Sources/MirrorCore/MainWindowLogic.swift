@@ -5,10 +5,17 @@ import Observation
 
 // MARK: Injected services
 
+/// What a run to one destination would delete. `.git` files don't count toward a hold, so they're only counted here.
+public struct HeldFiles: Equatable, Sendable {
+    /// Outside `.git` folders, which is what the gate counts and the owner approves.
+    public var files: [String]
+    public var gitCount: Int
+    public init(files: [String], gitCount: Int) { self.files = files; self.gitCount = gitCount }
+}
+
 /// Supplies the files a held deletion would remove, from a dry run. The engine implements it.
 public protocol DeletionDryRunProviding: Sendable {
-    /// Every file a run to this one destination would delete, `.git` ones included.
-    func heldDeletions(set: BackupSet, destination: Destination) async throws -> [String]
+    func heldDeletions(set: BackupSet, destination: Destination) async throws -> HeldFiles
 }
 
 /// Finds files already mirrored that new exclude rules would now skip, and moves them to the archive
@@ -50,6 +57,21 @@ public final class PreviewController {
         catch { loadError = SetupFailureText.message(for: error) }
     }
 
+    /// The sheet opening. Every way of changing a set's rules leads here, as a change needs a new acceptance:
+    /// a stack, a switch or a typed rule. So this is where they all ask about files already mirrored.
+    public func open() async {
+        await load()
+        guard !set.isPreviewAccepted else { return }
+        await askAboutMirrored(set.rules.filter { $0.action == .exclude })
+    }
+
+    private func askAboutMirrored(_ excludes: [UserRule]) async {
+        pendingImpact = nil
+        if let inspector, let files = try? await inspector.mirroredFiles(matching: excludes, set: set), !files.isEmpty {
+            pendingImpact = files
+        }
+    }
+
     /// Unticking saves an exclude rule and ticking an include rule, replacing any earlier rule for the
     /// same pattern. Every change recomputes the preview.
     public func setIncluded(_ included: Bool, for group: PreviewGroup) async {
@@ -59,10 +81,7 @@ public final class PreviewController {
         if persistsEdits { onSetChanged?(set) }
         await load()
         pendingImpact = nil
-        if rule.action == .exclude, let inspector,
-           let files = try? await inspector.mirroredFiles(matching: [rule], set: set), !files.isEmpty {
-            pendingImpact = files
-        }
+        if rule.action == .exclude { await askAboutMirrored([rule]) }
     }
 
     public func resolveImpact(_ choice: ExcludeResolution) async {
@@ -82,6 +101,7 @@ public final class PreviewController {
 public struct HeldDestination: Identifiable, Equatable, Sendable {
     public var destination: Destination
     public var files: [String] = []
+    public var gitCount = 0
     public var isLoaded = false
     public var loadError: String?
     public var id: UUID { destination.id }
@@ -113,7 +133,9 @@ public final class DeletionReview {
     public func load() async {
         for i in entries.indices {
             do {
-                entries[i].files = try await provider.heldDeletions(set: set, destination: entries[i].destination)
+                let held = try await provider.heldDeletions(set: set, destination: entries[i].destination)
+                entries[i].files = held.files
+                entries[i].gitCount = held.gitCount
                 entries[i].isLoaded = true; entries[i].loadError = nil
             } catch {
                 entries[i].isLoaded = false; entries[i].loadError = SetupFailureText.message(for: error)
@@ -122,9 +144,10 @@ public final class DeletionReview {
     }
 
     /// `--allow-deletes <set> <destination> <count>`: the agent holds again if that pair's live count is larger.
-    /// Nil until that destination's list is shown and has something outside `.git` to approve.
+    /// Nil until that destination's list is shown. A count of 0 is real: a hold over nothing but `.git`, or whose
+    /// files have since come back, can only end with an approval, and it covers no deletion outside `.git`.
     public func allowOnceArguments(for destination: UUID) -> [String]? {
-        guard let e = entries.first(where: { $0.id == destination }), e.isLoaded, e.count > 0 else { return nil }
+        guard let e = entries.first(where: { $0.id == destination }), e.isLoaded else { return nil }
         return ["--allow-deletes", set.id.uuidString, destination.uuidString, String(e.count)]
     }
 }
@@ -141,7 +164,7 @@ public enum DestinationRules {
         "Without encryption the provider can read secrets such as .env files and private keys. This can't be changed later without creating a new destination."
 
     public static func notConnectedText(lastBackedUp: Date?, now: Date = Date()) -> String {
-        guard let last = lastBackedUp else { return "Not connected, not backed up yet" }
+        guard let last = lastBackedUp else { return "Not connected yet" }
         let days = Calendar.current.dateComponents([.day], from: last, to: now).day ?? 0
         switch days {
         case ..<1: return "Not connected, last backed up today"
@@ -275,6 +298,50 @@ public enum NewSet {
     }
 }
 
+// MARK: A name still in use
+
+/// What folders a destination holds under `Sets/`. A cloud needs its sign-in, so this goes through the agent.
+public protocol SetNameListing: Sendable {
+    /// Nil is the iCloud folder before a destination has been saved for it.
+    func names(in destination: UUID?) async throws -> [String]
+}
+
+public struct NoSetNames: SetNameListing {
+    public init() {}
+    public func names(in destination: UUID?) async throws -> [String] { [] }
+}
+
+/// A set that's removed leaves its backup behind on purpose, so a new set can land on the same name. Nothing is
+/// overwritten unless the owner says so: a run refuses, and this is how they hear why and choose.
+public enum SetNameConflict {
+    public static func isTaken(_ name: String, in folders: [String]) -> Bool {
+        let wanted = name.lowercased()
+        return folders.contains { $0.lowercased() == wanted || $0.lowercased() == wanted + "/" }
+    }
+
+    /// The ones holding a folder of that name. One that can't be asked, a drive that's away say, is left out, as
+    /// the run makes the same check and stops without changing anything.
+    public static func destinations(holding name: String, among chosen: [Destination], stored: [Destination],
+                                    names: any SetNameListing) async -> [Destination] {
+        var found: [Destination] = []
+        for destination in chosen {
+            let id = stored.contains { $0.id == destination.id } ? destination.id : nil
+            if let folders = try? await names.names(in: id), isTaken(name, in: folders) { found.append(destination) }
+        }
+        return found
+    }
+
+    public static func title(name: String, in destinations: [Destination]) -> String {
+        "\"\(name)\" is still in use in \(destinations.map(\.name).formatted(.list(type: .and)))"
+    }
+
+    public static func message(name: String) -> String {
+        "A backup called \"\(name)\" is already there, left by a set you removed or by another Mac. Choose a different name to start a fresh backup beside it, or use the existing backup. Using it makes this folder its new source: files in the backup that aren't in this folder move to the archive."
+    }
+
+    public static let adoptButton = "Use Existing Backup"
+}
+
 // MARK: Names, drafts and Back Up Now
 
 public enum SetNaming {
@@ -295,7 +362,7 @@ public enum SetDraftMerge {
             if latest[keyPath: k] != previouslySaved[keyPath: k] { out[keyPath: k] = latest[keyPath: k] }
         }
         take(\.isPaused); take(\.destinationIDs); take(\.presets); take(\.backupSecrets); take(\.backupGit)
-        take(\.deletion); take(\.archiveDays); take(\.acceptedFingerprint)
+        take(\.deletion); take(\.archiveDays); take(\.acceptedFingerprint); take(\.adoptsBackupIn)
         if latest.rules != previouslySaved.rules {
             // A rule still being typed (empty pattern) stays in the draft.
             out.rules = latest.rules + draft.rules.filter { $0.pattern.trimmingCharacters(in: .whitespaces).isEmpty }

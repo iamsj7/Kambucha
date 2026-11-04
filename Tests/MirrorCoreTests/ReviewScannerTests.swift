@@ -87,4 +87,21 @@ import Foundation
         #expect(ReviewScanner.gitEnvironment["GIT_CONFIG_NOSYSTEM"] == "1")
         #expect(ReviewScanner.gitEnvironment["GIT_CONFIG_GLOBAL"] == "/dev/null")
     }
+
+    @Test func theRuleForATrackedFolderCoversItsContents() {
+        let tracked = ReviewItem(id: "t", path: "proj/vendor", kind: .trackedInExcluded)
+        #expect(tracked.rulePattern == "/proj/vendor/**")
+        #expect(ReviewActions.rule(for: tracked, include: true)?.pattern == "/proj/vendor/**")
+        #expect(ReviewActions.rule(for: tracked, include: false)?.pattern == "/proj/vendor/**")
+        #expect(ReviewItem(id: "b", path: "pro[j]/vendor", kind: .trackedInExcluded).rulePattern == "/pro\\[j\\]/vendor/**")
+    }
+
+    @Test func theRuleForASingleFileStaysExact() {
+        let secret = ReviewItem(id: "s", path: "proj/build/.env", kind: .secretInExcluded)
+        let refused = ReviewItem(id: "r", path: "proj/a.tmp", kind: .refusedByICloud)
+        #expect(secret.rulePattern == "/proj/build/.env")
+        #expect(refused.rulePattern == "/proj/a.tmp")
+        #expect(ReviewActions.rule(for: secret, include: true)?.pattern == "/proj/build/.env")
+        #expect(ReviewActions.rule(for: refused, include: true) == nil)
+    }
 }

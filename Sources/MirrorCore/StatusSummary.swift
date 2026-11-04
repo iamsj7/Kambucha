@@ -12,8 +12,21 @@ public enum OverallStatus: Equatable, Sendable {
     case running
     case held(Int)
     case attention(String)
+    /// Nothing else speaks for the set: its only destinations are drives away from this Mac. Not a failure.
+    case driveNotConnected(name: String, last: Date?)
     case paused
     case notConfigured
+}
+
+/// What one destination can honestly say, across the sets that use it.
+public enum DestinationHealth: Equatable, Sendable {
+    case unused, paused, notBackedUp, previewNeeded, failing, unfinished
+    case stopped(Problem)
+    case mismatched(Int)
+    case held(Int)
+    case uploading(Int)
+    case notAccepted(Int)
+    case backedUp(last: Date)
 }
 
 /// Folds the on-disk state into the one status the menu bar shows (spec sections 8a and 12).
@@ -28,11 +41,14 @@ public enum StatusSummary {
                : "Re-checking \(n.formatted()) files that didn't match, waiting for iCloud to download them"
     }
 
-    /// "Backed Up" means every destination of every active set passed. Review items and a due restore
-    /// drill never block it. Priority: attention, held, running, uploading, a missing destination,
-    /// waiting for iCloud, files not accepted, a run still to resume, backed up.
+    /// "Backed Up" means every destination of every active set passed, leaving out drives that aren't
+    /// connected. Review items, a due restore drill and an overdue drive never block it. Priority: attention, held, running, uploading, a missing destination,
+    /// waiting for iCloud, files not accepted, a run still to resume, only drives away, backed up.
+    /// `disconnected` holds the external drives known not to be mounted. Spec section 8a: they aren't a failure,
+    /// so they take no part unless they are all a set has.
     public static func overall(sets: [BackupSet], destinations: [Destination], states: [PairID: SetState],
-                               records: [RunRecord], problems: [ActiveProblem], running: Bool) -> OverallStatus {
+                               records: [RunRecord], problems: [ActiveProblem], running: Bool,
+                               disconnected: Set<UUID> = []) -> OverallStatus {
         // Before anything that reads the sets: a run that couldn't start may be why they look empty.
         if let failed = problems.first(where: { $0.pair == .agent }) { return .attention(failed.problem.headline) }
         if sets.isEmpty { return .notConfigured }
@@ -43,7 +59,7 @@ public enum StatusSummary {
         var pairs: [PairID] = []
         for s in active {
             for d in s.destinationIDs {
-                if let dest = known[d], blocksBackedUp(dest) { pairs.append(PairID(set: s.id, destination: d)) }
+                if let dest = known[d], blocksBackedUp(dest, disconnected: disconnected) { pairs.append(PairID(set: s.id, destination: d)) }
             }
         }
         let setsWithNoDestination = active.filter { s in !s.destinationIDs.contains { known[$0] != nil } }
@@ -60,10 +76,11 @@ public enum StatusSummary {
         // can settle reads as the wait it is. It leaves the problem open, and `.alerted` ends the wait.
         func waits(_ p: PairID) -> Bool { states[p]?.isOnlyWaiting ?? false }
 
-        // 1. Anything that needs the owner, other than held deletions (handled below) and a due drill.
-        let activeIDs = Set(active.map(\.id))
+        // 1. Anything that needs the owner, other than held deletions (handled below) and the two reminders.
+        let quiet: Set<Problem> = [.drillDue, .driveOverdue, .deletionsHeld]
+        let live = BackupSet.pairs(of: active)
         if let p = problems.first(where: {
-            $0.problem != .drillDue && $0.problem != .deletionsHeld && activeIDs.contains($0.pair.set)
+            !quiet.contains($0.problem) && live.contains($0.pair)
                 && !($0.problem == .verificationFailed && waits($0.pair))
         }) {
             return .attention(p.problem.headline)
@@ -78,7 +95,7 @@ public enum StatusSummary {
 
         // 2. Held deletions.
         let held = pairs.reduce(0) { $0 + (states[$1]?.heldDeletions ?? 0) }
-        let heldProblem = problems.contains { $0.problem == .deletionsHeld && activeIDs.contains($0.pair.set) }
+        let heldProblem = problems.contains { $0.problem == .deletionsHeld && live.contains($0.pair) }
         if held > 0 || heldProblem { return .held(max(held, 1)) }
 
         // 3. A run in progress, then uploads still pending.
@@ -103,13 +120,41 @@ public enum StatusSummary {
         // A skipped run leaves the record behind, so the state says whether this is still true.
         if pairs.contains(where: { latest[$0]?.status == .partial && states[$0]?.isBackedUp != true }) { return .unfinished }
 
-        // 7. Backed up only when every pair has finished at least once.
+        // 7. Every destination that's left is a drive away from this Mac, which is its own line.
+        if pairs.isEmpty, let drive = destinations.first(where: { d in disconnected.contains(d.id) && active.contains { $0.destinationIDs.contains(d.id) } }) {
+            let last = active.compactMap { states[PairID(set: $0.id, destination: drive.id)]?.lastFinished }.max()
+            return .driveNotConnected(name: drive.name, last: last)
+        }
+
+        // 8. Backed up only when every pair has finished at least once.
         let finished = pairs.compactMap { states[$0]?.lastFinished }
         if pairs.isEmpty || finished.count != pairs.count { return .attention("Not backed up yet") }
         // A killed run leaves no record, so only the state knows it never finished.
         if pairs.contains(where: { states[$0]?.isBackedUp != true }) { return .unfinished }
         let files = pairs.reduce(0) { $0 + (states[$1]?.lastFileCount ?? 0) }
         return .backedUp(last: finished.max()!, files: files)
+    }
+
+    /// One destination's state across the sets that use it. Only a pair's `isBackedUp` earns "Backed Up", so
+    /// finishing a run while uploads are pending or deletions are held reads as what it is. Worst first.
+    public static func destinationHealth(_ id: UUID, sets: [BackupSet], states: [PairID: SetState]) -> DestinationHealth {
+        let using = sets.filter { $0.destinationIDs.contains(id) }
+        guard !using.isEmpty else { return .unused }
+        let active = using.filter { !$0.isPaused }
+        guard !active.isEmpty else { return .paused }
+        let pairs = active.map { states[PairID(set: $0.id, destination: id)] ?? SetState() }
+        func total(_ count: (SetState) -> Int) -> Int { pairs.reduce(0) { $0 + count($1) } }
+
+        if let stop = pairs.compactMap(\.stoppedBy).first { return .stopped(stop) }
+        if pairs.contains(where: { $0.consecutiveFailures > 0 }) { return .failing }
+        if total(\.mismatched.count) > 0 { return .mismatched(total(\.mismatched.count)) }
+        if total(\.heldDeletions) > 0 { return .held(total(\.heldDeletions)) }
+        if total(\.pendingUploads) > 0 { return .uploading(total(\.pendingUploads)) }
+        if total(\.refusedSince.count) > 0 { return .notAccepted(total(\.refusedSince.count)) }
+        if active.contains(where: { !$0.isPreviewAccepted }) { return .previewNeeded }
+        if pairs.contains(where: { $0.lastFinished == nil }) { return .notBackedUp }
+        guard pairs.allSatisfy(\.isBackedUp) else { return .unfinished }
+        return .backedUp(last: pairs.compactMap(\.lastFinished).max()!)
     }
 
     /// A set whose preview was never accepted (a set made before acceptance moved onto the set, say) can't be backed up
@@ -119,12 +164,13 @@ public enum StatusSummary {
         let needing = sets.filter { !$0.isPaused && !$0.isPreviewAccepted }.map(\.name)
         guard !needing.isEmpty else { return status }
         switch status {
-        case .backedUp, .attention("Not backed up yet"): return .attention("Preview needed: " + needing.joined(separator: ", "))
+        case .backedUp, .driveNotConnected, .attention("Not backed up yet"): return .attention("Preview needed: " + needing.joined(separator: ", "))
         default: return status
         }
     }
 
-    /// Extension point for the external drive: a drive that isn't connected must not block "Backed Up",
-    /// so once that kind exists, return false here for an unmounted one. Every current kind blocks.
-    static func blocksBackedUp(_ destination: Destination) -> Bool { true }
+    /// A drive that isn't connected must not block "Backed Up". Every other destination does.
+    static func blocksBackedUp(_ destination: Destination, disconnected: Set<UUID>) -> Bool {
+        !disconnected.contains(destination.id)
+    }
 }

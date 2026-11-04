@@ -21,9 +21,12 @@ public struct PreviewGroup: Identifiable, Equatable, Sendable {
 public struct PreviewResult: Equatable, Sendable {
     public var includedBytes: Int64; public var skippedBytes: Int64; public var includedFiles: Int
     public var groups: [PreviewGroup]; public var decisions: [ReviewItem]
-    public init(includedBytes: Int64, skippedBytes: Int64, includedFiles: Int, groups: [PreviewGroup], decisions: [ReviewItem]) {
+    /// What the preview couldn't look at, said plainly. None of it stops a backup.
+    public var warnings: [String]
+    public init(includedBytes: Int64, skippedBytes: Int64, includedFiles: Int, groups: [PreviewGroup], decisions: [ReviewItem],
+                warnings: [String] = []) {
         self.includedBytes = includedBytes; self.skippedBytes = skippedBytes; self.includedFiles = includedFiles
-        self.groups = groups; self.decisions = decisions
+        self.groups = groups; self.decisions = decisions; self.warnings = warnings
     }
 }
 
@@ -33,8 +36,19 @@ public protocol PreviewProviding: Sendable {
     func rule(for group: PreviewGroup, included: Bool) -> UserRule
 }
 
+/// One thing in a folder of the latest backup.
+public struct BackupItem: Codable, Identifiable, Equatable, Sendable {
+    public var name: String; public var isFolder: Bool; public var size: Int64
+    public var id: String { name }
+    public init(name: String, isFolder: Bool, size: Int64) { self.name = name; self.isFolder = isFolder; self.size = size }
+}
+
 /// Archive and restore for one destination. Cloud access goes through the agent, as only it touches the Keychain.
 public protocol ArchiveProviding: Sendable {
     func list(set: BackupSet, destination: Destination) async throws -> [ArchiveEntry]
-    func restore(entry: ArchiveEntry, set: BackupSet, destination: Destination, to: URL) async throws
+    /// One folder of the latest backup. `path` is below the backup root: `Sets/<set>[/sub]`.
+    func browse(path: String, set: BackupSet, destination: Destination) async throws -> [BackupItem]
+    /// `entry.path` can be a file or a folder, under `Archive/` or `Sets/`.
+    /// `replacing`: the owner already agreed to replace the file at `to`.
+    func restore(entry: ArchiveEntry, set: BackupSet, destination: Destination, to: URL, replacing: Bool) async throws
 }

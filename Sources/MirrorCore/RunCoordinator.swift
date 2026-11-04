@@ -7,12 +7,29 @@ public struct RunPaths: Sendable {
     public init(support: URL, logs: URL, work: URL) { self.support = support; self.logs = logs; self.work = work }
 
     var agentLock: URL { support.appendingPathComponent("locks/agent.lock") }
-    /// The app reads this to see a run in progress. A crash leaves it behind, and the app checks the pid.
+    /// The app reads this to see a run in progress. A crash leaves it behind, and the app checks the process.
     var pidFile: URL { support.appendingPathComponent("agent.pid") }
     /// When the last full wake-up began, which is how a mount wake-up is told from an interval one.
     var lastPassFile: URL { support.appendingPathComponent("last-pass.json") }
     func pairLock(_ p: PairID) -> URL {
         support.appendingPathComponent("locks/\(p.set.uuidString)-\(p.destination.uuidString).lock")
+    }
+}
+
+/// How the agent process ended, for whoever launched it.
+public enum AgentExit {
+    /// Sysexits' "try again later": another run holds the lock, so a request that needs a run wasn't carried out.
+    public static let busy: Int32 = 75
+}
+
+public enum RunEnd: Equatable, Sendable {
+    case done, failed, busy
+    public var exitCode: Int32 {
+        switch self {
+        case .done: 0
+        case .failed: 1
+        case .busy: AgentExit.busy
+        }
     }
 }
 
@@ -79,27 +96,30 @@ public final class RunCoordinator: Sendable {
         self.helperCheck = helperCheck; self.downloader = downloader; self.requestGrace = requestGrace
     }
 
-    /// Another run holding the lock means leave quietly: no state, record or pid file is touched.
     /// False only when the agent itself couldn't run, which the record and a problem also say.
     @discardableResult
-    public func runAll(command: RunCommand) async -> Bool {
+    public func runAll(command: RunCommand) async -> Bool { await execute(command) != .failed }
+
+    /// Another run holding the lock means leave quietly: no state, record or pid file is touched. Only the
+    /// exit says so, as someone who asked for this run is waiting on the answer.
+    public func execute(_ command: RunCommand) async -> RunEnd {
         let lock = RunLock(url: paths.agentLock)
         switch lock.attempt() {
         case .acquired: break
-        case .held: return true
+        case .held: return command.isScheduled ? .done : .busy
         case .openFailed(let code):
             Self.log.error("cannot open the agent lock, errno \(code)")
             await report("Mirror could not open its run lock")
-            return false
+            return .failed
         }
         defer { lock.release() }
         let settings = loadSettings()
-        if settings.pauseInLowPowerMode, !command.force, lowPower() { return true }
+        if settings.pauseInLowPowerMode, !command.force, lowPower() { return .done }
         // Ahead of everything else: any volume mounting wakes the agent, and most have nothing to do with it.
         var first = Set<PairID>()
         if isMountWake(command) {
             first = dueDrivePairs()
-            if first.isEmpty { return true }
+            if first.isEmpty { return .done }
         }
         if command.isScheduled { noteFullPass() }
         writePID()
@@ -108,14 +128,14 @@ public final class RunCoordinator: Sendable {
         // First of all, so a swapped rclone is caught before any Keychain read.
         do { try helperCheck() } catch {
             await report("The embedded rclone failed its signature check")
-            return false
+            return .failed
         }
         do { try RcloneSession.wipeLeftovers(in: paths.work) } catch { Self.log.error("wiping leftovers failed") }
         do { try await problems.retryPending() } catch { Self.log.error("retrying notifications failed") }
         let ran = await runPairs(command, first: first, settings: settings)
         prune()
         await settleRequests()
-        return ran
+        return ran ? .done : .failed
     }
 
     /// A damaged file is the app's to report. Backups carry on with the defaults.
@@ -166,7 +186,7 @@ public final class RunCoordinator: Sendable {
 
     private func writePID() {
         do {
-            try Data(String(ProcessInfo.processInfo.processIdentifier).utf8).write(to: paths.pidFile, options: .atomic)
+            try Data(AgentPresence.record(for: ProcessInfo.processInfo.processIdentifier).utf8).write(to: paths.pidFile, options: .atomic)
         } catch {
             Self.log.error("cannot write the pid file")
         }
@@ -195,6 +215,8 @@ public final class RunCoordinator: Sendable {
             return false
         }
         clear([.agentFailed], .agent)
+        // The app does this on removal. This catches what a run in progress raised after it.
+        do { try problems.retain(pairs: BackupSet.pairs(of: sets)) } catch { Self.log.error("could not tidy problems") }
         var pairs: [(PairID, DestinationKind, SetState)] = []
         for set in sets where command.setID == nil || command.setID == set.id {
             for id in set.destinationIDs {
@@ -219,7 +241,24 @@ public final class RunCoordinator: Sendable {
         for volume in drives.finished where !drives.troubled.contains(volume.uuid) && isThere(volume) {
             await problems.announceSafeToEject(volumeName: volume.name, volumeUUID: volume.uuid)
         }
+        await remindDrills(sets: sets, destinations: destinations)
         return true
+    }
+
+    /// Spec section 8a. A reminder only: it blocks nothing, and it's said once until a drill passes.
+    private func remindDrills(sets: [BackupSet], destinations: [Destination]) async {
+        for destination in destinations where destination.encrypted {
+            let using = sets.filter { $0.destinationIDs.contains(destination.id) }
+            guard let anchor = ProblemAnchor.set(for: destination.id, in: sets) else { continue }
+            let states = using.map { (try? store.state(for: PairID(set: $0.id, destination: destination.id))) ?? SetState() }
+            // A destination that's stopped has more pressing news, and a drill couldn't reach it anyway.
+            if states.contains(where: { $0.stoppedBy != nil }) { continue }
+            if DrillSchedule.isDue(destination, states: states, now: clock()) {
+                await raise(.drillDue, PairID(set: anchor.id, destination: destination.id), anchor, detail: destination.name)
+            } else {
+                for set in using { clear([.drillDue], PairID(set: set.id, destination: destination.id)) }
+            }
+        }
     }
 
     /// What this wake-up did on each drive, as a drive is safe to eject only once all its pairs are through.
@@ -278,6 +317,7 @@ public final class RunCoordinator: Sendable {
         case driveGone
         case driveFull(needed: Int64, free: Int64)
         case markerNotLocal
+        case nameInUse
     }
 
     /// How one pair's run leaves the rest. `stop` is a cancelled run. `agentFailed` also fails the agent.
@@ -1036,7 +1076,7 @@ public final class RunCoordinator: Sendable {
             // Small, and it lets a later wake-up read the claim this one had to take on trust.
             request([URL(fileURLWithPath: path)])
             guard Self.hasRun(state) else { throw Stop.markerNotLocal }
-            clear([.destinationMissing, .signInExpired, .iCloudUnavailable], job.pair)
+            clear([.destinationMissing, .signInExpired, .iCloudUnavailable, .setNameInUse], job.pair)
             state.stoppedBy = nil
             return
         }
@@ -1056,12 +1096,11 @@ public final class RunCoordinator: Sendable {
                 throw GuardFailure.destinationUnclaimed
             }
             let taken = try await files.list(Self.join(endpoint, "Sets"), context: context) ?? []
-            let name = set.name.lowercased()
-            if taken.contains(where: { $0.lowercased() == name || $0.lowercased() == name + "/" }) {
-                throw GuardFailure.destinationUnclaimed
-            }
+            let adopting = set.adoptsBackupIn?.contains(job.destination.id) == true
+            if SetNameConflict.isTaken(set.name, in: taken), !adopting { throw Stop.nameInUse }
             try await requireICloud(job, at: job.pathGuard.backupRoot.deletingLastPathComponent())
             var claimed = marker ?? RootMarker()
+            if adopting { claimed.sets = claimed.sets.filter { $0.value.lowercased() != set.name.lowercased() } }
             claimed.sets[set.id] = set.name
             try confirmDrive(job)
             let encoder = JSONEncoder()
@@ -1071,7 +1110,7 @@ public final class RunCoordinator: Sendable {
         }
         try job.pathGuard.validateRun(set, destination: job.destination, marker: marker,
                                       sampleFileCount: 1, state: SetState(), volume: job.volume)
-        clear([.destinationMissing, .signInExpired, .iCloudUnavailable], job.pair)
+        clear([.destinationMissing, .signInExpired, .iCloudUnavailable, .setNameInUse], job.pair)
         state.stoppedBy = nil
     }
 
@@ -1275,6 +1314,9 @@ public final class RunCoordinator: Sendable {
             let (want, have) = (Self.size(needed), Self.size(free))
             stop(.driveFull, "The drive doesn't have room for this backup",
                  detail: "\(job.destination.name) needs \(want) free and has \(have)")
+        case Stop.nameInUse:
+            stop(.setNameInUse, "The name is still used by a backup in this destination",
+                 detail: "\"\(set.name)\" is still in use by a backup in \(job.destination.name)")
         case Stop.markerNotLocal:
             // Nothing is wrong: a new pair needs the marker's contents, and iCloud is fetching them.
             tally.status = .skipped; tally.scope = "waiting for iCloud to download the marker"

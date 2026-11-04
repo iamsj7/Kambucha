@@ -132,4 +132,14 @@ private func fixture(_ name: String) throws -> Data {
         #expect(s.copied == ["a.txt"])
         #expect(s.errors == ["bad"])
     }
+
+    @Test func aRepeatedDeletionIsCountedOnceAndALongListStaysFast() throws {
+        var lines: [String] = []
+        for i in 0..<20_000 { lines.append(#"{"level":"notice","msg":"Skipped delete as --dry-run is set (size 1)","object":"f\#(i)"}"#) }
+        lines.append(lines[0])
+        let started = Date()
+        let s = RcloneLogParser.parse(Data(lines.joined(separator: "\n").utf8))
+        #expect(s.deleted.count == 20_000)
+        #expect(Date().timeIntervalSince(started) < 5)
+    }
 }

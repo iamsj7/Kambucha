@@ -20,10 +20,11 @@ public struct RestoreService: Sendable {
     ///   refused unless `overwrite` is true. Required, so the guard cannot be forgotten.
     /// - A `to` folder that already holds anything is refused unless `overwrite` is true.
     /// - `asFile`: `from` is one file and `to` names the file to create, which must not already exist.
+    /// - `replacingFile`: the owner agreed to replace the plain file at `to`. Nothing else: the source guard stands.
     /// - `manifest`/`manifestSubpath`: links in the manifest that are missing from the restored files are
     ///   recreated; `manifestSubpath` is the set-relative folder that `to` holds.
     public func restore(from: String, context: RcloneContext, to: URL, sources: [URL], overwrite: Bool = false, asFile: Bool = false,
-                        manifest: SymlinkManifest? = nil, manifestSubpath: String = "") async throws -> RcloneResult {
+                        replacingFile: Bool = false, manifest: SymlinkManifest? = nil, manifestSubpath: String = "") async throws -> RcloneResult {
         try ArchiveScope.validateRestore(from, backupRoot: backupRoot)
         if !overwrite {
             let dest = PathGuard.canonical(to)
@@ -37,7 +38,9 @@ public struct RestoreService: Sendable {
                 throw RestoreError.destinationNotEmpty(to.path)
             }
             var st = stat()
-            if asFile, lstat(to.path, &st) == 0 { throw RestoreError.destinationNotEmpty(to.path) }
+            if asFile, lstat(to.path, &st) == 0, !(replacingFile && (st.st_mode & S_IFMT) == S_IFREG) {
+                throw RestoreError.destinationNotEmpty(to.path)
+            }
         }
         try FileManager.default.createDirectory(at: asFile ? to.deletingLastPathComponent() : to, withIntermediateDirectories: true)
         let log = FileManager.default.temporaryDirectory.appendingPathComponent("mirror-restore-\(UUID().uuidString).log")

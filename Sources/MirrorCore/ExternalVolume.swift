@@ -200,6 +200,11 @@ public enum ExternalVolume {
         return volumes.first { $0.uuid.caseInsensitiveCompare(uuid) == .orderedSame }
     }
 
+    /// The drives among `destinations` that aren't mounted.
+    public static func disconnected(_ destinations: [Destination], in volumes: [VolumeInfo]) -> Set<UUID> {
+        Set(destinations.filter { $0.kind == .externalDrive && find($0, in: volumes) == nil }.map(\.id))
+    }
+
     /// Kept free after a run: 1 GB or 2% of the drive, whichever is greater.
     public static func reserve(for volume: VolumeInfo) -> Int64 {
         max(1_000_000_000, volume.totalBytes / 50)

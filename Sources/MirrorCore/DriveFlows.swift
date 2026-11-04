@@ -25,6 +25,8 @@ public final class VolumeCache {
     public private(set) var volumes: [VolumeInfo] = []
     /// False until the first read finishes, so a screen can say "Looking for drives" instead of "none".
     public private(set) var hasLoaded = false
+    /// After each read, for what's worked out from the list and not observed directly.
+    @ObservationIgnored public var onChange: (@MainActor () -> Void)?
 
     @ObservationIgnored private let locator: any VolumeLocating
     @ObservationIgnored private let observers: Observers
@@ -53,6 +55,7 @@ public final class VolumeCache {
             let list = await Task.detached(priority: .utility) { locator.mounted() }.value
             self?.volumes = list
             self?.hasLoaded = true
+            self?.onChange?()
         }
         running = task
         await task.value

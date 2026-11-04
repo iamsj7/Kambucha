@@ -6,6 +6,8 @@ import MirrorCore
 struct MirrorApp: App {
     @State private var model: AppModel
     @State private var settings = SettingsModel()
+    /// Past the first-run screen, Mirror is a menu bar app: opening at login must not put a window in the way.
+    private let opensWindowAtLaunch = !ConfigStore(root: MirrorPaths.support).onboardingFinished
 
     init() {
         #if DEBUG
@@ -65,7 +67,9 @@ struct MirrorApp: App {
         }
         .menuBarExtraStyle(.window)
 
-        Window("Mirror", id: "main") { MainWindow(model: model) }
+        Window("Mirror", id: "main") { MainWindow(model: model, settings: settings) }
+            .defaultLaunchBehavior(opensWindowAtLaunch ? .presented : .suppressed)
+            .restorationBehavior(.disabled)
 
         Settings { SettingsView(model: settings) }
     }

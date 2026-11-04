@@ -204,6 +204,70 @@ struct StatusSummaryTests {
         #expect(StatusSummary.recheckText(count: 1200) == "Re-checking 1,200 files that didn't match, waiting for iCloud to download them")
     }
 
+    // MARK: External drives (final review S4)
+
+    let ssd = Destination(name: "SSD", kind: .externalDrive, encrypted: false, volumeUUID: "U")
+    func unplugged(_ s: BackupSet, _ ds: [Destination], _ states: [PairID: SetState], _ recs: [RunRecord] = [],
+                   _ probs: [ActiveProblem] = []) -> OverallStatus {
+        StatusSummary.overall(sets: [s], destinations: ds, states: states, records: recs, problems: probs, running: false,
+                              disconnected: [ssd.id])
+    }
+
+    @Test func anOverdueDriveIsAQuietReminderNotAttention() {
+        let s = set([dest, ssd])
+        let states = [pair(s, dest): state(), pair(s, ssd): state()]
+        let recs = [record(s, dest, .success), record(s, ssd, .success)]
+        #expect(overall(s, [dest, ssd], states, recs, [problem(.driveOverdue, s, ssd)]) == .backedUp(last: now, files: 200))
+        #expect(unplugged(s, [dest, ssd], states, recs, [problem(.driveOverdue, s, ssd)]) == .backedUp(last: now, files: 100))
+    }
+
+    @Test func aDriveThatIsNotConnectedDoesNotBlockBackedUp() {
+        let s = set([dest, ssd])
+        var away = state(); away.syncIncomplete = true
+        let r = unplugged(s, [dest, ssd], [pair(s, dest): state(), pair(s, ssd): away],
+                          [record(s, dest, .success), record(s, ssd, .partial)])
+        #expect(r == .backedUp(last: now, files: 100))
+    }
+
+    @Test func aNeverConnectedDriveDoesNotBlockBackedUp() {
+        let s = set([dest, ssd])
+        let r = unplugged(s, [dest, ssd], [pair(s, dest): state()], [record(s, dest, .success)])
+        #expect(r == .backedUp(last: now, files: 100))
+    }
+
+    @Test func aSetOnlyOnANotConnectedDriveSaysSoNotThatItResumesNextRun() {
+        let s = set([ssd])
+        var away = state(); away.syncIncomplete = true
+        let r = unplugged(s, [ssd], [pair(s, ssd): away], [record(s, ssd, .partial)])
+        #expect(r == .driveNotConnected(name: "SSD", last: now))
+    }
+
+    @Test func aSetOnlyOnANeverConnectedDriveHasNoLastBackup() {
+        let s = set([ssd])
+        #expect(unplugged(s, [ssd], [:]) == .driveNotConnected(name: "SSD", last: nil))
+    }
+
+    @Test func aConnectedDriveStillCountsInFull() {
+        let s = set([dest, ssd])
+        var away = state(); away.syncIncomplete = true
+        let r = overall(s, [dest, ssd], [pair(s, dest): state(), pair(s, ssd): away],
+                        [record(s, dest, .success), record(s, ssd, .partial)])
+        #expect(r == .unfinished)
+    }
+
+    @Test func aDriveNotConnectedGivesWayToAPreviewRequest() {
+        let s = set([ssd])
+        #expect(StatusSummary.withPreviewNeeded(.driveNotConnected(name: "SSD", last: nil), sets: [s]) == .attention("Preview needed: Projects"))
+    }
+
+    @Test func aProblemFromAPairNoLongerInUseSaysNothing() {
+        let s = set([dest])
+        let oldPair = ActiveProblem(problem: .verificationFailed, pair: PairID(set: s.id, destination: dest2.id), setName: s.name, detail: "x", since: now)
+        let oldSet = ActiveProblem(problem: .deletionsHeld, pair: PairID(set: UUID(), destination: dest.id), setName: "Gone", detail: "x", since: now)
+        let oldHold = ActiveProblem(problem: .deletionsHeld, pair: PairID(set: s.id, destination: dest2.id), setName: s.name, detail: "x", since: now)
+        #expect(overall(s, [dest, dest2], [pair(s, dest): state()], [record(s, dest, .success)], [oldPair, oldSet, oldHold]) == .backedUp(last: now, files: 100))
+    }
+
     @Test func drillDueDoesNotBlockBackedUp() {
         let s = set([dest])
         let r = overall(s, [dest], [pair(s, dest): state()], [record(s, dest, .success)], [problem(.drillDue, s, dest)])

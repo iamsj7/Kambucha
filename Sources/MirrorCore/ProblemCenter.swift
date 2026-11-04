@@ -5,6 +5,7 @@ public enum Problem: String, Codable, CaseIterable, Sendable {
     case repeatedFailures, uploadStalled, fileRefused, signInExpired, drillFailed, drillDue
     case agentFailed
     case driveOverdue, driveFull
+    case setNameInUse
 
     /// Plain, specific lead-in. Never includes file contents or secrets.
     public var headline: String {
@@ -23,6 +24,7 @@ public enum Problem: String, Codable, CaseIterable, Sendable {
         case .agentFailed: "Mirror could not run"
         case .driveOverdue: "Backup drive not connected"
         case .driveFull: "Backup drive is full"
+        case .setNameInUse: "Set name is already in use"
         }
     }
 }
@@ -45,6 +47,12 @@ public extension Notifying {
     func postSafeToEject(volumeName: String, volumeUUID: String) async -> Bool { false }
 }
 
+/// For a process that only reads problems, or a test that doesn't care.
+public struct NoNotifier: Notifying {
+    public init() {}
+    public func post(_ problem: Problem, pair: PairID, setName: String, detail: String) async -> Bool { false }
+}
+
 public struct ActiveProblem: Codable, Equatable, Sendable {
     public var problem: Problem
     public var pair: PairID
@@ -65,6 +73,14 @@ public struct ActiveProblem: Codable, Equatable, Sendable {
         detail = try c.decode(String.self, forKey: .detail)
         since = try c.decode(Date.self, forKey: .since)
         notified = try c.decodeIfPresent(Bool.self, forKey: .notified) ?? true
+    }
+}
+
+/// A problem about a destination as a whole still sits on one pair. A paused set wouldn't show it.
+public enum ProblemAnchor {
+    public static func set(for destination: UUID, in sets: [BackupSet]) -> BackupSet? {
+        let using = sets.filter { $0.destinationIDs.contains(destination) }
+        return using.first { !$0.isPaused } ?? using.first
     }
 }
 
@@ -163,6 +179,16 @@ public struct ProblemCenter: Sendable {
         try locked {
             let all = try load()
             let kept = all.filter { !($0.problem == problem && $0.pair == pair) }
+            if kept.count != all.count { try save(kept) }
+        }
+    }
+
+    /// Lets go of problems whose pair no longer exists, so nothing is left that no run could ever clear.
+    /// The agent's own problems belong to no pair and stay.
+    public func retain(pairs: Set<PairID>) throws {
+        try locked {
+            let all = try load()
+            let kept = all.filter { $0.pair == .agent || pairs.contains($0.pair) }
             if kept.count != all.count { try save(kept) }
         }
     }

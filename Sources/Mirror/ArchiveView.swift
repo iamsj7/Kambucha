@@ -21,6 +21,8 @@ struct ArchiveSelection: Hashable { var set: UUID?; var destination: UUID? }
 final class ArchiveModel {
     enum Phase: Equatable { case idle, loading, loaded([ArchiveEntry]), failed(String) }
     enum RestoreState: Equatable { case idle, restoring(String), done(URL), failed(String) }
+    enum Mode: Hashable { case archive, latest }
+    enum Latest: Equatable { case idle, loading, loaded([BackupItem]), failed(String) }
 
     private(set) var sets: [BackupSet] = []
     private(set) var destinations: [Destination] = []
@@ -28,6 +30,10 @@ final class ArchiveModel {
     private(set) var restoreState: RestoreState = .idle
     private(set) var drillDueDestinations: [Destination] = []
     var selection = ArchiveSelection()
+    var mode = Mode.archive
+    /// Where the owner is in the latest backup, below the set's own folder.
+    private(set) var folder: [String] = []
+    private(set) var latest = Latest.idle
 
     @ObservationIgnored private let provider: any ArchiveProviding
     @ObservationIgnored private let store: ConfigStore
@@ -75,6 +81,45 @@ final class ArchiveModel {
         }
     }
 
+    /// `Sets/<set>` plus where the owner is, and a name below that.
+    private func latestPath(_ name: String? = nil) -> String? {
+        guard let set = selectedSet else { return nil }
+        return (["Sets", set.name] + folder + (name.map { [$0] } ?? [])).joined(separator: "/")
+    }
+
+    func reloadLatest() async {
+        guard let set = selectedSet, let dest = selectedDestination, let path = latestPath() else { latest = .idle; return }
+        latest = .loading
+        do {
+            let items = try await provider.browse(path: path, set: set, destination: dest)
+            guard path == latestPath(), dest.id == selectedDestination?.id else { return }   // the owner moved on
+            latest = .loaded(items)
+        } catch is CancellationError {
+            return
+        } catch {
+            latest = .failed(SetupFailureText.message(for: error))
+        }
+    }
+
+    func open(_ name: String) async { folder.append(name); await reloadLatest() }
+    func goUp(to depth: Int) async { folder = Array(folder.prefix(depth)); await reloadLatest() }
+    /// A folder of one set means nothing in another.
+    func resetFolder() { folder = [] }
+
+    /// Restores a file or folder of the latest backup, or with `item` nil the folder the owner is in, which
+    /// at the top is the whole set. The same guards as an archived file.
+    func restoreLatest(_ item: BackupItem?, chooseLocation: (ArchiveEntry) async -> URL?) async {
+        guard let path = latestPath(item?.name), let set = selectedSet else { return }
+        await restore(ArchiveEntry(id: path, setName: set.name, stamp: now(), path: path, size: item?.size ?? 0),
+                      chooseLocation: chooseLocation)
+    }
+
+    /// Everything one run moved to the archive, as a folder. How a mass deletion is undone.
+    func restoreRun(of entry: ArchiveEntry, chooseLocation: (ArchiveEntry) async -> URL?) async {
+        let path = entry.path.split(separator: "/").prefix(3).joined(separator: "/")
+        await restore(ArchiveEntry(id: path, setName: entry.setName, stamp: entry.stamp, path: path, size: 0), chooseLocation: chooseLocation)
+    }
+
     /// Archived files grouped by the day they were archived, newest first.
     var sections: [(day: Date, entries: [ArchiveEntry])] {
         guard case .loaded(let entries) = phase else { return [] }
@@ -84,7 +129,7 @@ final class ArchiveModel {
         }
     }
 
-    /// Restores one entry to a place the owner picks. Never into a backed-up folder, where it could
+    /// Restores one file or folder to a place the owner picks. Never into a backed-up folder, where it could
     /// replace the original.
     func restore(_ entry: ArchiveEntry, chooseLocation: (ArchiveEntry) async -> URL?) async {
         guard let set = selectedSet, let dest = selectedDestination else { return }
@@ -95,11 +140,15 @@ final class ArchiveModel {
         }
         let name = (entry.path as NSString).lastPathComponent
         restoreState = .restoring(name)
+        // The save panel has already asked "Replace?" of anything it was pointed at.
+        let replacing = FileManager.default.fileExists(atPath: target.path)
         do {
-            try await provider.restore(entry: entry, set: set, destination: dest, to: target)
+            try await provider.restore(entry: entry, set: set, destination: dest, to: target, replacing: replacing)
             restoreState = .done(target)
         } catch is CancellationError {
             restoreState = .idle
+        } catch let refused as RestoreError {
+            restoreState = .failed(SetupFailureText.message(for: refused))   // trying again wouldn't help
         } catch {
             restoreState = .failed("Mirror couldn't restore \(name). Nothing was changed. Try again.")
         }
@@ -132,7 +181,13 @@ struct ArchiveView: View {
     var body: some View {
         VStack(spacing: 0) {
             if let due = model.drillDueDestinations.first { reminder(due) }
-            content
+            Picker("Show", selection: $model.mode) {
+                Text("Older Versions").tag(ArchiveModel.Mode.archive)
+                Text("Latest Backup").tag(ArchiveModel.Mode.latest)
+            }
+            .pickerStyle(.segmented).labelsHidden().fixedSize()
+            .padding(.vertical, 8)
+            if model.mode == .archive { content } else { latest }
             if model.restoreState != .idle { restoreBar }
         }
         .navigationTitle("Archive")
@@ -149,7 +204,14 @@ struct ArchiveView: View {
                     .disabled(model.encryptedDestinations.isEmpty || agent == nil)
             }
         }
-        .task(id: model.selection) { model.loadConfig(); await model.reload() }
+        .task(id: model.selection) {
+            model.loadConfig()
+            model.resetFolder()
+            await model.reload()
+            if model.mode == .latest { await model.reloadLatest() }
+        }
+        // Each look at a cloud is an agent launch and a network trip, so this waits until it's asked for.
+        .onChange(of: model.mode) { _, mode in if mode == .latest { Task { await model.reloadLatest() } } }
         .sheet(isPresented: $showDrill, onDismiss: { drill?.discard(); drill = nil; model.loadConfig() }) {
             if let drill { DrillSheet(model: drill) }
         }
@@ -193,6 +255,65 @@ struct ArchiveView: View {
         }
     }
 
+    @ViewBuilder private var latest: some View {
+        VStack(spacing: 0) {
+            HStack {
+                if !model.folder.isEmpty {
+                    Button { Task { await model.goUp(to: model.folder.count - 1) } } label: { Label("Back", systemImage: "chevron.left") }
+                        .accessibilityHint("Goes up one folder")
+                }
+                Text(((model.selectedSet.map { [$0.name] } ?? []) + model.folder).joined(separator: " / "))
+                    .lineLimit(1).truncationMode(.head).foregroundStyle(.secondary)
+                Spacer()
+                Button(model.folder.isEmpty ? "Restore Whole Set…" : "Restore This Folder…") {
+                    Task { await model.restoreLatest(nil, chooseLocation: chooseLocation) }
+                }
+                .disabled(model.selectedDestination == nil)
+                .accessibilityHint("Asks where to put the restored copy")
+            }
+            .padding(.horizontal).padding(.bottom, 8)
+            switch model.latest {
+            case .idle where model.sets.isEmpty:
+                ContentUnavailableView("No Backup Yet", systemImage: "externaldrive.badge.checkmark",
+                                       description: Text("Your backed-up folders appear here after your first backup."))
+            case .idle, .loading:
+                ProgressView("Reading the backup").frame(maxWidth: .infinity, maxHeight: .infinity)
+            case .failed(let why):
+                ContentUnavailableView {
+                    Label("Couldn't Read the Backup", systemImage: "exclamationmark.triangle")
+                } description: { Text(why) } actions: {
+                    Button("Try Again") { Task { await model.reloadLatest() } }
+                }
+            case .loaded(let items):
+                if items.isEmpty {
+                    ContentUnavailableView("Nothing Here", systemImage: "folder")
+                } else {
+                    List(items) { latestRow($0) }
+                }
+            }
+        }
+    }
+
+    private func latestRow(_ item: BackupItem) -> some View {
+        HStack {
+            if item.isFolder {
+                Button { Task { await model.open(item.name) } } label: {
+                    Label(item.name, systemImage: "folder").lineLimit(1)
+                }
+                .buttonStyle(.plain)
+                .accessibilityHint("Opens this folder")
+            } else {
+                Label(item.name, systemImage: "doc").lineLimit(1)
+            }
+            Spacer(minLength: 8)
+            if !item.isFolder { Text(item.size.formatted(.byteCount(style: .file))).foregroundStyle(.secondary) }
+            Button("Restore…") { Task { await model.restoreLatest(item, chooseLocation: chooseLocation) } }
+                .accessibilityLabel("Restore \(item.name)")
+                .accessibilityHint("Asks where to put the restored copy")
+        }
+        .accessibilityElement(children: .contain)
+    }
+
     private func row(_ entry: ArchiveEntry) -> some View {
         let name = (entry.path as NSString).lastPathComponent
         let folder = (entry.path as NSString).deletingLastPathComponent
@@ -213,6 +334,7 @@ struct ArchiveView: View {
         .tag(entry.id)
         .contextMenu {
             Button("Restore…") { Task { await model.restore(entry, chooseLocation: chooseLocation) } }
+            Button("Restore Everything From This Run…") { Task { await model.restoreRun(of: entry, chooseLocation: chooseLocation) } }
         }
         .accessibilityElement(children: .contain)
     }

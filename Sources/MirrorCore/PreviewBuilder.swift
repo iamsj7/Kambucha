@@ -43,8 +43,12 @@ public struct PreviewBuilder: PreviewProviding {
         let measured = await Task.detached { Self.measure(source: source, presets: enabled, projects: projects) }.value
         let scanner = ReviewScanner(filters: filters)
         decisions += scanner.secretsIn(changedExcludedPaths: measured.secretPaths)
+        // One repo git can't read must not cost the owner the preview, and with it Start Backup.
+        var warnings: [String] = []
         for (repo, folders) in Self.reposByFolder(source: source, folders: measured.folders) {
-            decisions += try scanner.trackedInExcluded(repo: repo, excluded: folders)
+            do { decisions += try scanner.trackedInExcluded(repo: repo, excluded: folders) } catch {
+                warnings.append(Self.unreadableRepoWarning(repo, source: source))
+            }
         }
 
         var groups: [PreviewGroup] = measured.groups.map { key, g in
@@ -55,7 +59,14 @@ public struct PreviewBuilder: PreviewProviding {
         groups.sort { ($0.bytes, $1.id) > ($1.bytes, $0.id) }
         let skipped = groups.filter { !$0.included }.reduce(Int64(0)) { $0 + $1.bytes }
         decisions.sort { ($0.kind.rawValue, $0.path) < ($1.kind.rawValue, $1.path) }
-        return PreviewResult(includedBytes: bytes, skippedBytes: skipped, includedFiles: count, groups: groups, decisions: decisions)
+        return PreviewResult(includedBytes: bytes, skippedBytes: skipped, includedFiles: count, groups: groups, decisions: decisions, warnings: warnings)
+    }
+
+    static func unreadableRepoWarning(_ repo: URL, source: URL) -> String {
+        let base = source.standardizedFileURL.path + "/"
+        let path = repo.standardizedFileURL.path
+        let name = path.hasPrefix(base) ? String(path.dropFirst(base.count)) : repo.lastPathComponent
+        return "Git couldn't read \"\(name)\", so files it tracks in excluded folders aren't listed here."
     }
 
     /// Mirrored files that the set's current rules would now exclude. Reported only; nothing is deleted or moved.

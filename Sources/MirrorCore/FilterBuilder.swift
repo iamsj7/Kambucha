@@ -1,7 +1,9 @@
 import Foundation
 
-/// Builds rclone filter-file lines. First match wins in rclone, so order is the policy:
-/// user rules, secret and git excludes, macOS junk, always-excludes, then per-project ambiguous excludes.
+/// Builds rclone filter-file lines. First match wins in rclone, so order is the policy: secret and git excludes
+/// when those switches are off, user rules, macOS junk, always-excludes, then per-project ambiguous excludes.
+/// The switches go first so an Include on a folder can't bring back what the owner switched off. A user exclude
+/// loses nothing by following them, as both exclude.
 /// There is deliberately no trailing catch-all: anything not excluded is backed up.
 public struct FilterBuilder: Sendable {
     private let presets: [Preset]
@@ -14,14 +16,14 @@ public struct FilterBuilder: Sendable {
         var seen = Set<String>()
         func add(_ line: String) { if seen.insert(line).inserted { out.append(line) } }
 
-        for rule in set.rules {
-            guard let pattern = rebaseRule(rule.pattern, scope: scope) else { continue }
-            out.append("\(rule.action == .include ? "+" : "-") \(pattern)")
-        }
         if !set.backupSecrets {
             for p in PresetCatalog.secretPatterns { add("- \(p)") }
         }
         if !set.backupGit { add("- .git/**") }
+        for rule in set.rules {
+            guard let pattern = rebaseRule(rule.pattern, scope: scope) else { continue }
+            out.append("\(rule.action == .include ? "+" : "-") \(pattern)")
+        }
         for p in PresetCatalog.macOSExcludes { add("- \(Self.glob(p))") }
 
         let enabled = presets.filter { set.presets.contains($0.id) }

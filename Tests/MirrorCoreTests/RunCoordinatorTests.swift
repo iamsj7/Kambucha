@@ -462,7 +462,7 @@ private final class Harness: @unchecked Sendable {
                                sessions: { _ in FakeSession(endpoint: "x:") }, remote: h.files,
                                paths: RunPaths(support: h.support, logs: h.logs, work: h.work))
         await c.runAll(command: RunCommand())
-        #expect(spy.seen == String(ProcessInfo.processInfo.processIdentifier))
+        #expect(spy.seen == AgentPresence.record(for: ProcessInfo.processInfo.processIdentifier))
         #expect(!FileManager.default.fileExists(atPath: pidFile.path))
     }
 
@@ -621,7 +621,7 @@ private final class Harness: @unchecked Sendable {
         try FileManager.default.createDirectory(at: h.backupRoot.appendingPathComponent("Sets/X"), withIntermediateDirectories: true)
         await h.run()
         #expect(h.rclone.allCalls == 0)
-        #expect(try h.active == [.destinationMissing])
+        #expect(try h.active == [.setNameInUse])
     }
 
     @Test func aPairThatRanBeforeNeverReclaimsALostMarker() async throws {
@@ -1761,6 +1761,8 @@ private final class Harness: @unchecked Sendable {
         let session = FakeSession(endpoint: "c:"); h.setSession(d, session)
         try h.cloudMarker(at: "c:.mirror-root")
         let p = PairID(set: h.set.id, destination: d.id); try h.prime(p, kind: .googleDrive)
+        var drilled = try h.state(p); drilled.lastDrill = h.now   // no reminder to tell apart from the hold
+        try h.store.save(drilled, for: p)
         h.change("flowapp/a.txt")
         h.rclone.script(dryDeletions: (0..<500).map { "f\($0)" })
         final class Seen: @unchecked Sendable { var closes = -1 }
@@ -4270,5 +4272,179 @@ private struct LeavesAfterOneMoreLook: RcloneRunning {
     }
     func capture(_ arguments: [String], context: RcloneContext) async throws -> RcloneCapture {
         try await wrapping.capture(arguments, context: context)
+    }
+}
+
+/// A set was removed and another added under its name: the old folder is still there (final review S6).
+@Suite struct NameInUseTests {
+    private func leftBehind(_ h: Harness) throws -> UUID {
+        let old = UUID()
+        try RootMarker(sets: [old: h.set.name]).save(backupRoot: h.backupRoot)
+        try FileManager.default.createDirectory(at: URL(fileURLWithPath: h.mirror), withIntermediateDirectories: true)
+        return old
+    }
+
+    @Test func aNameStillInUseSaysSoAndTouchesNothing() async throws {
+        let h = try Harness()
+        let old = try leftBehind(h)
+        await h.run(RunCommand(force: true))
+        #expect(try h.active == [.setNameInUse])
+        #expect(try h.problems.active().first?.detail == "\"x\" is still in use by a backup in iCloud")
+        #expect(try h.state.stoppedBy == .setNameInUse)
+        #expect(h.rclone.allCalls == 0)
+        #expect(try RootMarker.load(backupRoot: h.backupRoot) == RootMarker(sets: [old: "x"]))
+    }
+
+    @Test func adoptingTheBackupTakesOverTheNameAndClearsTheStop() async throws {
+        let h = try Harness()
+        let old = try leftBehind(h)
+        await h.run(RunCommand(force: true))
+        h.set.adoptsBackupIn = [h.iCloudDest.id]
+        try h.save()
+        await h.run(RunCommand(force: true))
+        #expect(try !h.active.contains(.setNameInUse))
+        #expect(try h.state.stoppedBy == nil)
+        #expect(!h.rclone.realSyncs.isEmpty)
+        let marker = try #require(try RootMarker.load(backupRoot: h.backupRoot))
+        #expect(marker.sets[h.set.id] == "x" && marker.sets[old] == nil)
+    }
+
+    @Test func consentForAnotherDestinationDoesNotCount() async throws {
+        let h = try Harness()
+        _ = try leftBehind(h)
+        h.set.adoptsBackupIn = [UUID()]
+        try h.save()
+        await h.run(RunCommand(force: true))
+        #expect(try h.active == [.setNameInUse])
+        #expect(h.rclone.allCalls == 0)
+    }
+
+    @Test func aRootThatIsNotMirrorsIsNeverAdopted() async throws {
+        let h = try Harness()
+        try FileManager.default.createDirectory(at: URL(fileURLWithPath: h.mirror), withIntermediateDirectories: true)
+        h.set.adoptsBackupIn = [h.iCloudDest.id]
+        try h.save()
+        await h.run(RunCommand(force: true))
+        #expect(try h.active == [.destinationMissing])
+        #expect(h.rclone.allCalls == 0)
+    }
+}
+
+/// A hold with nothing countable in it, from the review to the run (final review S9).
+@Suite struct EmptyHoldTests {
+    @Test func approvingZeroReleasesAHoldOverOnlyGitFiles() async throws {
+        let h = try Harness(); try h.prime()
+        var st = try h.state; st.heldDeletions = 1
+        try h.store.save(st, for: h.pair)
+        try h.problems.store(.deletionsHeld, pair: h.pair, setName: "x", detail: "d")
+        h.rclone.script(dryDeletions: [".git/refs/old", "p/.git/x"])
+        await h.run(RunCommand(setID: h.set.id, approvedDeletions: 0, approvedDestination: h.iCloudDest.id, force: true))
+        #expect(try h.state.heldDeletions == 0)
+        #expect(try !h.active.contains(.deletionsHeld))
+    }
+
+    @Test func approvingZeroDoesNotCoverARealDeletionThatArrivedSince() async throws {
+        let h = try Harness(); try h.prime()
+        var st = try h.state; st.heldDeletions = 1
+        try h.store.save(st, for: h.pair)
+        h.rclone.script(dryDeletions: ["real.txt"])
+        await h.run(RunCommand(setID: h.set.id, approvedDeletions: 0, approvedDestination: h.iCloudDest.id, force: true))
+        #expect(try h.state.heldDeletions == 1)
+    }
+}
+
+/// The agent's exit is all the app hears of a request it couldn't take (final review S10).
+@Suite struct BusyAgentTests {
+    private func holdingTheLock(_ h: Harness, _ command: RunCommand) async throws -> RunEnd {
+        let other = RunLock(url: h.support.appendingPathComponent("locks/agent.lock"))
+        #expect(other.tryAcquire())
+        defer { other.release() }
+        return await h.coordinator().execute(command)
+    }
+
+    @Test func aRequestTheAgentCantTakeIsNotASuccess() async throws {
+        let h = try Harness(); try h.prime()
+        #expect(try await holdingTheLock(h, RunCommand(setID: h.set.id, approvedDeletions: 3, approvedDestination: h.iCloudDest.id, force: true)) == .busy)
+        #expect(try await holdingTheLock(h, RunCommand(force: true)) == .busy)
+        #expect(try h.records.recent(limit: 5).isEmpty)
+    }
+
+    @Test func aScheduledRunStillLeavesQuietly() async throws {
+        let h = try Harness(); try h.prime()
+        #expect(try await holdingTheLock(h, RunCommand()) == .done)
+    }
+
+    @Test func eachEndHasItsOwnExitCode() {
+        #expect(RunEnd.done.exitCode == 0 && RunEnd.failed.exitCode == 1)
+        #expect(RunEnd.busy.exitCode == AgentExit.busy && AgentExit.busy != 0 && AgentExit.busy != 1)
+    }
+}
+
+@Suite struct LivePairsTests {
+    @Test func aRunDropsProblemsOfPairsThatAreGone() async throws {
+        let h = try Harness(); try h.prime()
+        try h.problems.store(.verificationFailed, pair: PairID(set: h.set.id, destination: UUID()), setName: "x", detail: "d")
+        try h.problems.store(.repeatedFailures, pair: PairID(set: UUID(), destination: h.iCloudDest.id), setName: "Old", detail: "d")
+        await h.run()
+        #expect(try h.active.isEmpty)
+    }
+}
+
+/// Spec section 8a: after the first backup to an encrypted destination, then every 6 months.
+@Suite struct DrillReminderTests {
+    private func primedCloud(_ h: Harness) throws -> (Destination, PairID) {
+        let d = try h.addCloud(); try h.save(extra: [d])
+        let p = PairID(set: h.set.id, destination: d.id); try h.prime(p, kind: .googleDrive)
+        try h.prime()
+        return (d, p)
+    }
+
+    @Test func aFinishedBackupToAnEncryptedDestinationMakesTheDrillDue() async throws {
+        let h = try Harness()
+        let (d, p) = try primedCloud(h)
+        await h.run()
+        let open = try h.problems.active().filter { $0.problem == .drillDue }
+        #expect(open.map(\.pair) == [p])
+        #expect(open.first?.detail == d.name)
+        #expect(h.notifier.posted.filter { $0 == .drillDue }.count == 1)
+    }
+
+    @Test func theReminderIsSaidOnce() async throws {
+        let h = try Harness()
+        _ = try primedCloud(h)
+        await h.run(); await h.run()
+        #expect(h.notifier.posted.filter { $0 == .drillDue }.count == 1)
+    }
+
+    @Test func aRecentDrillMeansNoReminderAndClearsAnOpenOne() async throws {
+        let h = try Harness()
+        let (_, p) = try primedCloud(h)
+        try h.problems.store(.drillDue, pair: p, setName: "x", detail: "d")
+        var st = try h.state(p); st.lastDrill = h.now
+        try h.store.save(st, for: p)
+        await h.run()
+        #expect(try !h.active.contains(.drillDue))
+    }
+
+    @Test func nothingFinishedYetMeansNothingIsDue() async throws {
+        let h = try Harness()
+        let d = try h.addCloud(kit: false); try h.save(extra: [d]); try h.prime()   // waits for its Recovery Kit
+        await h.run()
+        #expect(try !h.active.contains(.drillDue))
+    }
+
+    @Test func aStoppedDestinationDoesNotAlsoNagAboutADrill() async throws {
+        let h = try Harness()
+        let (d, _) = try primedCloud(h)
+        h.setSession(d, FakeSession(endpoint: "x:", openError: RcloneSessionError.notSignedIn))
+        h.change("flowapp/a.txt")
+        await h.run()
+        #expect(try h.active.contains(.signInExpired) && !h.active.contains(.drillDue))
+    }
+
+    @Test func anUnencryptedDestinationIsNeverDue() async throws {
+        let h = try Harness(); try h.prime()
+        await h.run()
+        #expect(try !h.active.contains(.drillDue))
     }
 }

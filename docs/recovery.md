@@ -30,7 +30,7 @@ Every destination has the same layout inside a folder called `Mac Backup`.
     Mac Backup/
       Sets/<set name>/                      the current copy of each folder
       Archive/<set name>/<timestamp>/       old versions and deleted files
-      Manifests/<set name>.json             list of symlinks
+      Manifests/<set name>.json             list of symlinks (see below)
 
 | Destination | `Mac Backup` is here | Readable by eye? |
 |---|---|---|
@@ -38,6 +38,10 @@ Every destination has the same layout inside a folder called `Mac Backup`.
 | External drive | `/Volumes/<drive name>/Mac Backup` | Yes |
 | Google Drive | In your Google Drive, in a folder made by Mirror | No. File and folder names are scrambled. Use rclone. |
 | OneDrive | In your OneDrive | No. Same as Google Drive. |
+
+The `<timestamp>` folders look like `2026-11-04T10-00-30`, and they are in UTC, not your local time. Allow for that when you look for a run by its time.
+
+`Manifests` exists only on the iCloud folder and on drives formatted APFS or Mac OS Extended. Google Drive, OneDrive and exFAT drives keep symlinks as files inside `Sets`, so they need no list (see section 7).
 
 Google Drive and OneDrive backups are encrypted by default, so opening them in a web browser shows meaningless names and files. That is normal. Section 6 opens them. If you turned encryption off for a destination, the names are readable, and you can still use the commands in section 6 without the encryption step by pointing rclone straight at that account.
 
@@ -77,9 +81,10 @@ The newest copy is in `Sets/<set name>/`. A file you deleted or overwrote is in 
 
 ### With the app (any destination)
 
-1. Open Mirror, then Archive in the sidebar.
-2. Choose the set and the date.
-3. Select the file or folder and choose Restore. Pick a new folder as the place to put it.
+1. Open Mirror, then Archive in the sidebar, and choose the set and the destination at the top.
+2. For a file you deleted or overwrote, stay on Older Versions. Files are listed by the day they left the backup. Choose Restore next to the one you want.
+3. For the newest copy of a file, choose Latest Backup, open the folders down to it, and choose Restore next to it.
+4. Pick a new place to put it. Mirror will not restore into a folder it backs up.
 
 Mirror restores through rclone, so symlinks come back correctly. Files that iCloud has freed to save space are downloaded as needed.
 
@@ -117,7 +122,10 @@ The project is a folder inside the set. The set is the folder you chose when you
 
 ### With the app
 
-Open Archive or the set, choose the project folder, and Restore it to a new folder.
+1. Open Mirror, then Archive in the sidebar, and choose the set and the destination at the top.
+2. Choose Latest Backup.
+3. Choose Restore next to the project folder. To restore a folder deeper down, open the folders and choose Restore This Folder. At the top of the set, the same button is Restore Whole Set.
+4. Type a new name for the restored folder and choose where to put it. Mirror will not restore into a folder it backs up, or over a folder that already has files in it.
 
 ### iCloud folder or external drive, without the app
 
@@ -144,9 +152,9 @@ Do not forget `--links`. Section 7 explains why. Then do sections 7 and 8 for sy
 1. Sign in to the same Apple Account (System Settings, then your name).
 2. Turn on iCloud Drive.
 3. Wait. Open Finder, then iCloud Drive, and check that `Mac Backup` appears. Large backups take a long time to appear in full. Let the Mac stay on and connected. Do not restore until the status shows no more downloading.
-4. With the app: install Mirror ([setup guide](setup.md)), give it Full Disk Access, and restore from Archive or the set. Without the app: follow section 4 using the iCloud folder path in section 1.
+4. Follow section 4 "without the app", using the iCloud folder path in section 1. The app's Archive lists only the sets on this Mac, so it can't restore a set this Mac has not backed up. If you have installed Mirror, its rclone is already there (section 2).
 
-Do not add the old set again as a new backup right away. First restore, then check the result. If you point Mirror at a restored folder later, it will compare and carry on.
+Do not add the old set again as a new backup right away. First restore, then check the result. When you do add the restored folder under its old name, Mirror tells you the name is still in use by a backup in that destination. Choose Use Existing Backup to carry on from it: Mirror compares, copies what changed, and moves anything that isn't in the folder to the archive. Or choose a different name to start a fresh backup beside the old one, which stays where it is.
 
 ### External drive
 
@@ -164,12 +172,19 @@ Your Recovery Kit is a text document. Inside it, between the lines `BEGIN MIRROR
 
 ### With the app
 
-1. Install Mirror and open it.
-2. Open Destinations, choose Add Destination, and sign in to the same account.
-3. When asked for your keys, paste the whole Recovery Kit.
-4. The destination then appears with its sets and archive. Restore as in sections 3 and 4.
+This puts the destination back on this Mac, so Mirror can carry on backing up to it. Do it after you have your files back.
 
-If Mirror asks you to paste the Kit as a test ("restore drill"), that is the same step. Passing it means your Kit works.
+1. Install Mirror and open it.
+2. Choose the plus button, then Add Destination, and choose Google Drive or OneDrive.
+3. Choose I Have a Recovery Kit. Do not choose Sign In, which makes new keys.
+4. Paste the whole Recovery Kit and choose Restore. A browser opens. Sign in to the same account.
+5. Add your restored folder as a set, using its old name, and choose Use Existing Backup when Mirror says the name is in use (section 5).
+
+The app's Archive lists only the sets on this Mac, so on a new Mac use "Without the app" below to get your files back first.
+
+If a destination on this Mac has lost its keys, choose Restore From Recovery Kit on its screen.
+
+If Mirror asks you to paste the Kit as a test ("restore test"), that only checks the Kit. Passing it means your Kit works.
 
 ### Without the app, using only plain rclone
 
@@ -196,7 +211,7 @@ Notes:
 - The filename encoding is on the Kit's "Filename encoding" line. It is `base32` for Google Drive and `base32768` for OneDrive. A wrong value makes every file look missing.
 - Keep `--obscure`. Without it, rclone can take the passphrase for an already-scrambled value and then fail to decrypt anything.
 - Keep the single quotes. The Kit's passphrase and salt are 64 letters and digits.
-- The first line `remote='mirror-cloud:Mac Backup'` is correct as written. The name `Mac Backup` is the root folder, and `Sets`, `Archive` and `Manifests` sit directly under `mirror-restore:`.
+- The first line `remote='mirror-cloud:Mac Backup'` is correct as written. The name `Mac Backup` is the root folder, and `Sets` and `Archive` sit directly under `mirror-restore:`.
 
 **Step 3: Look.**
 
@@ -269,19 +284,15 @@ The first should list your links. The second should list nothing.
 
 ### Restoring symlinks from the manifest
 
+This applies to the iCloud folder and to drives formatted APFS or Mac OS Extended. Google Drive, OneDrive and exFAT drives have no manifest, as their `.rclonelink` files are the record.
+
 iCloud stores symlinks in a way that could not be fully proven from one Mac. So each run also saves a list of every symlink in the set, at `Mac Backup/Manifests/<set name>.json`. Each entry has a relative path and the target. If a symlink is missing after a restore, recreate it from the list.
 
 The Mirror app does this for you when you restore. By hand:
 
 1. Copy the manifest next to your restored files.
 
-   iCloud or external drive:
-
         $ cp "$BACKUP/Manifests/<set name>.json" ~/manifest.json
-
-   Google Drive or OneDrive (after section 6):
-
-        $ rclone copyto "mirror-restore:Manifests/<set name>.json" ~/manifest.json
 
 2. Move into the restored set folder and run this. It only makes links that are missing, and never changes a file that exists.
 
@@ -343,7 +354,7 @@ Nothing has been deleted from the backup. Mirror holds only the deletions. New a
 The files are in the archive, not gone. The archive keeps them 30 days by default, so act within that time.
 
 1. **Pause backups** in the menu bar, so no further runs change the archive.
-2. Find the run that deleted them. Each run that moved files makes one dated folder. Look at the dates around the time of the problem.
+2. Find the run that deleted them. Each run that moved files makes one dated folder. Look at the dates around the time of the problem, remembering they are in UTC.
 
    iCloud folder or external drive:
 
@@ -366,7 +377,7 @@ The files are in the archive, not gone. The archive keeps them 30 days by defaul
 5. Look in `~/Restored/Undo`. When it is right, move the files back to their original place.
 6. Choose Resume in the menu bar. The next backup copies the files back to the destination.
 
-With the app: open Archive, choose the set and the date, and restore to a new folder.
+With the app: open Archive and choose the set and the destination. Under Older Versions, find a file from that run, Control-click it and choose Restore Everything From This Run. Give the restored folder a new name. Do this once for each run, into separate folders, and move the files back by hand.
 
 If something in the archive is older than 30 days, it is gone from the archive, but it may still be in the current copy in `Sets/`, if it was not removed there.
 

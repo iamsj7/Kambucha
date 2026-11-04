@@ -73,8 +73,8 @@ private final class Rig: @unchecked Sendable {
         try await ask(AgentWire.archiveList, AgentWire.PairRequest(set: set.id, destination: destination ?? iCloudDest.id))
     }
 
-    func restore(_ path: String, to: String, destination: UUID? = nil) async throws -> AgentWire.Response {
-        try await ask(AgentWire.archiveRestore, AgentWire.RestoreRequest(set: set.id, destination: destination ?? iCloudDest.id, path: path, to: to))
+    func restore(_ path: String, to: String, destination: UUID? = nil, replacing: Bool? = nil) async throws -> AgentWire.Response {
+        try await ask(AgentWire.archiveRestore, AgentWire.RestoreRequest(set: set.id, destination: destination ?? iCloudDest.id, path: path, to: to, replacing: replacing))
     }
 
     func dryRun(_ destination: UUID? = nil) async throws -> AgentWire.Response {
@@ -85,9 +85,62 @@ private final class Rig: @unchecked Sendable {
 private let stamp = "2026-11-04T10-00-00"
 
 @Suite struct AgentRecoveryTests {
+    // MARK: Looking inside the latest backup
+
+    fileprivate func browse(_ r: Rig, _ path: String) async throws -> AgentWire.Response {
+        try await r.ask(AgentWire.setList, AgentWire.BrowseRequest(set: r.set.id, destination: r.iCloudDest.id, path: path))
+    }
+
+    @Test func browsingListsOneLevelFoldersFirst() async throws {
+        let r = try Rig()
+        try r.put("Sets/Docs/a.txt", "12345")
+        try r.put("Sets/Docs/p/inner/f.txt")
+        let top = try await browse(r, "Sets/Docs")
+        #expect(top.ok == true)
+        #expect(top.items == [BackupItem(name: "p", isFolder: true, size: 0), BackupItem(name: "a.txt", isFolder: false, size: 5)])
+        #expect(try await browse(r, "Sets/Docs/p").items?.map(\.name) == ["inner"])
+    }
+
+    @Test func aFolderGoneFromTheBackupIsNotFound() async throws {
+        let r = try Rig()
+        try r.put("Sets/Docs/a.txt")
+        #expect(try await browse(r, "Sets/Docs/nope").failure == .notFound)
+    }
+
+    @Test(arguments: ["Sets/Other", "Sets/Docs/../Other", "Archive/Docs/\(stamp)", "Sets", "", "/etc", "Manifests/Docs.json"])
+    func onlyThisSetsMirrorCanBeBrowsed(path: String) async throws {
+        let r = try Rig()
+        try r.put("Sets/Other/a.txt"); try r.put("Sets/Docs/b.txt"); try r.put("Archive/Docs/\(stamp)/a.txt")
+        #expect(try await browse(r, path).failure == .invalidRequest)
+    }
+
+    // MARK: Names in a destination
+
+    @Test func setNamesListsTheFoldersInTheDestination() async throws {
+        let r = try Rig()
+        try r.put("Sets/Old Work/a.txt")
+        try r.put("Sets/Docs/b.txt")
+        let stored = try await r.ask(AgentWire.setNames, AgentWire.NamesRequest(destination: r.iCloudDest.id))
+        #expect(stored.ok == true)
+        #expect(stored.files?.sorted() == ["Docs", "Old Work"])
+        // No iCloud destination saved yet, as with the first set: the folder is still the one to look in.
+        let unsaved = try await r.ask(AgentWire.setNames, AgentWire.NamesRequest(destination: nil))
+        #expect(unsaved.files?.sorted() == ["Docs", "Old Work"])
+    }
+
+    @Test func setNamesOfAnEmptyDestinationIsEmpty() async throws {
+        let r = try Rig()
+        #expect(try await r.ask(AgentWire.setNames, AgentWire.NamesRequest(destination: r.iCloudDest.id)).files == [])
+    }
+
+    @Test func setNamesNeedsAStoredDestination() async throws {
+        let r = try Rig()
+        #expect(try await r.ask(AgentWire.setNames, AgentWire.NamesRequest(destination: UUID())).failure == .notFound)
+    }
+
     // MARK: Who may ask
 
-    @Test(arguments: [AgentWire.archiveList, AgentWire.archiveRestore, AgentWire.dryRunDeletions])
+    @Test(arguments: [AgentWire.archiveList, AgentWire.archiveRestore, AgentWire.dryRunDeletions, AgentWire.setNames, AgentWire.setList])
     func aRefusedCallerGetsNothingAndItsInputIsNeverRead(subcommand: String) async throws {
         let r = try Rig()
         r.trust.callerFailure = .untrustedCaller
@@ -195,6 +248,65 @@ private let stamp = "2026-11-04T10-00-00"
         let answer = try await r.restore(path, to: to.path)
         #expect(answer.ok != true && answer.failure != nil)
         #expect(!FileManager.default.fileExists(atPath: to.path))
+    }
+
+    @Test func aWholeRunFromTheArchiveRestoresAsAFolder() async throws {
+        let r = try Rig()
+        try r.put("Archive/Docs/\(stamp)/a.txt", "one"); try r.put("Archive/Docs/\(stamp)/p/b.txt", "two")
+        let to = try r.tmp.sub("out").appendingPathComponent("run")
+        #expect(try await r.restore("Archive/Docs/\(stamp)", to: to.path).ok == true)
+        #expect(try String(contentsOf: to.appendingPathComponent("p/b.txt"), encoding: .utf8) == "two")
+    }
+
+    @Test func aFileReplacesOnlyWhatTheOwnerAgreedToReplace() async throws {
+        let r = try Rig()
+        try r.put("Archive/Docs/\(stamp)/a.txt", "archived")
+        let out = try r.tmp.sub("out")
+        try r.put("a.txt", "mine", in: out)
+        let to = out.appendingPathComponent("a.txt")
+        #expect(try await r.restore("Archive/Docs/\(stamp)/a.txt", to: to.path).failure == .restore(.destinationNotEmpty(to.path)))
+        #expect(try String(contentsOf: to, encoding: .utf8) == "mine")
+        #expect(try await r.restore("Archive/Docs/\(stamp)/a.txt", to: to.path, replacing: true).ok == true)
+        #expect(try String(contentsOf: to, encoding: .utf8) == "archived")
+    }
+
+    @Test func replacingNeverLiftsTheSourceGuard() async throws {
+        let r = try Rig()
+        try r.put("Archive/Docs/\(stamp)/a.txt", "archived")
+        try r.put("a.txt", "mine", in: r.source)
+        let to = r.source.appendingPathComponent("a.txt")
+        let answer = try await r.restore("Archive/Docs/\(stamp)/a.txt", to: to.path, replacing: true)
+        #expect(answer.ok != true)
+        #expect(try String(contentsOf: to, encoding: .utf8) == "mine")
+    }
+
+    @Test func replacingCoversAFileNotAFolderOrALink() async throws {
+        let r = try Rig()
+        try r.put("Archive/Docs/\(stamp)/a.txt", "archived")
+        try r.put("Sets/Docs/p/f.txt")
+        let out = try r.tmp.sub("out")
+        try r.put("full/mine.txt", in: out)
+        let folder = out.appendingPathComponent("full")
+        #expect(try await r.restore("Sets/Docs/p", to: folder.path, replacing: true).failure == .restore(.destinationNotEmpty(folder.path)))
+        let link = out.appendingPathComponent("link")
+        try FileManager.default.createSymbolicLink(at: link, withDestinationURL: folder.appendingPathComponent("mine.txt"))
+        #expect(try await r.restore("Archive/Docs/\(stamp)/a.txt", to: link.path, replacing: true).failure == .restore(.destinationNotEmpty(link.path)))
+    }
+
+    @Test func aFolderIsNotRestoredOverAFolderWithFilesInIt() async throws {
+        let r = try Rig()
+        try r.put("Sets/Docs/p/f.txt")
+        let to = try r.tmp.sub("out")
+        try r.put("mine.txt", in: to)
+        #expect(try await r.restore("Sets/Docs/p", to: to.path).failure == .restore(.destinationNotEmpty(to.path)))
+    }
+
+    @Test func aWholeSetIsNotRestoredOverItsSource() async throws {
+        let r = try Rig()
+        try r.put("Sets/Docs/f.txt")
+        guard case .restore(.overSource) = try await r.restore("Sets/Docs", to: r.source.path).failure else {
+            Issue.record("expected the source to be refused"); return
+        }
     }
 
     @Test func aRelativeTargetIsRefused() async throws {
@@ -351,6 +463,7 @@ private let stamp = "2026-11-04T10-00-00"
         #expect(answer.ok == true)
         #expect(answer.files == ["gone1.txt", "p/gone2.txt"])
         #expect(AgentWire.nonGitCount(answer.files ?? []) == answer.files?.count)
+        #expect(answer.gitFiles == 2)
     }
 
     @Test func aDryRunChangesNothing() async throws {

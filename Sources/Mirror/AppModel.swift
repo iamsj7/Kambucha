@@ -3,11 +3,6 @@ import Observation
 import AppKit
 import MirrorCore
 
-/// A notifier that never posts: the app only reads problems; the agent raises them.
-private struct SilentNotifier: Notifying {
-    func post(_ problem: Problem, pair: PairID, setName: String, detail: String) async -> Bool { false }
-}
-
 /// One row of the menu bar panel.
 struct SetRow: Identifiable, Equatable {
     var id: UUID
@@ -33,7 +28,8 @@ private struct Snapshot: Sendable {
     var progress: [ProgressItem]
     var running: Bool
 
-    static func load(support: URL) -> Snapshot? {
+    /// `volumes` is nil until the first read of the mounted drives: no drive is called away on a guess.
+    static func load(support: URL, volumes: [VolumeInfo]?) -> Snapshot? {
         let store = ConfigStore(root: support)
         guard let sets = try? store.loadSets(), let destinations = try? store.loadDestinations() else { return nil }
         var states: [PairID: SetState] = [:]
@@ -44,7 +40,7 @@ private struct Snapshot: Sendable {
             }
         }
         let records = (try? RunRecordStore(root: support).recent(limit: 200)) ?? []
-        let problems = (try? ProblemCenter(root: support, notifier: SilentNotifier()).active()) ?? []
+        let problems = (try? ProblemCenter(root: support, notifier: NoNotifier()).active()) ?? []
         let running = AgentPresence.isRunning(support: support)
         // Progress belongs to a live agent only; a file left by a killed one is ignored.
         let live = running ? ((try? ProgressStore(root: support).all(now: Date())) ?? []) : []
@@ -53,9 +49,10 @@ private struct Snapshot: Sendable {
             let dest = destinations.first { $0.id == p.pair.destination }?.name
             return ProgressItem(label: dest.map { "\(set.name) to \($0)" } ?? set.name, progress: p)
         }.sorted { $0.label < $1.label }
+        let disconnected = volumes.map { ExternalVolume.disconnected(destinations, in: $0) } ?? []
         func overall(_ ss: [BackupSet]) -> OverallStatus {
             StatusSummary.overall(sets: ss, destinations: destinations, states: states,
-                                  records: records, problems: problems, running: running)
+                                  records: records, problems: problems, running: running, disconnected: disconnected)
         }
         func needsPreview(_ ss: [BackupSet]) -> OverallStatus { StatusSummary.withPreviewNeeded(overall(ss), sets: ss) }
         return Snapshot(sets: sets, status: needsPreview(sets),
@@ -91,6 +88,10 @@ final class AppModel {
     @ObservationIgnored let eject: EjectController
     /// Set when the owner chooses Review Deletions; the review window shows that set's held deletions.
     var reviewingSet: UUID?
+    /// Sets to run once the backup under way ends, as what it's doing was decided before the owner's latest choice.
+    private(set) var queuedRuns: [UUID] = []
+    /// Why the review is still open, shown in it. Ends with the review.
+    private(set) var reviewNotice: String?
     /// Sticky: cleared only by `dismissError()` or the next owner action. `refresh()` never touches it.
     private(set) var lastError: String?
 
@@ -121,9 +122,10 @@ final class AppModel {
             guard let self else { return false }
             return self.isBackupActive || AgentLockProbe.isHeld(support: self.support)
         }
-        if let snap = Snapshot.load(support: support) { apply(snap) }   // first paint is synchronous
+        if let snap = Snapshot.load(support: support, volumes: nil) { apply(snap) }   // first paint is synchronous
         else { status = .attention("Mirror could not read its settings") }
         attachMissingWatchers()
+        cache.onChange = { [weak self] in self?.refresh() }
         Task { await cache.refresh() }
     }
 
@@ -142,9 +144,9 @@ final class AppModel {
     func refresh() {
         generation += 1
         let mine = generation
-        let support = support
+        let support = support, volumes = loadedVolumes
         Task { [weak self] in
-            let snap = await Task.detached(priority: .utility) { Snapshot.load(support: support) }.value
+            let snap = await Task.detached(priority: .utility) { Snapshot.load(support: support, volumes: volumes) }.value
             guard let self, mine == self.generation else { return }
             if let snap { self.apply(snap) } else { self.status = .attention("Mirror could not read its settings") }
             self.attachMissingWatchers()
@@ -152,10 +154,29 @@ final class AppModel {
         }
     }
 
+    /// Reads state now, for a change made outside this model that the next line depends on.
+    func reload() {
+        if let snap = Snapshot.load(support: support, volumes: loadedVolumes) { apply(snap) }
+    }
+
+    private var loadedVolumes: [VolumeInfo]? { volumeCache.hasLoaded ? volumeCache.volumes : nil }
+
     private func apply(_ snap: Snapshot) {
         sets = snap.sets; rows = snap.rows; status = snap.status; progress = snap.progress
         agentRunning = snap.running
         destinations = snap.destinations; states = snap.states
+        startQueuedRun()
+    }
+
+    /// Asks for a run of `set` now, or as soon as the one under way ends.
+    func runSoon(_ set: UUID) {
+        if isBackupActive { if !queuedRuns.contains(set) { queuedRuns.append(set) } } else { runNow(set) }
+    }
+
+    /// Every state load comes here, and the end of any run, launchd's included, changes the folders being watched.
+    private func startQueuedRun() {
+        guard !queuedRuns.isEmpty, !isBackupActive, runQueue.waiting.isEmpty, !AgentLockProbe.isHeld(support: support) else { return }
+        runNow(queuedRuns.removeFirst())
     }
 
     // MARK: Panel visibility and polling
@@ -231,15 +252,25 @@ final class AppModel {
     }
 
     /// Opens the deletion review. Approving deletions needs the owner to see the list first.
-    func allowDeletes(_ set: UUID) { lastError = nil; reviewingSet = set }
+    func allowDeletes(_ set: UUID) { lastError = nil; reviewNotice = nil; reviewingSet = set }
 
-    func keepHolding() { reviewingSet = nil }
+    func keepHolding() { reviewingSet = nil; reviewNotice = nil }
 
-    /// Launches the agent with the count the owner reviewed; it holds again if the list has grown.
-    func allowOnce(arguments: [String]) {
+    static let busyText = "A backup is running. Try again shortly."
+
+    /// Launches the agent with the count the owner reviewed; it holds again if the list has grown. False, with the
+    /// review left open, while a run holds the lock: the agent couldn't take this, and the approval mustn't vanish.
+    @discardableResult
+    func allowOnce(arguments: [String]) -> Bool {
         lastError = nil
-        reviewingSet = nil
-        launchAgent(arguments)
+        if isBackupActive || AgentLockProbe.isHeld(support: support) {
+            reviewNotice = Self.busyText
+            return false
+        }
+        let reviewed = reviewingSet
+        keepHolding()
+        launchAgent(arguments, reviewing: reviewed)
+        return true
     }
 
     // MARK: Editing sets and destinations
@@ -285,7 +316,9 @@ final class AppModel {
         lastError = nil
         do { try write() } catch { lastError = "Mirror could not save your changes." }
         // Apply at once so the screen the owner is on reflects the change before the file watcher fires.
-        if let snap = Snapshot.load(support: support) { apply(snap) }
+        reload()
+        // A pair that's gone can't be cleared by any run, so its problems end with it.
+        try? ProblemCenter(root: support, notifier: NoNotifier()).retain(pairs: BackupSet.pairs(of: sets))
         refresh()
     }
 
@@ -293,7 +326,7 @@ final class AppModel {
     var heldSet: SetRow? { rows.first { if case .held = $0.status { true } else { false } } }
 
     /// The agent lives next to the app binary. Never derived from argv.
-    private func launchAgent(_ arguments: [String]) {
+    private func launchAgent(_ arguments: [String], reviewing: UUID? = nil) {
         // One agent at a time: a second launch would let the first one's exit advance the new queue.
         if process?.isRunning == true {
             runQueue.start(.all)
@@ -321,16 +354,25 @@ final class AppModel {
                 guard let self else { return }
                 let isCurrent = self.process === proc
                 if isCurrent { self.process = nil }
-                if code != 0 {
-                    let why = tail.split(separator: "\n").last.map(String.init) ?? ""
-                    self.lastError = "The backup agent stopped with code \(code)." + (why.isEmpty ? "" : " \(why)")
-                }
+                self.agentExited(code: code, tail: tail, reviewing: reviewing)
                 self.refresh()
                 if isCurrent, let id = self.runQueue.next(afterExit: code) { self.launchAgent(["--run-now", id.uuidString]) }
             }
         }
         do { try p.run(); process = p }
         catch { lastError = "Mirror could not start a backup: \(error.localizedDescription)" }
+    }
+
+    /// `reviewing` is the set whose approval this launch carried. A launchd run can take the lock between the
+    /// check and the launch, so that review comes back rather than the approval being lost.
+    func agentExited(code: Int32, tail: String, reviewing: UUID?) {
+        guard code != 0 else { return }
+        if code == AgentExit.busy {
+            if let reviewing { reviewingSet = reviewing; reviewNotice = Self.busyText } else { lastError = Self.busyText }
+            return
+        }
+        let why = tail.split(separator: "\n").last.map(String.init) ?? ""
+        lastError = "The backup agent stopped with code \(code)." + (why.isEmpty ? "" : " \(why)")
     }
 
     // MARK: Watching

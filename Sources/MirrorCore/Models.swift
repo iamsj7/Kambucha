@@ -34,6 +34,9 @@ public struct BackupSet: Codable, Equatable, Identifiable, Sendable {
     /// `previewFingerprint` as it was when the owner accepted the preview. The agent starts no backup of a set
     /// unless this equals the current fingerprint, so changing rules, stacks or switches asks again.
     public var acceptedFingerprint: String?
+    /// Destinations where the owner confirmed this set takes over a backup left under its name by a set that
+    /// was removed. Only ever read when claiming, so it means nothing once a destination has been claimed.
+    public var adoptsBackupIn: Set<UUID>?
     public init(id: UUID = UUID(), name: String, source: URL, presets: Set<String> = [],
                 destinationIDs: [UUID] = []) {
         self.id = id; self.name = name; self.source = source; self.presets = presets
@@ -88,6 +91,13 @@ public struct PairID: Codable, Hashable, Sendable {
     public static let agent = PairID(set: UUID(uuid: UUID_NULL), destination: UUID(uuid: UUID_NULL))
 }
 
+extension BackupSet {
+    /// Every set-and-destination pair of these sets.
+    public static func pairs(of sets: [BackupSet]) -> Set<PairID> {
+        Set(sets.flatMap { s in s.destinationIDs.map { PairID(set: s.id, destination: $0) } })
+    }
+}
+
 public struct ReviewItem: Codable, Equatable, Identifiable, Sendable {
     public enum Kind: String, Codable, Sendable { case trackedInExcluded, secretInExcluded, refusedByICloud }
     public var id: String
@@ -95,8 +105,12 @@ public struct ReviewItem: Codable, Equatable, Identifiable, Sendable {
     public var kind: Kind
     public init(id: String, path: String, kind: Kind) { self.id = id; self.path = path; self.kind = kind }
 
-    /// The anchored rule that answers this item. Once the owner has one, the item is settled.
-    public var rulePattern: String { "/" + FilterBuilder.escape(path) }
+    /// The anchored rule that answers this item. Once the owner has one, the item is settled. A tracked
+    /// item is a folder, and rclone only lets a rule beat `- folder/**` if it covers the same contents.
+    public var rulePattern: String {
+        let exact = "/" + FilterBuilder.escape(path)
+        return kind == .trackedInExcluded ? exact + "/**" : exact
+    }
 }
 
 /// How far an upload batch had got, and when. Two of these make a rate across wake-ups.

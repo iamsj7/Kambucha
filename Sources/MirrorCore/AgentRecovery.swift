@@ -28,6 +28,12 @@ struct AgentRecovery: Sendable {
         case AgentWire.dryRunDeletions:
             guard let r = try? decoder.decode(AgentWire.PairRequest.self, from: input) else { throw AgentFailure.invalidRequest }
             return try await dryRun(r)
+        case AgentWire.setList:
+            guard let r = try? decoder.decode(AgentWire.BrowseRequest.self, from: input) else { throw AgentFailure.invalidRequest }
+            return try await browse(r)
+        case AgentWire.setNames:
+            guard let r = try? decoder.decode(AgentWire.NamesRequest.self, from: input) else { throw AgentFailure.invalidRequest }
+            return try await names(r)
         default:
             throw AgentFailure.invalidRequest
         }
@@ -95,6 +101,41 @@ struct AgentRecovery: Sendable {
         })
     }
 
+    /// One level, so a set of 120,000 files is a folder listing and not a walk.
+    private func browse(_ r: AgentWire.BrowseRequest) async throws -> AgentWire.Response {
+        let (set, destination) = try resolve(set: r.set, destination: r.destination)
+        try ArchiveScope.checkName(set.name)
+        guard Self.isInside(set, r.path), r.path.hasPrefix("Sets/") else { throw AgentFailure.invalidRequest }
+        let items: [BackupItem] = try await withAccess(destination) { access in
+            let out = try await rclone.capture(["lsjson", "--links", "--use-json-log", "--config", access.context.configPath, "--",
+                                                ArchiveScope.join(access.endpoint, r.path)], context: access.context)
+            if RcloneLogParser.outcome(exitCode: out.exitCode, log: Data(out.stderr.utf8)) == .authExpired { throw RcloneSessionError.notSignedIn }
+            if out.exitCode == 3 { throw AgentFailure.notFound }
+            guard out.exitCode == 0, let list = (try? JSONSerialization.jsonObject(with: Data(out.stdout.utf8))) as? [[String: Any]] else {
+                throw AgentFailure.archive
+            }
+            return list.compactMap { item in
+                guard let name = item["Name"] as? String, let isFolder = item["IsDir"] as? Bool else { return nil }
+                return BackupItem(name: name, isFolder: isFolder, size: isFolder ? 0 : (item["Size"] as? NSNumber)?.int64Value ?? 0)
+            }
+        }
+        return AgentWire.Response(ok: true, items: items.sorted { ($0.isFolder ? 0 : 1, $0.name) < ($1.isFolder ? 0 : 1, $1.name) })
+    }
+
+    private func names(_ r: AgentWire.NamesRequest) async throws -> AgentWire.Response {
+        guard let destinations = try? store.loadDestinations() else { throw AgentFailure.configUnreadable }
+        var destination = Destination(name: MirrorPaths.rootFolderName, kind: .iCloudFolder)
+        if let id = r.destination {
+            guard let stored = destinations.first(where: { $0.id == id }) else { throw AgentFailure.notFound }
+            destination = stored
+        }
+        let found = try await withAccess(destination) { access in
+            try await RcloneRemoteFiles(binary: binary, helper: trust, workDir: workDir)
+                .list(ArchiveScope.join(access.endpoint, "Sets"), context: access.context) ?? []
+        }
+        return AgentWire.Response(ok: true, files: found.map { $0.hasSuffix("/") ? String($0.dropLast()) : $0 })
+    }
+
     private func restore(_ r: AgentWire.RestoreRequest) async throws -> AgentWire.Response {
         let (set, destination) = try resolve(set: r.set, destination: r.destination)
         try ArchiveScope.checkName(set.name)
@@ -111,7 +152,7 @@ struct AgentRecovery: Sendable {
             let inMirror = r.path == mirror || r.path.hasPrefix(mirror + "/")
             let result = try await service.restore(
                 from: from, context: access.context, to: URL(fileURLWithPath: r.to), sources: sources,
-                asFile: try await isFile(from, context: access.context),
+                asFile: try await isFile(from, context: access.context), replacingFile: r.replacing == true,
                 manifest: inMirror ? manifest : nil,
                 manifestSubpath: inMirror ? String(r.path.dropFirst(mirror.count + 1)) : "")
             switch result.outcome {
@@ -164,6 +205,7 @@ struct AgentRecovery: Sendable {
             default: throw AgentFailure.archive
             }
         }
-        return AgentWire.Response(ok: true, files: files.filter { !DeletionGate.isUnderGit($0) }.sorted())
+        let counted = files.filter { !DeletionGate.isUnderGit($0) }
+        return AgentWire.Response(ok: true, files: counted.sorted(), gitFiles: files.count - counted.count)
     }
 }

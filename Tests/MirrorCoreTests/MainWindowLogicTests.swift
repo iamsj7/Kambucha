@@ -35,7 +35,8 @@ private final class FakeInspector: MirroredExcludeInspecting, @unchecked Sendabl
 
 private struct FakeDryRun: DeletionDryRunProviding {
     var files: [String]
-    func heldDeletions(set: BackupSet, destination: Destination) async throws -> [String] { files }
+    var gitCount = 0
+    func heldDeletions(set: BackupSet, destination: Destination) async throws -> HeldFiles { HeldFiles(files: files, gitCount: gitCount) }
 }
 
 private let groups = [
@@ -123,6 +124,51 @@ private func aSet() -> BackupSet { BackupSet(name: "Projects", source: URL(fileU
 private let driveA = Destination(name: "Drive", kind: .googleDrive)
 private let driveB = Destination(name: "iCloud", kind: .iCloudFolder)
 
+// MARK: Any rule change asks about what's already mirrored (final review S11)
+
+@MainActor private func changedSet(_ change: (inout BackupSet) -> Void) -> BackupSet {
+    var set = aSet()
+    set.acceptPreview()
+    change(&set)
+    return set
+}
+
+@MainActor @Test func aPresetTurnedOnAsksAboutMirroredFiles() async {
+    let inspector = FakeInspector(matches: ["a/node_modules/x"])
+    let c = PreviewController(set: changedSet { $0.presets.insert("node") }, provider: FakePreview(groups: groups), inspector: inspector)
+    await c.open()
+    #expect(c.pendingImpact == ["a/node_modules/x"])
+    await c.resolveImpact(.moveToArchive)
+    #expect(inspector.archived == ["a/node_modules/x"])
+}
+
+@MainActor @Test func theSecretsSwitchAsksAboutMirroredFiles() async {
+    let c = PreviewController(set: changedSet { $0.backupSecrets = false }, provider: FakePreview(groups: groups),
+                              inspector: FakeInspector(matches: [".env"]))
+    await c.open()
+    #expect(c.pendingImpact == [".env"])
+}
+
+@MainActor @Test func aTypedRuleAsksAboutMirroredFiles() async {
+    let set = changedSet { $0.rules.append(UserRule(pattern: "*.log", action: .exclude)) }
+    let c = PreviewController(set: set, provider: FakePreview(groups: groups), inspector: FakeInspector(matches: ["a.log"]))
+    await c.open()
+    #expect(c.pendingImpact == ["a.log"])
+}
+
+/// A set the owner already accepted changed nothing, so what they left in place isn't asked about again.
+@MainActor @Test func openingAnUnchangedSetAsksNothing() async {
+    let c = PreviewController(set: changedSet { _ in }, provider: FakePreview(groups: groups), inspector: FakeInspector(matches: ["a.log"]))
+    await c.open()
+    #expect(c.result != nil && c.pendingImpact == nil)
+}
+
+@MainActor @Test func aFirstPreviewWithNothingMirroredAsksNothing() async {
+    let c = PreviewController(set: aSet(), provider: FakePreview(groups: groups), inspector: FakeInspector(matches: []))
+    await c.open()
+    #expect(c.pendingImpact == nil)
+}
+
 @MainActor @Test func deletionReviewShowsEachHeldDestinationSeparately() async {
     let set = aSet()
     let r = DeletionReview(set: set, destinations: [driveA, driveB], provider: FakeDryRun(files: ["a", "b", "c"]))
@@ -139,19 +185,25 @@ private let driveB = Destination(name: "iCloud", kind: .iCloudFolder)
     #expect(r.allowOnceArguments(for: driveB.id) == nil)
 }
 
-@MainActor @Test func allowOnceIsNilUntilThatDestinationListLoadedAndNonEmpty() async {
+@MainActor @Test func allowOnceIsNilUntilThatDestinationListLoaded() async {
     let r = DeletionReview(set: aSet(), destinations: [driveA], provider: FakeDryRun(files: ["a"]))
     #expect(r.allowOnceArguments(for: driveA.id) == nil)
-    let empty = DeletionReview(set: aSet(), destinations: [driveA], provider: FakeDryRun(files: [".git/x"]))
+}
+
+/// A hold over nothing but `.git`, or with nothing left to delete, has to be releasable too.
+@MainActor @Test func anEmptyListCanStillBeReleasedWithACountOfZero() async {
+    let set = aSet()
+    let empty = DeletionReview(set: set, destinations: [driveA], provider: FakeDryRun(files: [], gitCount: 12))
     await empty.load()
-    #expect(empty.allowOnceArguments(for: driveA.id) == nil)   // nothing outside .git: nothing to approve
+    #expect(empty.allowOnceArguments(for: driveA.id) == ["--allow-deletes", set.id.uuidString, driveA.id.uuidString, "0"])
+    #expect(empty.entries[0].gitCount == 12)
 }
 
 @MainActor @Test func oneDestinationFailingDoesNotApproveItsSibling() async {
     struct Half: DeletionDryRunProviding {
-        func heldDeletions(set: BackupSet, destination: Destination) async throws -> [String] {
+        func heldDeletions(set: BackupSet, destination: Destination) async throws -> HeldFiles {
             if destination.id == driveA.id { throw AgentFailure.busy }
-            return ["z"]
+            return HeldFiles(files: ["z"], gitCount: 0)
         }
     }
     let r = DeletionReview(set: aSet(), destinations: [driveA, driveB], provider: Half())
@@ -190,7 +242,7 @@ private let driveB = Destination(name: "iCloud", kind: .iCloudFolder)
     #expect(DestinationRules.notConnectedText(lastBackedUp: six, now: now) == "Not connected, last backed up 6 days ago")
     #expect(DestinationRules.notConnectedText(lastBackedUp: now.addingTimeInterval(-86_400), now: now) == "Not connected, last backed up 1 day ago")
     #expect(DestinationRules.notConnectedText(lastBackedUp: now, now: now) == "Not connected, last backed up today")
-    #expect(DestinationRules.notConnectedText(lastBackedUp: nil, now: now) == "Not connected, not backed up yet")
+    #expect(DestinationRules.notConnectedText(lastBackedUp: nil, now: now) == "Not connected yet")
 }
 
 @Test func exFATWarns() {

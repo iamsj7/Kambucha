@@ -37,8 +37,9 @@ public protocol ArchiveAgentCalling: Sendable {
     func archiveList(set: UUID, destination: UUID) async throws -> [ArchiveEntry]
     /// `path` is the entry's path below the backup root (`Archive/<set>/<stamp>/...`). The agent pins the backup root
     /// itself, or the crypt endpoint for an encrypted destination.
-    func archiveRestore(set: UUID, destination: UUID, path: String, to: URL) async throws
-    func dryRunDeletions(set: UUID, destination: UUID) async throws -> [String]
+    func archiveRestore(set: UUID, destination: UUID, path: String, to: URL, replacing: Bool) async throws
+    func setList(set: UUID, destination: UUID, path: String) async throws -> [BackupItem]
+    func dryRunDeletions(set: UUID, destination: UUID) async throws -> HeldFiles
 }
 
 /// Subcommands `archive-list`, `archive-restore` and `dry-run-deletions`.
@@ -69,12 +70,26 @@ public struct AgentArchiveClient: ArchiveAgentCalling {
         return entries.map { ArchiveEntry(id: $0.id, setName: $0.setName, stamp: $0.stamp, path: $0.path, size: $0.size) }
     }
 
-    public func archiveRestore(set: UUID, destination: UUID, path: String, to: URL) async throws {
-        _ = try await ask(AgentWire.archiveRestore, AgentWire.RestoreRequest(set: set, destination: destination, path: path, to: to.path))
+    public func archiveRestore(set: UUID, destination: UUID, path: String, to: URL, replacing: Bool = false) async throws {
+        _ = try await ask(AgentWire.archiveRestore, AgentWire.RestoreRequest(set: set, destination: destination, path: path, to: to.path, replacing: replacing))
     }
 
-    public func dryRunDeletions(set: UUID, destination: UUID) async throws -> [String] {
+    public func setList(set: UUID, destination: UUID, path: String) async throws -> [BackupItem] {
+        let answer = try await ask(AgentWire.setList, AgentWire.BrowseRequest(set: set, destination: destination, path: path))
+        guard let items = answer.items else { throw AgentClientError.noResponse(exitCode: 0) }
+        return items
+    }
+
+    public func dryRunDeletions(set: UUID, destination: UUID) async throws -> HeldFiles {
         let answer = try await ask(AgentWire.dryRunDeletions, AgentWire.PairRequest(set: set, destination: destination))
+        guard let files = answer.files else { throw AgentClientError.noResponse(exitCode: 0) }
+        return HeldFiles(files: files, gitCount: answer.gitFiles ?? 0)
+    }
+}
+
+extension AgentArchiveClient: SetNameListing {
+    public func names(in destination: UUID?) async throws -> [String] {
+        let answer = try await ask(AgentWire.setNames, AgentWire.NamesRequest(destination: destination))
         guard let files = answer.files else { throw AgentClientError.noResponse(exitCode: 0) }
         return files
     }
@@ -88,8 +103,12 @@ public struct AgentArchiveProvider: ArchiveProviding {
         try await client.archiveList(set: set.id, destination: destination.id)
     }
 
-    public func restore(entry: ArchiveEntry, set: BackupSet, destination: Destination, to: URL) async throws {
-        try await client.archiveRestore(set: set.id, destination: destination.id, path: entry.path, to: to)
+    public func browse(path: String, set: BackupSet, destination: Destination) async throws -> [BackupItem] {
+        try await client.setList(set: set.id, destination: destination.id, path: path)
+    }
+
+    public func restore(entry: ArchiveEntry, set: BackupSet, destination: Destination, to: URL, replacing: Bool) async throws {
+        try await client.archiveRestore(set: set.id, destination: destination.id, path: entry.path, to: to, replacing: replacing)
     }
 }
 
@@ -98,8 +117,10 @@ public struct AgentDeletionDryRun: DeletionDryRunProviding {
     private let client: any ArchiveAgentCalling
     public init(client: any ArchiveAgentCalling) { self.client = client }
 
-    public func heldDeletions(set: BackupSet, destination: Destination) async throws -> [String] {
-        try await client.dryRunDeletions(set: set.id, destination: destination.id).sorted()
+    public func heldDeletions(set: BackupSet, destination: Destination) async throws -> HeldFiles {
+        var held = try await client.dryRunDeletions(set: set.id, destination: destination.id)
+        held.files.sort()
+        return held
     }
 }
 
@@ -183,6 +204,8 @@ public struct LocalMirrorInspector: MirroredExcludeInspecting {
                 root = ExternalVolume.backupRoot(on: v)
             case .googleDrive, .oneDrive: continue
             }
+            // A folder of this name that the marker gives to another set is that backup's, unless the owner took it over.
+            if (try? RootMarker.load(backupRoot: root))?.claims(set.id) == false, set.adoptsBackupIn?.contains(id) != true { continue }
             let mirror = root.appendingPathComponent("Sets", isDirectory: true).appendingPathComponent(set.name, isDirectory: true)
             var isDir: ObjCBool = false
             guard FileManager.default.fileExists(atPath: mirror.path, isDirectory: &isDir), isDir.boolValue else { continue }

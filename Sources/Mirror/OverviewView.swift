@@ -19,7 +19,7 @@ extension AppModel {
             let decided = Set(s.rules.map(\.pattern))
             for d in s.destinationIDs {
                 for item in states[PairID(set: s.id, destination: d)]?.reviewItems ?? []
-                where !decided.contains(OverviewRules.pattern(for: item)) && seen.insert("\(s.id)-\(item.id)").inserted {
+                where !decided.contains(item.rulePattern) && seen.insert("\(s.id)-\(item.id)").inserted {
                     out.append(ReviewEntry(setID: s.id, setName: s.name, item: item))
                 }
             }
@@ -34,15 +34,9 @@ extension AppModel {
         s.rules.append(rule)
         if wasAccepted { s.acceptPreview() }
         save(set: s)
+        // Nothing changed on disk, so the agent would otherwise leave this until the daily pass.
+        if include, wasAccepted { runSoon(s.id) }
     }
-}
-
-extension AppModel {
-}
-
-enum OverviewRules {
-    /// An anchored rule for exactly this file.
-    static func pattern(for item: ReviewItem) -> String { "/" + FilterBuilder.escape(item.path) }
 }
 
 struct OverviewView: View {
@@ -169,7 +163,7 @@ struct ReviewItemRow: View {
                 Text("\(entry.setName). \(reason)").font(.caption).foregroundStyle(.secondary)
             }
             Spacer()
-            if entry.item.kind != .refusedByICloud {
+            if model.set(entry.setID).map({ ReviewActions.canInclude(entry.item, in: $0) }) == true {
                 Button("Include") { model.resolve(entry, include: true) }
                     .accessibilityLabel("Include \(entry.item.path) in the backup")
             }
