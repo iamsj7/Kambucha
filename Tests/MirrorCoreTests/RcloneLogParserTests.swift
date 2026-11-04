@@ -68,4 +68,46 @@ private func fixture(_ name: String) throws -> Data {
         let s = RcloneLogParser.parse(Data("not json\n{\"level\":\"error\",\"msg\":\"boom\"}\n\n".utf8))
         #expect(s.errors == ["boom"])
     }
+
+    private func jsonLine(level: String, msg: String, object: String? = nil) -> String {
+        var d: [String: Any] = ["level": level, "msg": msg]
+        if let object { d["object"] = object }
+        let data = try! JSONSerialization.data(withJSONObject: d)
+        return String(decoding: data, as: UTF8.self) + "\n"
+    }
+
+    @Test func fileNamesCannotForgeAuthExpired() {
+        let log = jsonLine(level: "info", msg: "Copied (new)", object: "token expired.txt")
+            + jsonLine(level: "error", msg: "Failed to copy: boom", object: "invalid_grant.txt")
+        #expect(RcloneLogParser.outcome(exitCode: 1, log: Data(log.utf8)) == .permanent)
+        #expect(RcloneLogParser.outcome(exitCode: 5, log: Data(log.utf8)) == .transient)
+        let real = jsonLine(level: "error", msg: "couldn't fetch token: invalid_grant: maybe token expired?")
+        #expect(RcloneLogParser.outcome(exitCode: 1, log: Data(real.utf8)) == .authExpired)
+        // Only error-level lines count.
+        let info = jsonLine(level: "info", msg: "invalid_grant")
+        #expect(RcloneLogParser.outcome(exitCode: 1, log: Data(info.utf8)) == .permanent)
+    }
+
+    @Test func fileNamesCannotForgeSafetyStop() {
+        let name = "--max-delete threshold reached"
+        let log = jsonLine(level: "info", msg: "Copied (new)", object: name)
+            + jsonLine(level: "error", msg: "Failed to copy: boom", object: name)
+        #expect(RcloneLogParser.outcome(exitCode: 7, log: Data(log.utf8)) == .permanent)
+        let real = jsonLine(level: "error", msg: "Got fatal error on delete: --max-delete threshold reached", object: name)
+        #expect(RcloneLogParser.outcome(exitCode: 7, log: Data(real.utf8)) == .safetyStop)
+    }
+
+    @Test func dryRunOverwriteAndRenameDoNotCountAsDeleted() throws {
+        let s = RcloneLogParser.parse(try fixture("sync-dryrun-overwrite-rename"))
+        #expect(s.deleted.isEmpty)
+        #expect(s.renamed == ["old.txt -> new.txt"])
+    }
+
+    @Test func oneUnexpectedFieldTypeDoesNotDropTheLine() {
+        let log = "{\"level\":\"info\",\"msg\":\"Copied (new)\",\"object\":\"a.txt\",\"size\":\"oops\",\"stats\":\"x\"}\n"
+            + "{\"level\":\"error\",\"msg\":\"bad\",\"object\":7}\n"
+        let s = RcloneLogParser.parse(Data(log.utf8))
+        #expect(s.copied == ["a.txt"])
+        #expect(s.errors == ["bad"])
+    }
 }

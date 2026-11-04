@@ -1,0 +1,6 @@
+{"time":"2026-11-04T22:44:47.964723+04:00","level":"info","msg":"Making map for --track-renames","object":"Local file system at /tmp/mirror-fixture/dst","objectType":"*local.Fs","source":"sync/sync.go:856"}
+{"time":"2026-11-04T22:44:47.966428+04:00","level":"notice","msg":"Skipped move as --dry-run is set (size 4)","skipped":"move","size":4,"object":"a.txt","objectType":"*local.Object","source":"operations/operations.go:2672"}
+{"time":"2026-11-04T22:44:47.9665+04:00","level":"info","msg":"Finished making map for --track-renames","object":"Local file system at /tmp/mirror-fixture/dst","objectType":"*local.Fs","source":"sync/sync.go:891"}
+{"time":"2026-11-04T22:44:47.967341+04:00","level":"notice","msg":"Skipped move to new.txt as --dry-run is set (size 11)","skipped":"move to new.txt","size":11,"object":"old.txt","objectType":"*local.Object","source":"operations/operations.go:2672"}
+{"time":"2026-11-04T22:44:47.967433+04:00","level":"info","msg":"Renamed from \"old.txt\"","object":"new.txt","objectType":"*local.Object","source":"sync/sync.go:925"}
+{"time":"2026-11-04T22:44:47.967349+04:00","level":"notice","msg":"Skipped copy as --dry-run is set (size 18)","skipped":"copy","size":18,"object":"a.txt","objectType":"*local.Object","source":"operations/operations.go:2672"}

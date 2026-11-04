@@ -170,4 +170,46 @@ private final class Sandbox {
         #expect(env["PATH"] != nil && env["HOME"] == "/h")
         #expect(Set(env.keys) == ["PATH", "HOME", "RCLONE_X"])
     }
+
+    private func script(_ body: String) throws -> URL {
+        let dir = FileManager.default.temporaryDirectory.appendingPathComponent("mirror-fake-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        let u = dir.appendingPathComponent("fake-rclone")
+        try ("#!/bin/sh\n" + body + "\n").write(to: u, atomically: true, encoding: .utf8)
+        try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: u.path)
+        return u
+    }
+
+    @Test func alreadyCancelledTaskNeverStartsRclone() async throws {
+        let sb = try Sandbox()
+        try sb.write("a.txt", "one")
+        let req = sb.request()
+        let runner = self.runner
+        let task = Task {
+            withUnsafeCurrentTask { $0?.cancel() }
+            return try await runner.sync(req)
+        }
+        await #expect(throws: CancellationError.self) { try await task.value }
+        #expect(!sb.exists(sb.dst, "a.txt"))
+    }
+
+    @Test func cancelledRunThrowsAndEscalatesToKill() async throws {
+        // Ignores SIGTERM, so only SIGKILL stops it.
+        let fake = try script("trap '' TERM\nexec sleep 60")
+        let sb = try Sandbox()
+        let runner = RcloneRunner(binary: fake, killGrace: 0.5)
+        let req = sb.request()
+        let started = Date()
+        let task = Task { try await runner.sync(req) }
+        try await Task.sleep(for: .milliseconds(400))
+        task.cancel()
+        await #expect(throws: CancellationError.self) { try await task.value }
+        #expect(Date().timeIntervalSince(started) < 20)
+    }
+
+    @Test func launchFailureThrowsInsteadOfHanging() async throws {
+        let sb = try Sandbox()
+        let runner = RcloneRunner(binary: URL(fileURLWithPath: "/nonexistent/rclone"))
+        await #expect(throws: (any Error).self) { try await runner.sync(sb.request()) }
+    }
 }

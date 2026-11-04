@@ -25,25 +25,37 @@ public struct RcloneResult: Equatable, Sendable {
 }
 
 public enum RcloneLogParser {
-    private struct Line: Decodable {
+    /// One log line, decoded leniently: a field of an unexpected type is ignored, never the whole line.
+    private struct Line {
         var level: String?
         var msg: String?
         var object: String?
         var size: Int64?
-        var stats: Stats?
-        struct Stats: Decodable { var bytes: Int64? }
+        var statsBytes: Int64?
+        init?(_ raw: Data) {
+            guard let d = (try? JSONSerialization.jsonObject(with: raw)) as? [String: Any] else { return nil }
+            level = d["level"] as? String
+            msg = d["msg"] as? String
+            object = d["object"] as? String
+            size = (d["size"] as? NSNumber)?.int64Value
+            statsBytes = ((d["stats"] as? [String: Any])?["bytes"] as? NSNumber)?.int64Value
+        }
+        var isError: Bool { level == "error" || level == "critical" }
+    }
+
+    private static func lines(_ data: Data) -> [Line] {
+        data.split(separator: UInt8(ascii: "\n")).compactMap { Line(Data($0)) }
     }
 
     public static func parse(_ data: Data) -> LogSummary {
         var s = LogSummary()
         var sizeSum: Int64 = 0
         var statsBytes: Int64?
-        let decoder = JSONDecoder()
-        for raw in data.split(separator: UInt8(ascii: "\n")) {
-            guard let line = try? decoder.decode(Line.self, from: Data(raw)), let msg = line.msg else { continue }
+        for line in lines(data) {
+            if let b = line.statsBytes { statsBytes = b }
+            guard let msg = line.msg else { continue }
             let object = line.object ?? ""
-            if let b = line.stats?.bytes { statsBytes = b }
-            if line.level == "error" || line.level == "critical" { s.errors.append(object.isEmpty ? msg : "\(object): \(msg)") }
+            if line.isError { s.errors.append(object.isEmpty ? msg : "\(object): \(msg)") }
             if let n = differenceCount(msg) { s.differences = n }
             guard !object.isEmpty else { continue }
             if msg.hasPrefix("Copied") {
@@ -83,12 +95,15 @@ public enum RcloneLogParser {
         }
     }
 
-    /// Exit code refined by the raw log: `--max-delete` stops and expired sign-ins are only visible there.
+    /// Exit code refined by the log: `--max-delete` stops and expired sign-ins are only visible there.
+    /// Only the `msg` of error-level JSON lines is consulted, never `object`, so a file named
+    /// "token expired.txt" cannot change the outcome. Stderr text is deliberately not consulted: it can
+    /// carry user paths, and with `--log-file` rclone logs everything of interest to the file.
     public static func outcome(exitCode: Int32, log: Data) -> RcloneResult.Outcome {
         guard exitCode != 0 else { return .success }
-        let text = String(decoding: log, as: UTF8.self).lowercased()
-        if text.contains("--max-delete threshold reached") { return .safetyStop }
-        if text.contains("invalid_grant") || text.contains("token expired") { return .authExpired }
+        let errors = lines(log).filter(\.isError).compactMap(\.msg)
+        if errors.contains("Got fatal error on delete: --max-delete threshold reached") { return .safetyStop }
+        if errors.contains(where: { $0.contains("invalid_grant") || $0.contains("token expired") }) { return .authExpired }
         return outcome(exitCode: exitCode)
     }
 }

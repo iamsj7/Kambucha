@@ -8,7 +8,7 @@ let package = Package(
         .target(name: "MirrorCore", resources: [.process("Resources")]),
         .executableTarget(name: "MirrorAgent", dependencies: ["MirrorCore"]),
         .executableTarget(name: "Mirror", dependencies: ["MirrorCore"]),
-        .testTarget(name: "MirrorCoreTests", dependencies: ["MirrorCore"]),
+        .testTarget(name: "MirrorCoreTests", dependencies: ["MirrorCore"], exclude: ["Fixtures"]),
     ],
     swiftLanguageModes: [.v6]
 )
