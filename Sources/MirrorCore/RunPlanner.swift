@@ -14,9 +14,14 @@ public struct RunPlan: Equatable, Sendable {
 /// What a pair should do now, and the order pairs go in. Pure, so every rule is testable.
 public struct RunPlanner {
     public static let deepCheckInterval: TimeInterval = 30 * 86_400
+    /// launchd doesn't say why it started the agent. Interval wake-ups are 30 minutes apart, so one sooner
+    /// than this after a full pass came from `StartOnMount`.
+    public static let mountWakeWindow: TimeInterval = 24 * 60
 
-    public static func plan(state: SetState, scope: RunScope, profile: DestinationProfile, now: Date) -> RunPlan {
-        let fullDue = state.lastFullPass.map { now.timeIntervalSince($0) >= profile.fullPassInterval } ?? true
+    /// `fullPass` overrides the interval, for a drive, where a new connection decides.
+    public static func plan(state: SetState, scope: RunScope, profile: DestinationProfile, now: Date,
+                            fullPass: Bool? = nil) -> RunPlan {
+        let fullDue = fullPass ?? state.lastFullPass.map { now.timeIntervalSince($0) >= profile.fullPassInterval } ?? true
         // Never checked isn't overdue: the first full pass sets the baseline.
         let deepDue = state.lastDeepCheck.map { now.timeIntervalSince($0) >= deepCheckInterval } ?? false
         // Evicted files can't be hashed yet, so they don't drive runs. They stay owed, and they wait.

@@ -12,6 +12,8 @@ public struct LogSummary: Equatable, Sendable {
     public var matching = 0
     /// What a dry run would copy.
     public var planned: [String] = []
+    /// What a dry run would copy, in bytes.
+    public var plannedBytes: Int64 = 0
     /// Paths named by error lines. For a check, the files that differ.
     public var flagged: [String] = []
     public var bytes: Int64 = 0
@@ -104,6 +106,7 @@ public enum RcloneLogParser {
             guard !object.isEmpty else { continue }
             if msg.hasPrefix("Skipped copy") {
                 s.planned.append(object)   // --dry-run
+                s.plannedBytes += line.size ?? 0
             } else if msg.hasPrefix("Copied") {
                 s.copied.append(object); sizeSum += line.size ?? 0
             } else if msg == "Moved into backup dir" {

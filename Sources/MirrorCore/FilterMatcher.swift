@@ -3,8 +3,8 @@ import Foundation
 /// Answers "does this filter exclude that path?" for `ScopeMapper`, with rclone's first-match-wins
 /// reading of `FilterBuilder` lines. Only ever saves work: a path wrongly called included costs a
 /// sync with nothing to do, so a pattern it can't read makes it exclude nothing at all.
-public struct FilterMatcher {
-    private struct Rule { var include: Bool; var regex: NSRegularExpression }
+public struct FilterMatcher: Sendable {
+    private struct Rule: Sendable { var include: Bool; var regex: NSRegularExpression }
     private var rules: [Rule] = []
 
     public init(lines: [String]) {

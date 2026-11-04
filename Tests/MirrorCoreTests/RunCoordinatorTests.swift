@@ -24,12 +24,16 @@ private final class FakeRclone: RcloneRunning, @unchecked Sendable {
     func archive(stamps: [String]) { lock.withLock { _archiveStamps = stamps } }
     func failCaptures(_ c: RcloneCapture?) { lock.withLock { _captureFailure = c } }
     func capture(_ arguments: [String], context: RcloneContext) async throws -> RcloneCapture {
-        lock.withLock {
+        if arguments.first == "purge" { onPurge?() }
+        return lock.withLock {
             _captures.append(arguments)
             if let _captureFailure { return _captureFailure }
             return RcloneCapture(exitCode: 0, stdout: arguments.first == "lsf" ? _archiveStamps.joined(separator: "\n") : "", stderr: "")
         }
     }
+    private var _dryBytes: Int64 = 0
+    func dry(bytes: Int64) { lock.withLock { _dryBytes = bytes } }
+    var onPurge: (@Sendable () -> Void)?
     func failRealSync(_ e: (any Error)?) { lock.withLock { _realThrow = e } }
     var onDryRun: (@Sendable () -> Void)?
     var onRealSync: (@Sendable () -> Void)?
@@ -64,6 +68,7 @@ private final class FakeRclone: RcloneRunning, @unchecked Sendable {
             if r.dryRun {
                 s.deleted = _dryDeletions
                 s.planned = _planned
+                s.plannedBytes = _dryBytes
                 return RcloneResult(exitCode: 0, summary: s, outcome: _dryOutcome)
             }
             if _throwOnRealSync { throw CancellationError() }
@@ -133,6 +138,15 @@ private final class FakeAuditor: UploadAuditing, @unchecked Sendable {
     }
 }
 
+private final class FakeVolumes: VolumeLocating, @unchecked Sendable {
+    private let lock = NSLock()
+    private var _list: [VolumeInfo] = []
+    private var _reads = 0
+    var reads: Int { lock.withLock { _reads } }
+    func set(_ list: [VolumeInfo]) { lock.withLock { _list = list } }
+    func mounted() -> [VolumeInfo] { lock.withLock { _reads += 1; return _list } }
+}
+
 private final class RecordingNotifier: Notifying, @unchecked Sendable {
     private let lock = NSLock()
     private var _posts: [(Problem, PairID)] = []
@@ -140,6 +154,12 @@ private final class RecordingNotifier: Notifying, @unchecked Sendable {
     var onPost: (@Sendable () -> Void)?
     var details: [String] { lock.withLock { _details } }
     var posted: [Problem] { lock.withLock { _posts.map(\.0) } }
+    private var _ejects: [String] = []
+    var ejects: [String] { lock.withLock { _ejects } }
+    func postSafeToEject(volumeName: String, volumeUUID: String) async -> Bool {
+        lock.withLock { _ejects.append(volumeUUID) }
+        return true
+    }
     func post(_ p: Problem, pair: PairID, setName: String, detail: String) async -> Bool {
         onPost?()
         lock.withLock { _posts.append((p, pair)); _details.append(detail) }
@@ -199,6 +219,10 @@ private final class Harness: @unchecked Sendable {
     var set: BackupSet
     var iCloudDest = Destination(name: "iCloud", kind: .iCloudFolder)
     var helperError: (any Error)?
+    let volumes = FakeVolumes()
+    var mountWakeWindow: TimeInterval = 0
+    private var _helperChecks = 0
+    var helperChecks: Int { lock.withLock { _helperChecks } }
     private var _written: [TransferProgress] = []
     var written: [TransferProgress] { lock.withLock { _written } }
     private(set) lazy var progress = RunProgress(store: ProgressStore(root: support), clock: { [self] in now },
@@ -260,12 +284,15 @@ private final class Harness: @unchecked Sendable {
                 }
             },
             remote: files, paths: RunPaths(support: support, logs: logs, work: work),
-            helperCheck: { [self] in if let helperError { throw helperError } },
+            helperCheck: { [self] in
+                lock.withLock { _helperChecks += 1 }
+                if let helperError { throw helperError }
+            },
             archives: { [self] endpoint, context, kind in
                 ArchiveManager(rclone: runner, endpoint: endpoint, context: context, kind: kind, isUploaded: { _ in true },
                                evict: { [self] url in lock.withLock { _evicted.append(url.lastPathComponent) } })
             },
-            progress: progress)
+            progress: progress, volumes: volumes, mountWakeWindow: mountWakeWindow)
     }
 
     @discardableResult
@@ -294,6 +321,21 @@ private final class Harness: @unchecked Sendable {
         d.recoveryKitConfirmed = kit
         set.destinationIDs.append(d.id)
         return d
+    }
+
+    /// A drive mounted at a real temp folder, with plenty of room, and this set using only it.
+    @discardableResult
+    func useDrive(uuid: String = "DRIVE-1", fileSystem: String = "apfs", free: Int64 = 1 << 50, mountID: String = "m1",
+                  looksInternal: Bool = false, confirmed: Bool = false) throws -> (Destination, VolumeInfo) {
+        let mount = root.appendingPathComponent("Volumes/\(uuid)")
+        try FileManager.default.createDirectory(at: mount, withIntermediateDirectories: true)
+        let v = VolumeInfo(uuid: uuid, name: "SSD", mountPoint: mount, fileSystem: fileSystem, freeBytes: free, totalBytes: 1 << 40,
+                           mountID: mountID, looksInternal: looksInternal)
+        let d = Destination(name: "SSD", kind: .externalDrive, volumeUUID: uuid, internalDiskConfirmed: confirmed)
+        set.destinationIDs = [d.id]
+        try save(extra: [d])
+        volumes.set([v])
+        return (d, v)
     }
 
     func cloudMarker(at path: String) throws {
@@ -2214,23 +2256,27 @@ private struct Mute: Notifying {
         #expect(try h.state.reviewItems.isEmpty)
     }
 
-    private func repo(_ h: Harness, tracked: String) throws {
+    /// Waits on a termination handler, as a blocked pool thread would starve timing tests running alongside.
+    private func repo(_ h: Harness, tracked: String) async throws {
         let dir = h.source.appendingPathComponent("flowapp")
         try write(h, "flowapp/\(tracked)")
-        func git(_ a: String...) throws {
+        func git(_ a: String...) async throws {
             let p = Process()
             p.executableURL = URL(fileURLWithPath: "/usr/bin/git")
             p.arguments = ["-C", dir.path] + a
             p.standardOutput = FileHandle.nullDevice; p.standardError = FileHandle.nullDevice
-            try p.run(); p.waitUntilExit()
+            try await withCheckedThrowingContinuation { (c: CheckedContinuation<Void, any Error>) in
+                p.terminationHandler = { _ in c.resume() }
+                do { try p.run() } catch { c.resume(throwing: error) }
+            }
         }
-        try git("init", "-q")
-        try git("add", "-f", tracked)
+        try await git("init", "-q")
+        try await git("add", "-f", tracked)
     }
 
     @Test func aFullPassFindsTrackedFilesInExcludedFolders() async throws {
         let h = try Harness(); try h.prime(); try excludingVendor(h)
-        try repo(h, tracked: "cache/committed.txt")
+        try await repo(h, tracked: "cache/committed.txt")
         h.now = Date()   // the index was just written
         var s = try h.state
         s.lastFullPass = h.now.addingTimeInterval(-2 * 86_400)
@@ -2242,7 +2288,7 @@ private struct Mute: Notifying {
 
     @Test func aRepoWhoseIndexIsOlderThanTheLastPassIsLeftAlone() async throws {
         let h = try Harness(); try h.prime(); try excludingVendor(h)
-        try repo(h, tracked: "cache/committed.txt")
+        try await repo(h, tracked: "cache/committed.txt")
         h.now = Date().addingTimeInterval(3 * 86_400)
         var s = try h.state
         s.lastFullPass = h.now.addingTimeInterval(-2 * 86_400)   // a day after the index changed
@@ -2254,7 +2300,7 @@ private struct Mute: Notifying {
 
     @Test func anOrdinaryRunRunsNoGit() async throws {
         let h = try Harness(); try h.prime(); try excludingVendor(h)
-        try repo(h, tracked: "cache/committed.txt")
+        try await repo(h, tracked: "cache/committed.txt")
         h.now = Date()
         var s = try h.state
         s.lastFullPass = h.now.addingTimeInterval(-3600)
@@ -2395,5 +2441,490 @@ private struct CancelledCapture: RcloneRunning {
         await h.run()
         #expect(!h.written.isEmpty)
         #expect(!h.written.contains { $0.phase == .waitingForICloud })
+    }
+}
+
+@Suite struct RunWiringDriveTests {
+    private func root(_ v: VolumeInfo) -> URL { v.mountPoint.appendingPathComponent("Mac Backup") }
+
+    /// A pair that has run on this connection: claimed, passed, event 5 stored.
+    private func settled(_ h: Harness, _ d: Destination, _ v: VolumeInfo, seen: String? = "m1") throws -> PairID {
+        try RootMarker(sets: [h.set.id: h.set.name]).save(backupRoot: root(v))
+        let pair = PairID(set: h.set.id, destination: d.id)
+        try h.prime(pair, kind: .externalDrive)
+        var s = try h.state(pair)
+        s.lastSeenMountID = seen
+        try h.store.save(s, for: pair)
+        return pair
+    }
+
+    @Test func aDriveThatIsNotConnectedIsSkippedQuietly() async throws {
+        let h = try Harness()
+        let (d, _) = try h.useDrive()
+        let pair = PairID(set: h.set.id, destination: d.id)
+        h.volumes.set([])
+        h.change("flowapp/a.txt")
+        await h.run()
+        let record = try #require(try h.latest())
+        #expect(record.status == .skipped && record.scope == "not connected")
+        #expect(h.rclone.allCalls == 0)
+        #expect(try h.active.isEmpty)
+        #expect(try h.state(pair) == SetState())
+    }
+
+    @Test func aDriveWithTheSameNameAndAnotherUUIDIsNeverWritten() async throws {
+        let h = try Harness()
+        let (_, v) = try h.useDrive()
+        var other = v; other.uuid = "OTHER"
+        h.volumes.set([other])
+        await h.run(RunCommand(force: true))
+        #expect(h.rclone.allCalls == 0)
+        #expect(!FileManager.default.fileExists(atPath: root(v).path))
+        #expect(try h.latest()?.scope == "not connected")
+    }
+
+    @Test func theFirstConnectionClaimsTheDriveAndWritesOnlyThere() async throws {
+        let h = try Harness()
+        let (d, v) = try h.useDrive()
+        let pair = PairID(set: h.set.id, destination: d.id)
+        h.rclone.script(matching: 1)
+        await h.run()
+        #expect(try RootMarker.load(backupRoot: root(v))?.claims(h.set.id) == true)
+        let sync = try #require(h.rclone.realSyncs.first)
+        #expect(sync.destination == root(v).appendingPathComponent("Sets/x").path)
+        #expect(sync.backupDir.hasPrefix(root(v).appendingPathComponent("Archive/x").path + "/"))
+        #expect(sync.context == RcloneContext(configPath: "/dev/null", environment: [:]))
+        #expect(h.session(d) == nil)
+        #expect(try h.latest()?.status == .success)
+        #expect(try h.state(pair).lastSeenMountID == "m1")
+        #expect(!FileManager.default.fileExists(atPath: h.backupRoot.path))
+    }
+
+    @Test func aDriveHasNoUploadAuditAndNothingToEvict() async throws {
+        let h = try Harness()
+        let (d, v) = try h.useDrive()
+        _ = try settled(h, d, v)
+        h.change("flowapp/a.txt")
+        let archived = root(v).appendingPathComponent("Archive/x/2033-05-01T00-00-00")
+        try FileManager.default.createDirectory(at: archived, withIntermediateDirectories: true)
+        try Data("a".utf8).write(to: archived.appendingPathComponent("old.txt"))
+        h.rclone.script(copied: ["flowapp/a.txt"], matching: 1)
+        h.auditor.set(pending: ["a.txt"])
+        await h.run()
+        #expect(h.auditor.calls.isEmpty)
+        #expect(h.evicted.isEmpty)
+        #expect(try h.latest()?.status == .success)
+    }
+
+    @Test func aDriveKeepsItsOwnManifestUnlessItStoresLinksAsFiles() async throws {
+        let h = try Harness()
+        try FileManager.default.createSymbolicLink(atPath: h.source.appendingPathComponent("flowapp/link").path, withDestinationPath: "a.txt")
+        let (_, v) = try h.useDrive()
+        await h.run()
+        #expect(try SymlinkManifest.read(set: "x", backupRoot: root(v)).entries.map(\.path) == ["flowapp/link"])
+
+        let h2 = try Harness()
+        try FileManager.default.createSymbolicLink(atPath: h2.source.appendingPathComponent("flowapp/link").path, withDestinationPath: "a.txt")
+        let (_, exfat) = try h2.useDrive(fileSystem: "exfat")
+        await h2.run()
+        #expect(!FileManager.default.fileExists(atPath: root(exfat).appendingPathComponent("Manifests").path))
+    }
+
+    @Test func theDrivesFileSystemSetsEveryRequest() async throws {
+        let h = try Harness()
+        try h.useDrive(fileSystem: "exfat")
+        await h.run()
+        let sync = try #require(h.rclone.realSyncs.first)
+        #expect(sync.profile.linksAsFiles && sync.profile.excludeAppleDouble && !sync.profile.trackRenames)
+        #expect(sync.profile.modifyWindow == "2s")
+        #expect(!h.rclone.checks.isEmpty)
+        #expect(h.rclone.checks.allSatisfy { $0.linksAsFiles && $0.excludeAppleDouble })
+    }
+
+    // MARK: Full passes
+
+    @Test func aNewConnectionIsAFullPassWhateverTheFeedSays() async throws {
+        let h = try Harness()
+        let (d, v) = try h.useDrive(mountID: "m2")
+        let pair = try settled(h, d, v, seen: "m1")
+        await h.run()
+        #expect(h.rclone.realSyncs.count == 1)
+        #expect(try h.latest()?.scope == "whole set")
+        #expect(try h.state(pair).lastSeenMountID == "m2")
+        #expect(try h.state(pair).lastFullPass == h.now)
+    }
+
+    @Test func theSameConnectionUsesTheChangeFeed() async throws {
+        let h = try Harness()
+        let (d, v) = try h.useDrive()
+        _ = try settled(h, d, v)
+        await h.run()
+        #expect(h.rclone.allCalls == 0)
+        h.change("flowapp/a.txt")
+        h.now = h.now.addingTimeInterval(60)   // records sort by start time, to the second
+        await h.run()
+        #expect(try h.latest()?.scope == "flowapp")
+    }
+
+    @Test func aFailedPassLeavesTheConnectionOwed() async throws {
+        let h = try Harness()
+        let (d, v) = try h.useDrive(mountID: "m2")
+        let pair = try settled(h, d, v, seen: "m1")
+        h.rclone.script(real: [.permanent])
+        await h.run()
+        #expect(try h.state(pair).lastSeenMountID == "m1")
+    }
+
+    @Test func aManualWholeSetRunCountsForTheConnection() async throws {
+        let h = try Harness()
+        let (d, v) = try h.useDrive(mountID: "m2")
+        let pair = try settled(h, d, v, seen: "m1")
+        await h.run(RunCommand(force: true))
+        #expect(try h.state(pair).lastSeenMountID == "m2")
+    }
+
+    // MARK: Room
+
+    @Test func aBackupThatWontFitStopsBeforeCopying() async throws {
+        let h = try Harness()
+        let (d, v) = try h.useDrive(free: 2_000_000_000)
+        let pair = try settled(h, d, v)
+        h.change("flowapp/a.txt")
+        h.rclone.dry(bytes: 3_000_000_000)
+        await h.run()
+        #expect(h.rclone.realSyncs.isEmpty && !h.rclone.dryRuns.isEmpty)
+        #expect(try h.active == [.driveFull])
+        let state = try h.state(pair)
+        #expect(state.stoppedBy == .driveFull)
+        #expect(state.lastEventID == 5)
+        #expect(state.consecutiveFailures == 0)
+        #expect(try h.latest()?.status == .failed)
+    }
+
+    @Test func driveFullClearsOnceItFits() async throws {
+        let h = try Harness()
+        let (d, v) = try h.useDrive(free: 30_000_000_000)   // about 22 GB of it is the reserve
+        let pair = try settled(h, d, v)
+        h.change("flowapp/a.txt")
+        h.rclone.dry(bytes: 10_000_000_000)
+        await h.run()
+        h.rclone.dry(bytes: 100)
+        await h.run()
+        #expect(try h.active.isEmpty)
+        #expect(try h.state(pair).stoppedBy == nil)
+        #expect(h.rclone.realSyncs.count == 1)
+    }
+
+    @Test func theReserveCounts() async throws {
+        let h = try Harness()
+        let (d, v) = try h.useDrive(free: 22_000_000_000)   // the reserve on this 1 TiB drive is about 22 GB
+        _ = try settled(h, d, v)
+        h.change("flowapp/a.txt")
+        h.rclone.dry(bytes: 1_000_000_000)
+        await h.run()
+        #expect(try h.active == [.driveFull])
+    }
+
+    @Test func expiredArchivesAreClearedBeforeCallingADriveFull() async throws {
+        let h = try Harness()
+        let (d, v) = try h.useDrive(free: 2_000_000_000)
+        _ = try settled(h, d, v)
+        h.change("flowapp/a.txt")
+        h.rclone.dry(bytes: 3_000_000_000)
+        h.rclone.archive(stamps: [ArchiveScope.stampString(h.now.addingTimeInterval(-40 * 86_400)) + "/",
+                                  ArchiveScope.stampString(h.now.addingTimeInterval(-86_400)) + "/"])
+        var freed = v
+        freed.freeBytes = 1 << 40
+        let (volumes, roomy) = (h.volumes, freed)
+        h.rclone.onPurge = { volumes.set([roomy]) }
+        await h.run()
+        #expect(h.rclone.purged.count >= 1)
+        #expect(h.rclone.realSyncs.count == 1)
+        #expect(try h.active.isEmpty)
+    }
+
+    // MARK: Unplugged
+
+    @Test func unpluggedDuringTheSyncIsTransient() async throws {
+        let h = try Harness()
+        let (d, v) = try h.useDrive(mountID: "m2")
+        let pair = try settled(h, d, v, seen: "m1")
+        let volumes = h.volumes
+        h.rclone.onRealSync = { volumes.set([]) }
+        h.rclone.script(real: [.permanent])
+        await h.run()
+        let state = try h.state(pair)
+        #expect(state.consecutiveFailures == 0)
+        #expect(state.lastEventID == 5 && state.lastSeenMountID == "m1")
+        #expect(state.wholeSetOwed && state.syncIncomplete && !state.isBackedUp)
+        #expect(try h.active.isEmpty)
+        let record = try #require(try h.latest())
+        #expect(record.status == .partial && record.errors == ["The drive was disconnected"])
+        #expect(h.notifier.ejects.isEmpty)
+    }
+
+    @Test func noCopyStartsOnADriveThatWentAfterTheDryRun() async throws {
+        let h = try Harness()
+        let (d, v) = try h.useDrive()
+        _ = try settled(h, d, v)
+        h.change("flowapp/a.txt")
+        let volumes = h.volumes
+        h.rclone.onDryRun = { volumes.set([]) }
+        await h.run()
+        #expect(h.rclone.realSyncs.isEmpty && h.rclone.checks.isEmpty)
+        #expect(try h.latest()?.status == .partial)
+    }
+
+    @Test func aDriveRemountedElsewhereIsGoneToThisRun() async throws {
+        let h = try Harness()
+        let (d, v) = try h.useDrive()
+        _ = try settled(h, d, v)
+        h.change("flowapp/a.txt")
+        var elsewhere = v
+        elsewhere.mountPoint = h.root.appendingPathComponent("Volumes/SSD 1")
+        let (volumes, moved) = (h.volumes, elsewhere)
+        h.rclone.onDryRun = { volumes.set([moved]) }
+        await h.run()
+        #expect(h.rclone.realSyncs.isEmpty)
+    }
+
+    @Test func anOrdinaryFailureOnAConnectedDriveStillCounts() async throws {
+        let h = try Harness()
+        let (d, v) = try h.useDrive()
+        let pair = try settled(h, d, v)
+        h.change("flowapp/a.txt")
+        h.rclone.script(real: [.permanent])
+        await h.run()
+        #expect(try h.state(pair).consecutiveFailures == 1)
+        #expect(try h.latest()?.status == .failed)
+    }
+
+    @Test func housekeepingLeavesADriveThatWentAlone() async throws {
+        let h = try Harness()
+        let (d, v) = try h.useDrive()
+        let pair = try settled(h, d, v)
+        h.change("flowapp/a.txt")
+        let spy = GoneBeforeTidy(wrapping: h.rclone, volumes: h.volumes)
+        await h.coordinator(rclone: spy).runAll(command: RunCommand())
+        #expect(h.rclone.captures.isEmpty)
+        #expect(try h.state(pair).lastEventID == 10)
+    }
+
+    // MARK: Reminders and the end of a run
+
+    @Test func aLongAbsentDriveGetsOneReminder() async throws {
+        let h = try Harness()
+        let (d, v) = try h.useDrive()
+        let pair = try settled(h, d, v)
+        var s = try h.state(pair)
+        s.lastFinished = h.now.addingTimeInterval(-8 * 86_400)
+        try h.store.save(s, for: pair)
+        h.volumes.set([])
+        await h.run()
+        await h.run()
+        #expect(h.notifier.posted == [.driveOverdue])
+        #expect(try h.latest()?.status == .skipped)
+    }
+
+    @Test func noReminderBeforeAWeekOrForADriveThatNeverRan() async throws {
+        let h = try Harness()
+        let (d, v) = try h.useDrive()
+        let pair = try settled(h, d, v)
+        var s = try h.state(pair)
+        s.lastFinished = h.now.addingTimeInterval(-6 * 86_400)
+        try h.store.save(s, for: pair)
+        h.volumes.set([])
+        await h.run()
+        s.lastFinished = nil
+        try h.store.save(s, for: pair)
+        await h.run()
+        #expect(h.notifier.posted.isEmpty)
+    }
+
+    @Test func aFinishedRunClearsTheReminder() async throws {
+        let h = try Harness()
+        let (d, v) = try h.useDrive(mountID: "m2")
+        let pair = try settled(h, d, v, seen: "m1")
+        var s = try h.state(pair)
+        s.lastFinished = h.now.addingTimeInterval(-8 * 86_400)
+        try h.store.save(s, for: pair)
+        h.volumes.set([])
+        await h.run()
+        h.volumes.set([v])
+        await h.run()
+        #expect(try h.active.isEmpty)
+    }
+
+    @Test func aFinishedConnectionSaysItIsSafeToEject() async throws {
+        let h = try Harness()
+        let (d, v) = try h.useDrive(mountID: "m2")
+        _ = try settled(h, d, v, seen: "m1")
+        await h.run()
+        #expect(h.notifier.ejects == ["DRIVE-1"])
+    }
+
+    @Test func routineRunsOnAConnectedDriveDontKeepSayingSo() async throws {
+        let h = try Harness()
+        let (d, v) = try h.useDrive()
+        _ = try settled(h, d, v)
+        h.change("flowapp/a.txt")
+        await h.run()
+        #expect(try h.latest()?.status == .success)
+        #expect(h.notifier.ejects.isEmpty)
+    }
+
+    @Test func aManualRunSaysSoToo() async throws {
+        let h = try Harness()
+        let (d, v) = try h.useDrive()
+        _ = try settled(h, d, v)
+        await h.run(RunCommand(force: true))
+        #expect(h.notifier.ejects == ["DRIVE-1"])
+    }
+
+    @Test func twoSetsOnOneDriveSayItOnceAndOnlyIfBothFinished() async throws {
+        let h = try Harness()
+        let (d, _) = try h.useDrive()
+        let other = h.root.appendingPathComponent("src2")
+        try FileManager.default.createDirectory(at: other.appendingPathComponent("p"), withIntermediateDirectories: true)
+        try Data("b".utf8).write(to: other.appendingPathComponent("p/b.txt"))
+        var second = BackupSet(name: "y", source: other)
+        second.destinationIDs = [d.id]
+        try h.store.saveSets([h.set, second])
+        await h.run(RunCommand(force: true))
+        #expect(h.notifier.ejects == ["DRIVE-1"])
+
+        h.rclone.script(real: [.permanent])
+        await h.run(RunCommand(force: true))
+        #expect(h.notifier.ejects == ["DRIVE-1"])
+    }
+
+    // MARK: Refusals
+
+    @Test func anUnconfirmedInternalLookingDriveIsRefused() async throws {
+        let h = try Harness()
+        let (d, v) = try h.useDrive(looksInternal: true)
+        await h.run(RunCommand(force: true))
+        #expect(h.rclone.allCalls == 0)
+        #expect(!FileManager.default.fileExists(atPath: root(v).path))
+        #expect(try h.active == [.destinationMissing])
+        #expect(try h.state(PairID(set: h.set.id, destination: d.id)).stoppedBy == .destinationMissing)
+        #expect(try h.latest()?.status == .failed)
+    }
+
+    @Test func aConfirmedInternalLookingDriveRuns() async throws {
+        let h = try Harness()
+        let (_, v) = try h.useDrive(looksInternal: true, confirmed: true)
+        await h.run()
+        #expect(h.rclone.realSyncs.first?.destination == root(v).appendingPathComponent("Sets/x").path)
+    }
+
+    @Test func aSystemVolumeReadsAsNotConnected() async throws {
+        let h = try Harness()
+        var (_, v) = try h.useDrive()
+        v.isSystem = true
+        h.volumes.set([v])
+        h.change("flowapp/a.txt")
+        await h.run()
+        #expect(h.rclone.allCalls == 0)
+        #expect(!FileManager.default.fileExists(atPath: root(v).path))
+        #expect(try h.active.isEmpty)
+        let record = try #require(try h.latest())
+        #expect(record.status == .skipped && record.scope == "not connected")
+    }
+
+    @Test func aLostMarkerOnADriveThatRanBeforeStops() async throws {
+        let h = try Harness()
+        let (d, v) = try h.useDrive()
+        let pair = try settled(h, d, v)
+        try FileManager.default.removeItem(at: RootMarker.url(backupRoot: root(v)))
+        h.change("flowapp/a.txt")
+        await h.run()
+        #expect(h.rclone.allCalls == 0)
+        #expect(try h.state(pair).stoppedBy == .destinationMissing)
+    }
+
+    // MARK: Mount wake-ups
+
+    private func lastPass(_ h: Harness, _ ago: TimeInterval) throws {
+        try FileManager.default.createDirectory(at: h.support, withIntermediateDirectories: true)
+        try JSONEncoder().encode(h.now.addingTimeInterval(-ago)).write(to: h.support.appendingPathComponent("last-pass.json"))
+    }
+
+    @Test func aMountWithNothingDueIsGoneAtOnce() async throws {
+        let h = try Harness(); try h.prime(); h.change("flowapp/a.txt")
+        h.mountWakeWindow = 1440
+        try lastPass(h, 60)
+        await h.run()
+        #expect(h.helperChecks == 0)
+        #expect(h.feed.calls == 0)
+        #expect(h.rclone.allCalls == 0)
+        #expect(try h.latest() == nil)
+        #expect(!FileManager.default.fileExists(atPath: h.support.appendingPathComponent("agent.pid").path))
+    }
+
+    @Test func aDriveAlreadySeenOnThisConnectionIsNotDue() async throws {
+        let h = try Harness()
+        let (d, v) = try h.useDrive()
+        _ = try settled(h, d, v)
+        h.mountWakeWindow = 1440
+        try lastPass(h, 60)
+        await h.run()
+        #expect(try h.latest() == nil)
+    }
+
+    @Test func aMountRunsOnlyTheDrivesThatJustArrived() async throws {
+        let h = try Harness(); try h.prime(); h.change("flowapp/a.txt")
+        let mount = h.root.appendingPathComponent("Volumes/D")
+        try FileManager.default.createDirectory(at: mount, withIntermediateDirectories: true)
+        let v = VolumeInfo(uuid: "D", name: "D", mountPoint: mount, fileSystem: "apfs", freeBytes: 1 << 50, mountID: "m1")
+        let d = Destination(name: "D", kind: .externalDrive, volumeUUID: "D")
+        h.set.destinationIDs.append(d.id)
+        try h.save(extra: [d])
+        h.volumes.set([v])
+        h.mountWakeWindow = 1440
+        try lastPass(h, 60)
+        await h.run()
+        #expect(h.rclone.realSyncs.map(\.destination) == [root(v).appendingPathComponent("Sets/x").path])
+    }
+
+    @Test func aWakeUpPastTheWindowIsAFullPass() async throws {
+        let h = try Harness(); try h.prime(); h.change("flowapp/a.txt")
+        h.mountWakeWindow = 1440
+        try lastPass(h, 1800)
+        await h.run()
+        #expect(h.rclone.realSyncs.count == 1)
+    }
+
+    @Test func aFullPassIsWhatTheWindowCountsFrom() async throws {
+        let h = try Harness(); try h.prime(); h.change("flowapp/a.txt")
+        h.mountWakeWindow = 1440
+        await h.run()   // nothing on record, so a full pass
+        #expect(h.rclone.realSyncs.count == 1)
+        h.change("flowapp/a.txt", id: 11)
+        await h.run()
+        #expect(h.rclone.realSyncs.count == 1)
+    }
+
+    @Test func aManualRunIsNeverAMountWakeUp() async throws {
+        let h = try Harness(); try h.prime()
+        h.mountWakeWindow = 1440
+        try lastPass(h, 60)
+        await h.run(RunCommand(force: true))
+        #expect(h.rclone.realSyncs.count == 1)
+    }
+}
+
+/// Unplugs the drive as the last check of a run finishes.
+private struct GoneBeforeTidy: RcloneRunning {
+    let wrapping: FakeRclone
+    let volumes: FakeVolumes
+    func sync(_ r: SyncRequest) async throws -> RcloneResult { try await wrapping.sync(r) }
+    func check(_ r: CheckRequest) async throws -> RcloneResult {
+        let result = try await wrapping.check(r)
+        volumes.set([])
+        return result
+    }
+    func capture(_ arguments: [String], context: RcloneContext) async throws -> RcloneCapture {
+        try await wrapping.capture(arguments, context: context)
     }
 }

@@ -37,6 +37,20 @@ public enum NotificationText {
 public protocol Notifying: Sendable {
     /// Returns true only if the notification was handed to the system. False means "try again later".
     func post(_ problem: Problem, pair: PairID, setName: String, detail: String) async -> Bool
+    /// A drive finished its backup. Not a problem, so nothing is stored or retried.
+    func postSafeToEject(volumeName: String, volumeUUID: String) async -> Bool
+}
+
+public extension Notifying {
+    func postSafeToEject(volumeName: String, volumeUUID: String) async -> Bool { false }
+}
+
+/// How the agent's "safe to eject" notification names itself. The app answers the action, as the agent
+/// has exited by then and ejecting takes `NSWorkspace`.
+public enum DriveNotification {
+    public static let category = "mirror.drive-finished"
+    public static let ejectAction = "mirror.eject"
+    public static let volumeKey = "volumeUUID"
 }
 
 public struct ActiveProblem: Codable, Equatable, Sendable {
@@ -118,11 +132,20 @@ public struct ProblemCenter: Sendable {
     /// A notifier that never answers counts as not delivered, so it's retried. It can't be cancelled
     /// (a permission prompt, say), so it's left behind, and ends with the process.
     private func deliver(_ problem: Problem, pair: PairID, setName: String, detail: String) async -> Bool {
+        await bounded { await $0.post(problem, pair: pair, setName: setName, detail: detail) }
+    }
+
+    /// Best effort, under the same time limit, so it can never hold the agent open.
+    public func announceSafeToEject(volumeName: String, volumeUUID: String) async {
+        _ = await bounded { await $0.postSafeToEject(volumeName: volumeName, volumeUUID: volumeUUID) }
+    }
+
+    private func bounded(_ post: @escaping @Sendable (any Notifying) async -> Bool) async -> Bool {
         let (notifier, timeout) = (self.notifier, postTimeout)
         let answer = FirstAnswer()
         return await withCheckedContinuation { continuation in
             answer.attach(continuation)
-            Task { answer.give(await notifier.post(problem, pair: pair, setName: setName, detail: detail)) }
+            Task { answer.give(await post(notifier)) }
             Task {
                 try? await Task.sleep(for: timeout)
                 answer.give(false)

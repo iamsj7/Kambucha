@@ -30,6 +30,32 @@ private func has(_ a: [String], _ f: String, _ v: String) -> Bool {
         #expect(DestinationProfile.profile(for: Destination(name: "x", kind: .externalDrive)).encrypted == false)
     }
 
+    @Test func aDriveGetsOneTryPerRunAndOthersKeepTheirRetries() {
+        #expect(has(args(fs: "apfs"), "--retries", "1"))
+        #expect(has(args(fs: "exfat"), "--retries", "1"))
+        let u = URL(fileURLWithPath: "/tmp/x")
+        let iCloud = SyncRequest(source: u, destination: "/d", backupDir: "/b", filterFile: u, logFile: u, mode: .copyOnly,
+                                 profile: .profile(for: Destination(name: "i", kind: .iCloudFolder)),
+                                 context: RcloneContext(configPath: "/dev/null", environment: [:]))
+        #expect(has(RcloneCommand.arguments(iCloud), "--retries", "3"))
+    }
+
+    @Test func aDrivesRootComesOnlyThroughTheGuard() throws {
+        let e = try Env()
+        let vol = volume("AAAA", at: e.mount)
+        let set = BackupSet(name: "A", source: e.src)
+        let dest = Destination(name: "SSD", kind: .externalDrive, volumeUUID: "AAAA")
+        let g = PathGuard.forVolume(vol, iCloudDrive: e.icloud)
+        let root = try g.validateRun(set, destination: dest, marker: RootMarker(sets: [set.id: "A"]), sampleFileCount: 1,
+                                     state: SetState(), volume: vol)
+        #expect(root.url == g.backupRoot)
+        #expect(throws: GuardFailure.wrongDrive) { try g.driveRoot(dest, volume: nil) }
+        #expect(throws: GuardFailure.wrongDrive) { try g.driveRoot(dest, volume: volume("BBBB", at: e.mount)) }
+        var inside = vol; inside.looksInternal = true
+        #expect(throws: GuardFailure.internalDiskNotConfirmed) { try g.driveRoot(dest, volume: inside) }
+        #expect(try g.driveRoot(dest, volume: vol).url == g.backupRoot)
+    }
+
     @Test func matchesByUUIDNotName() {
         let d = Destination(name: "SSD", kind: .externalDrive, volumeUUID: "AAAA")
         #expect(ExternalVolume.find(d, in: [volume("BBBB", name: "SSD")]) == nil)

@@ -256,6 +256,68 @@ private final class Written: @unchecked Sendable {
         #expect(try ProgressStore(root: r.support).all(now: Date()).isEmpty)
     }
 
+    private struct OneVolume: VolumeLocating {
+        let volume: VolumeInfo
+        func mounted() -> [VolumeInfo] { [volume] }
+    }
+
+    /// The whole stack but the volume list, as a temp folder can't be a mounted drive.
+    private func driveRun(_ r: Rig, looksInternal: Bool, confirmed: Bool) async throws -> (URL, RunRecord) {
+        let mount = r.root.appendingPathComponent("Volumes/SSD")
+        try FileManager.default.createDirectory(at: mount, withIntermediateDirectories: true)
+        let volume = VolumeInfo(uuid: "SSD-UUID", name: "SSD", mountPoint: mount, fileSystem: "apfs", freeBytes: 1 << 50,
+                                totalBytes: 1 << 40, mountID: "m1", looksInternal: looksInternal)
+        let drive = Destination(name: "SSD", kind: .externalDrive, volumeUUID: volume.uuid, internalDiskConfirmed: confirmed)
+        var set = r.set
+        set.destinationIDs = [drive.id]
+        try r.store.saveSets([set]); try r.store.saveDestinations([drive])
+        let c = RunCoordinator(store: r.store, records: r.records, problems: r.problems, rclone: r.rclone, feed: RescanFeed(),
+                               verifier: Verifier(rclone: r.rclone, auditor: AllUploaded()),
+                               guard: PathGuard(iCloudDrive: r.backupRoot.deletingLastPathComponent(), backupRoot: r.backupRoot),
+                               detector: StackDetector(presets: []), filters: FilterBuilder(presets: []), clock: { Date() },
+                               sessions: { _ in NoSession() }, remote: RcloneRemoteFiles(binary: binary, helper: AnyHelper()),
+                               paths: RunPaths(support: r.support, logs: r.root.appendingPathComponent("logs"),
+                                               work: r.root.appendingPathComponent("work")),
+                               volumes: OneVolume(volume: volume))
+        await c.runAll(command: RunCommand(force: true))
+        return (mount.appendingPathComponent("Mac Backup"), try #require(try r.records.recent(limit: 1).first))
+    }
+
+    @Test func anUnconfirmedInternalLookingVolumeIsRefusedThroughTheRealEntryPoint() async throws {
+        let r = try Rig()
+        try r.write("p/f.txt")
+        let (root, record) = try await driveRun(r, looksInternal: true, confirmed: false)
+        #expect(record.status == .failed)
+        #expect(record.copied == 0)
+        #expect(!FileManager.default.fileExists(atPath: root.path))
+        #expect(try r.problems.active().map(\.problem) == [.destinationMissing])
+    }
+
+    @Test func aConfirmedVolumeBacksUpWithRealRclone() async throws {
+        let r = try Rig()
+        try r.write("p/f.txt", "on the drive")
+        try FileManager.default.createSymbolicLink(atPath: r.source.appendingPathComponent("p/link").path, withDestinationPath: "f.txt")
+        let (root, record) = try await driveRun(r, looksInternal: true, confirmed: true)
+        #expect(record.status == .success)
+        #expect(try String(contentsOf: root.appendingPathComponent("Sets/x/p/f.txt"), encoding: .utf8) == "on the drive")
+        #expect(try FileManager.default.destinationOfSymbolicLink(atPath: root.appendingPathComponent("Sets/x/p/link").path) == "f.txt")
+        #expect(try SymlinkManifest.read(set: "x", backupRoot: root).entries.map(\.path) == ["p/link"])
+    }
+
+    @Test func aRealDryRunCountsTheBytesItWouldCopy() async throws {
+        let r = try Rig()
+        try r.write("p/f.txt", "12345")
+        try r.write("p/g.txt", "1234567")
+        let log = r.root.appendingPathComponent("dry.log")
+        let filter = r.root.appendingPathComponent("filter.txt")
+        try Data().write(to: filter)
+        let result = try await r.rclone.sync(SyncRequest(
+            source: r.source, destination: r.mirror.path, backupDir: r.backupRoot.appendingPathComponent("Archive/x/t").path,
+            filterFile: filter, logFile: log, mode: .mirror(maxDelete: -1), profile: .profile(for: r.destination),
+            context: plain, dryRun: true))
+        #expect(result.summary.plannedBytes == 12)
+    }
+
     @Test func emptiedSourceLeavesTheMirrorAlone() async throws {
         let r = try Rig()
         for i in 0..<5 { try r.write("p/f\(i).txt") }

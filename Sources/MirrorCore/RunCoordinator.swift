@@ -9,6 +9,8 @@ public struct RunPaths: Sendable {
     var agentLock: URL { support.appendingPathComponent("locks/agent.lock") }
     /// The app reads this to see a run in progress. A crash leaves it behind, and the app checks the pid.
     var pidFile: URL { support.appendingPathComponent("agent.pid") }
+    /// When the last full wake-up began, which is how a mount wake-up is told from an interval one.
+    var lastPassFile: URL { support.appendingPathComponent("last-pass.json") }
     func pairLock(_ p: PairID) -> URL {
         support.appendingPathComponent("locks/\(p.set.uuidString)-\(p.destination.uuidString).lock")
     }
@@ -40,6 +42,8 @@ public final class RunCoordinator: Sendable {
     private let archives: @Sendable (String, RcloneContext, DestinationKind) -> ArchiveManager
     private let reviewer: ReviewScanner
     private let progress: RunProgress
+    private let volumes: any VolumeLocating
+    private let mountWakeWindow: TimeInterval
 
     public init(store: ConfigStore, records: RunRecordStore, problems: ProblemCenter, rclone: any RcloneRunning,
                 feed: any ChangeFeeding, verifier: Verifier, guard pathGuard: PathGuard, detector: StackDetector,
@@ -47,7 +51,9 @@ public final class RunCoordinator: Sendable {
                 sessions: @escaping @Sendable (Destination) -> any RunSession, remote: any RemoteFileAccessing,
                 paths: RunPaths, helperCheck: @escaping @Sendable () throws -> Void = {},
                 archives: (@Sendable (String, RcloneContext, DestinationKind) -> ArchiveManager)? = nil,
-                progress: RunProgress? = nil) {
+                progress: RunProgress? = nil, volumes: any VolumeLocating = SystemVolumes(),
+                mountWakeWindow: TimeInterval = 0) {
+        self.volumes = volumes; self.mountWakeWindow = mountWakeWindow
         self.archives = archives ?? { ArchiveManager(rclone: rclone, endpoint: $0, context: $1, kind: $2) }
         self.progress = progress ?? RunProgress(root: paths.support, clock: clock)
         reviewer = ReviewScanner(filters: filters)
@@ -71,6 +77,15 @@ public final class RunCoordinator: Sendable {
             return false
         }
         defer { lock.release() }
+        // Ahead of everything else: any volume mounting wakes the agent, and most have nothing to do with it.
+        var only: Set<PairID>?
+        if isMountWake(command) {
+            let due = dueDrivePairs()
+            if due.isEmpty { return true }
+            only = due
+        } else if command == RunCommand() {
+            noteFullPass()
+        }
         writePID()
         defer { try? FileManager.default.removeItem(at: paths.pidFile) }
 
@@ -81,9 +96,43 @@ public final class RunCoordinator: Sendable {
         }
         do { try RcloneSession.wipeLeftovers(in: paths.work) } catch { Self.log.error("wiping leftovers failed") }
         do { try await problems.retryPending() } catch { Self.log.error("retrying notifications failed") }
-        let ran = await runPairs(command)
+        let ran = await runPairs(command, only: only)
         prune()
         return ran
+    }
+
+    /// Scheduled, and too soon after the last full pass to be the interval.
+    private func isMountWake(_ command: RunCommand) -> Bool {
+        guard mountWakeWindow > 0, command == RunCommand(),
+              let data = try? Data(contentsOf: paths.lastPassFile),
+              let last = try? JSONDecoder().decode(Date.self, from: data) else { return false }
+        let gap = clock().timeIntervalSince(last)
+        return gap >= 0 && gap < mountWakeWindow
+    }
+
+    private func noteFullPass() {
+        guard mountWakeWindow > 0 else { return }
+        do {
+            try FileManager.default.createDirectory(at: paths.support, withIntermediateDirectories: true)
+            try JSONEncoder().encode(clock()).write(to: paths.lastPassFile, options: .atomic)
+        } catch { Self.log.error("could not note this pass") }
+    }
+
+    /// Drive pairs with a mounted drive that haven't had their pass on this connection.
+    private func dueDrivePairs() -> Set<PairID> {
+        guard let sets = try? store.loadSets(), let destinations = try? store.loadDestinations() else { return [] }
+        let mounted = volumes.mounted()
+        var due = Set<PairID>()
+        for set in sets {
+            for destination in destinations where set.destinationIDs.contains(destination.id) {
+                guard let volume = ExternalVolume.find(destination, in: mounted) else { continue }
+                let pair = PairID(set: set.id, destination: destination.id)
+                let state = (try? store.state(for: pair)) ?? SetState()
+                if ExternalVolume.needsFullPass(lastSeenMountID: state.lastSeenMountID, volume: volume,
+                                                lastFullPass: state.lastFullPass, now: clock()) { due.insert(pair) }
+            }
+        }
+        return due
     }
 
     private func report(_ message: String) async {
@@ -108,7 +157,7 @@ public final class RunCoordinator: Sendable {
         }
     }
 
-    private func runPairs(_ command: RunCommand) async -> Bool {
+    private func runPairs(_ command: RunCommand, only: Set<PairID>?) async -> Bool {
         let sets: [BackupSet], destinations: [Destination]
         do {
             sets = try store.loadSets()
@@ -124,21 +173,39 @@ public final class RunCoordinator: Sendable {
             for id in set.destinationIDs {
                 guard let destination = destinations.first(where: { $0.id == id }) else { continue }
                 let pair = PairID(set: set.id, destination: id)
+                if let only, !only.contains(pair) { continue }
                 // Ordering only. An unreadable state fails properly in `run`.
                 pairs.append((pair, destination.kind, (try? store.state(for: pair)) ?? SetState()))
             }
         }
         var expired = Set<UUID>()
+        var drives = DriveOutcomes()
         for pair in RunPlanner.order(pairs) {
             if Task.isCancelled { break }
             guard let destination = destinations.first(where: { $0.id == pair.destination }) else { continue }
-            switch await run(pair, destination: destination, command: command, expired: &expired) {
+            switch await run(pair, destination: destination, command: command, expired: &expired, drives: &drives) {
             case .carryOn: continue
             case .stop: return true
             case .agentFailed: return false
             }
         }
+        for volume in drives.finished where !drives.troubled.contains(volume.uuid) && isThere(volume) {
+            await problems.announceSafeToEject(volumeName: volume.name, volumeUUID: volume.uuid)
+        }
         return true
+    }
+
+    /// What this wake-up did on each drive, as a drive is safe to eject only once all its pairs are through.
+    private struct DriveOutcomes {
+        var finished: [VolumeInfo] = []
+        var troubled = Set<String>()
+        mutating func note(_ volume: VolumeInfo, _ status: RunRecord.Status, fullPass: Bool) {
+            if status == .success, fullPass {
+                if !finished.contains(where: { $0.uuid == volume.uuid }) { finished.append(volume) }
+            } else if status != .skipped, status != .success {
+                troubled.insert(volume.uuid)
+            }
+        }
     }
 
     // MARK: One pair
@@ -152,19 +219,24 @@ public final class RunCoordinator: Sendable {
         var verification = ""
         var pending = 0, refused = 0
         var archivesPruned = 0
+        /// This run covered the whole set on a drive, which is what the owner waits for before ejecting.
+        var fullDrivePass = false
         var errors: [String] = []
         var status = RunRecord.Status.failed
         /// Raised once the run is over, so a slow notification never holds a session open.
         var notices: [(problem: Problem, pair: PairID, detail: String)] = []
     }
 
-    private struct Job {
+    private struct Job: Sendable {
         var pair: PairID
         var set: BackupSet
         var destination: Destination
         var approved: Int?
         var profile: DestinationProfile
         var isLocal: Bool
+        /// The live drive, for an external destination. Everything local goes through `pathGuard`.
+        var volume: VolumeInfo?
+        var pathGuard: PathGuard
     }
 
     /// What stops a run after it starts. Rclone's own text stays out of anything but the record.
@@ -174,6 +246,8 @@ public final class RunCoordinator: Sendable {
         case changedDuringRun
         case stateNotSaved
         case iCloudSignedOut
+        case driveGone
+        case driveFull(needed: Int64, free: Int64)
     }
 
     /// How one pair's run leaves the rest. `stop` is a cancelled run. `agentFailed` also fails the agent.
@@ -189,7 +263,8 @@ public final class RunCoordinator: Sendable {
         var logDir: URL
     }
 
-    private func run(_ pair: PairID, destination: Destination, command: RunCommand, expired: inout Set<UUID>) async -> PairEnd {
+    private func run(_ pair: PairID, destination: Destination, command: RunCommand, expired: inout Set<UUID>,
+                     drives: inout DriveOutcomes) async -> PairEnd {
         // Read here, not at the start: an earlier pair may have applied presets to this set.
         let found: BackupSet?
         do { found = try store.loadSets().first(where: { $0.id == pair.set }) } catch {
@@ -229,11 +304,18 @@ public final class RunCoordinator: Sendable {
             record()
             return .carryOn
         }
-        // Not wired in yet (Task 21's list). Treating it as local would put its files in the iCloud root.
+        // A locked drive doesn't mount, so this covers it too. Only ever from the live list, never a stored path.
+        var volume: VolumeInfo?
         if destination.kind == .externalDrive {
-            tally.status = .skipped; tally.scope = "external drive"
-            record()
-            return .carryOn
+            volume = ExternalVolume.find(destination, in: volumes.mounted())
+            guard volume != nil else {
+                tally.status = .skipped; tally.scope = Self.notConnected
+                record()
+                if let last = loaded.lastFinished, clock().timeIntervalSince(last) > ExternalVolume.overdueAfter {
+                    await raise(.driveOverdue, pair, set, detail: destination.name)
+                }
+                return .carryOn
+            }
         }
         if destination.encrypted, !destination.recoveryKitConfirmed, !Self.isLocal(destination.kind) {
             tally.status = .skipped; tally.scope = "waiting for Recovery Kit"
@@ -243,7 +325,8 @@ public final class RunCoordinator: Sendable {
 
         let job = Job(pair: pair, set: set, destination: destination,
                       approved: loaded.heldDeletions > 0 ? command.approvedDeletions : nil,
-                      profile: .profile(for: destination), isLocal: Self.isLocal(destination.kind))
+                      profile: .profile(for: destination, fileSystem: volume?.fileSystem), isLocal: Self.isLocal(destination.kind),
+                      volume: volume, pathGuard: volume.map { .forVolume($0, iCloudDrive: pathGuard.iCloudDrive) } ?? pathGuard)
         var state = loaded
         var end = PairEnd.carryOn
         if expired.contains(destination.id) {
@@ -268,15 +351,32 @@ public final class RunCoordinator: Sendable {
         for notice in tally.notices { keep(notice.problem, notice.pair, set, detail: notice.detail) }
         record()
         for notice in tally.notices { await raise(notice.problem, notice.pair, set, detail: notice.detail) }
+        if let volume { drives.note(volume, tally.status, fullPass: tally.fullDrivePass) }
         return end
     }
 
-    /// Exhaustive, so a new kind has to decide. An external drive will be local too.
+    /// Exhaustive, so a new kind has to decide.
     private static func isLocal(_ kind: DestinationKind) -> Bool {
         switch kind {
-        case .iCloudFolder: true
-        case .googleDrive, .oneDrive, .externalDrive: false
+        case .iCloudFolder, .externalDrive: true
+        case .googleDrive, .oneDrive: false
         }
+    }
+
+    private static let notConnected = "not connected"
+    private static let housekeeping = DispatchQueue(label: "mirror.housekeeping", qos: .utility)
+
+    /// Still mounted at the path this run holds. Otherwise rclone would `mkdir` the vanished mount path.
+    private func isThere(_ volume: VolumeInfo) -> Bool {
+        volumes.mounted().contains {
+            $0.uuid.caseInsensitiveCompare(volume.uuid) == .orderedSame
+                && $0.mountPoint.standardizedFileURL == volume.mountPoint.standardizedFileURL
+        }
+    }
+
+    /// Before anything that could write to a drive.
+    private func confirmDrive(_ job: Job) throws {
+        if let volume = job.volume, !isThere(volume) { throw Stop.driveGone }
     }
 
     private func process(_ job: Job, command: RunCommand, state: inout SetState, tally: inout Tally) async throws {
@@ -287,15 +387,15 @@ public final class RunCoordinator: Sendable {
         var guarded = state
         if job.approved != nil { guarded.lastFileCount = nil }   // the owner has seen this hold
         let sample = sampleCount(set.source)
-        try pathGuard.validateRun(set, destination: job.destination, marker: RootMarker(sets: [set.id: set.name]),
-                                  sampleFileCount: sample, state: guarded)
+        let root = try job.pathGuard.validateRun(set, destination: job.destination, marker: RootMarker(sets: [set.id: set.name]),
+                                                 sampleFileCount: sample, state: guarded, volume: job.volume)
         clear([.permissionLost], pair)
         if state.stoppedBy == .permissionLost { state.stoppedBy = nil }
 
         let localContext = RcloneContext(configPath: "/dev/null", environment: [:])
         if job.isLocal {
             guard !job.destination.encrypted else { throw RcloneSessionError.encryptionNotSupported }
-            try await confirmClaim(job, endpoint: pathGuard.backupRoot.path, context: localContext, files: LocalFiles(), state: &state)
+            try await confirmClaim(job, endpoint: root.path, context: localContext, files: LocalFiles(), state: &state)
         }
 
         refreshFreed(job, set: set, state: &state)
@@ -314,7 +414,10 @@ public final class RunCoordinator: Sendable {
             newItems = secretsChanged(batch, set: set, matcher: matcher)
         }
         settleReview(newItems, set: set, state: &state)
-        let plan = RunPlanner.plan(state: state, scope: scope, profile: job.profile, now: clock())
+        let fullPass = job.volume.map {
+            ExternalVolume.needsFullPass(lastSeenMountID: state.lastSeenMountID, volume: $0, lastFullPass: state.lastFullPass, now: clock())
+        }
+        let plan = RunPlanner.plan(state: state, scope: scope, profile: job.profile, now: clock(), fullPass: fullPass)
         if plan.isDailyPass, tally.trigger == .schedule { tally.trigger = .daily }
 
         if plan.scope == .nothing {
@@ -326,7 +429,7 @@ public final class RunCoordinator: Sendable {
             // Nothing is outstanding, or the event ID would have replayed it.
             state.consecutiveFailures = 0
             state.syncIncomplete = false
-            clear([.repeatedFailures], pair)
+            clear([.repeatedFailures, .driveFull], pair)
             tally.status = .skipped; tally.scope = "none"
             return
         }
@@ -344,7 +447,7 @@ public final class RunCoordinator: Sendable {
         try persist(state, pair)
 
         var session: (any RunSession)?
-        var endpoint = pathGuard.backupRoot.path, context = localContext
+        var endpoint = root.path, context = localContext
         if !job.isLocal {
             let opened = sessions(job.destination)
             (endpoint, context) = try opened.open()
@@ -405,12 +508,16 @@ public final class RunCoordinator: Sendable {
         // Mass-deletion check. -1 is rclone's "no limit": the dry run must see them all to count them.
         var deletions: [String] = []
         var planned: [String] = []
+        var bytesToCopy: Int64 = 0
         for slice in slices {
+            try confirmDrive(job)
             let result = try await rclone.sync(request(slice, mode: .mirror(maxDelete: -1), dryRun: true))
             guard result.outcome == .success else { throw Stop.rclone(result.outcome, result.summary.errors) }
+            bytesToCopy += result.summary.plannedBytes
             deletions += result.summary.deleted.map { Self.inSet($0, slice) }
             planned += Self.touched(by: result.summary, planned: true).map { Self.inSet($0, slice) }
         }
+        try await checkRoom(job, set: set, bytes: bytesToCopy, endpoint: endpoint, context: context)
         let countable = DeletionGate.countable(deletions)
         var decision = DeletionGate.decide(deletions: deletions, totalFiles: state.lastFileCount ?? 0,
                                            policy: set.deletion, approvedDeletions: job.approved)
@@ -442,6 +549,7 @@ public final class RunCoordinator: Sendable {
         progress.enter(.transferring, pair: pair)
         var perSlice: [LogSummary] = []
         for slice in slices {
+            try confirmDrive(job)
             let result = try await rclone.sync(request(slice, mode: mode, dryRun: false))
             Self.add(result.summary, to: &tally.summary)
             perSlice.append(result.summary)
@@ -479,12 +587,13 @@ public final class RunCoordinator: Sendable {
                 Self.existsInSource($0, slice) && !matcher.isExcluded(Self.inSet($0, slice))
             }
             let names = Array(Set(Self.touched(by: summary) + owed)).sorted()
+            try confirmDrive(job)
             let result = try await verifier.quick(source: slice.source, destination: slice.destination, profile: job.profile,
                                                   context: context, filter: slice.filter, copied: names, oneWay: holding,
                                                   logDir: slice.logDir, auditWholeMirror: wholePass)
             Self.merge(result, of: slice, into: &verified)
             guard result.checksClean else { continue }   // a mismatch stays owed, or the next run would call it clean
-            if prove(slice, result, mirror: mirrorRoot(set), state: &state) { listOverflowed = true }
+            if prove(slice, result, mirror: mirrorRoot(job), state: &state) { listOverflowed = true }
             try persist(state, pair)
         }
         tally.filesChecked = verified.matchingFiles
@@ -492,6 +601,7 @@ public final class RunCoordinator: Sendable {
         if let slice = slices.first, scope == .wholeSet, flaggedBefore || (plan.isDeepDue && plan.isDailyPass && !holding) {
             // Oldest first, so a long list still gets through them. They're sampled, not downloaded wholesale.
             let due = state.freedSince.sorted { ($0.value, $0.key) < ($1.value, $1.key) }.map(\.key).prefix(Self.freedSample)
+            try confirmDrive(job)
             let deep = try await verifier.deep(source: slice.source, destination: slice.destination, profile: job.profile,
                                                context: context, filter: slice.filter,
                                                sampleFreed: Self.freedSample - due.count, logDir: slice.logDir,
@@ -500,7 +610,7 @@ public final class RunCoordinator: Sendable {
             verified.checksClean = verified.checksClean && deep.checksClean
             verified.differingPaths += deep.differingPaths
             if deep.checksClean {
-                track(deep.audit, mirror: mirrorRoot(set), state: &state)
+                track(deep.audit, mirror: mirrorRoot(job), state: &state)
                 state.verifyOwed.removeAll(where: due.contains)
                 for path in due { state.freedSince[path] = nil }
             }
@@ -519,6 +629,7 @@ public final class RunCoordinator: Sendable {
         try await reconcileUploads(job, set: set, state: &state, tally: &tally)
         finish(job, plan: plan, scope: scope, batch: batch, verified: verified, holding: holding, deepRan: deepRan, state: &state)
         tally.status = holding ? .held : (verified.backedUp && state.isBackedUp ? .success : .partial)
+        tally.fullDrivePass = scope == .wholeSet && (plan.isDailyPass || command.force)
         try await tidy(job, set: set, scope: scope, fullPass: plan.isDailyPass, previousPass: previousPass, holding: holding,
                        matcher: matcher, endpoint: endpoint, context: context, state: &state, tally: &tally)
     }
@@ -530,20 +641,28 @@ public final class RunCoordinator: Sendable {
     private func tidy(_ job: Job, set: BackupSet, scope: RunScope, fullPass: Bool, previousPass: Date?, holding: Bool,
                       matcher: FilterMatcher, endpoint: String, context: RcloneContext,
                       state: inout SetState, tally: inout Tally) async throws {
-        if job.isLocal {
-            do { try writeManifest(set: set, scope: scope, matcher: matcher) } catch {
+        if let volume = job.volume, !isThere(volume) { return }   // the backup is done, and the rest can wait
+        if job.isLocal, !job.profile.linksAsFiles {
+            do { try await offPool { [self] in try writeManifest(job, set: set, scope: scope, matcher: matcher) } } catch {
                 Self.log.error("could not save the symlink list")
                 tally.errors.append("The symlink list could not be saved")
             }
         }
-        if fullPass { reviewRepos(set: set, since: previousPass, matcher: matcher, state: &state, tally: &tally) }
+        if fullPass {
+            let (found, failed) = try await offPool { [self] in trackedItems(set: set, since: previousPass, matcher: matcher) }
+            if failed {
+                Self.log.error("git could not list a repo")
+                tally.errors.append("A repository could not be checked")
+            }
+            settleReview(found, set: set, state: &state)
+        }
         guard !holding else { return }   // the archive may be what undoes whatever is being held
         let archive = archives(endpoint, context, job.destination.kind)
         do {
             let pruned = try await archive.prune(set: set, now: clock())
             tally.archivesPruned = pruned
             if pruned > 0 { Self.log.info("pruned \(pruned) archive folders") }
-            let evicted = try archive.evictUploaded(set: set)
+            let evicted = try await offPool { try archive.evictUploaded(set: set) }
             if evicted > 0 { Self.log.info("evicted \(evicted) archive files") }
         } catch ArchiveError.authExpired {
             throw ArchiveError.authExpired
@@ -558,8 +677,8 @@ public final class RunCoordinator: Sendable {
     }
 
     /// A scoped run walks only its folders, and an unchanged list isn't written, as iCloud would upload it.
-    private func writeManifest(set: BackupSet, scope: RunScope, matcher: FilterMatcher) throws {
-        let root = pathGuard.backupRoot
+    private func writeManifest(_ job: Job, set: BackupSet, scope: RunScope, matcher: FilterMatcher) throws {
+        let root = job.pathGuard.backupRoot
         let skip: (String) -> Bool = { matcher.isExcluded($0 + "/") }
         let old = try? SymlinkManifest.read(set: set.name, backupRoot: root)
         var fresh: SymlinkManifest
@@ -571,8 +690,25 @@ public final class RunCoordinator: Sendable {
         fresh.entries.removeAll { matcher.isExcluded($0.path) }
         guard fresh != old else { return }
         // The manifest's own check can't see a Manifests folder that is itself a link.
-        try pathGuard.assertInsideRoot(try SymlinkManifest.location(set: set.name, backupRoot: root))
+        try job.pathGuard.assertInsideRoot(try SymlinkManifest.location(set: set.name, backupRoot: root))
         try fresh.write(backupRoot: root)
+    }
+
+    /// Spec section 8a. Moves into the archive stay on the volume, so only what's copied takes room. An
+    /// archive past its keep period may be what filled the drive, and pruning waits for a finished run, so
+    /// it goes first or the drive would never recover.
+    private func checkRoom(_ job: Job, set: BackupSet, bytes: Int64, endpoint: String, context: RcloneContext) async throws {
+        guard var volume = job.volume else { return }
+        if !ExternalVolume.fits(bytesToCopy: bytes, archiveBytes: 0, volume: volume) {
+            do { try await archives(endpoint, context, job.destination.kind).prune(set: set, now: clock()) } catch {
+                Self.log.error("archive pruning failed")
+            }
+            volume = ExternalVolume.find(job.destination, in: volumes.mounted()) ?? volume
+            guard ExternalVolume.fits(bytesToCopy: bytes, archiveBytes: 0, volume: volume) else {
+                throw Stop.driveFull(needed: bytes + ExternalVolume.reserve(for: volume), free: volume.freeBytes)
+            }
+        }
+        clear([.driveFull], job.pair)
     }
 
     /// Spec section 9: secrets FSEvents saw inside excluded folders, spotted by name at no cost.
@@ -585,7 +721,7 @@ public final class RunCoordinator: Sendable {
     }
 
     /// On a full pass, `git ls-files` for repos whose index moved since the last one.
-    private func reviewRepos(set: BackupSet, since: Date?, matcher: FilterMatcher, state: inout SetState, tally: inout Tally) {
+    private func trackedItems(set: BackupSet, since: Date?, matcher: FilterMatcher) -> (items: [ReviewItem], failed: Bool) {
         var found: [ReviewItem] = []
         var failed = false
         let base = set.source.standardizedFileURL.path + "/"
@@ -598,11 +734,14 @@ public final class RunCoordinator: Sendable {
             do { found += try reviewer.trackedInExcluded(repo: repo, prefix: prefix, isExcluded: matcher.isExcluded) }
             catch { failed = true }
         }
-        if failed {
-            Self.log.error("git could not list a repo")
-            tally.errors.append("A repository could not be checked")
+        return (found, failed)
+    }
+
+    /// Walks and child processes block, so like the upload audit they stay off the cooperative pool.
+    private func offPool<T: Sendable>(_ work: @escaping @Sendable () throws -> T) async throws -> T {
+        try await withCheckedThrowingContinuation { continuation in
+            Self.housekeeping.async { continuation.resume(with: Result { try work() }) }
         }
-        settleReview(found, set: set, state: &state)
     }
 
     /// Adds what's new, once, and lets go of anything the owner has since made a rule for.
@@ -651,8 +790,8 @@ public final class RunCoordinator: Sendable {
 
     /// One flag read per evicted file, no walk. One that came back is hashed by the next run.
     private func refreshFreed(_ job: Job, set: BackupSet, state: inout SetState) {
-        guard job.isLocal else { return }
-        let mirror = mirrorRoot(set)
+        guard job.destination.kind == .iCloudFolder else { return }
+        let mirror = mirrorRoot(job)
         for path in state.freedSince.keys where !verifier.isFreed(mirror.appendingPathComponent(path)) {
             state.freedSince[path] = nil
         }
@@ -681,8 +820,8 @@ public final class RunCoordinator: Sendable {
         for path in audit.refused.map(relative) where state.refusedSince[path] == nil { state.refusedSince[path] = now }
     }
 
-    private func mirrorRoot(_ set: BackupSet) -> URL {
-        pathGuard.backupRoot.appendingPathComponent(MirrorPaths.mirrorPath(set), isDirectory: true)
+    private func mirrorRoot(_ job: Job) -> URL {
+        job.pathGuard.backupRoot.appendingPathComponent(MirrorPaths.mirrorPath(job.set), isDirectory: true)
     }
 
     /// The only place the event ID moves after work. Sync and verification have both passed.
@@ -692,6 +831,7 @@ public final class RunCoordinator: Sendable {
         state.lastEventID = batch.latestEventID
         state.lastFinished = now
         state.consecutiveFailures = 0
+        if scope == .wholeSet, let volume = job.volume { state.lastSeenMountID = volume.mountID }
         state.wholeSetOwed = false
         state.syncIncomplete = false
         if plan.isDailyPass { state.lastFullPass = now }
@@ -700,7 +840,7 @@ public final class RunCoordinator: Sendable {
             if state.lastDeepCheck == nil { state.lastDeepCheck = now }
         }
         if deepRan { state.lastDeepCheck = now }
-        var solved: [Problem] = [.repeatedFailures, .signInExpired]
+        var solved: [Problem] = [.repeatedFailures, .signInExpired, .driveOverdue]
         // An evicted file passed through unhashed, so a mismatch reported on it still stands.
         if state.freedSince.isEmpty { solved.append(.verificationFailed) }
         if !holding {
@@ -734,8 +874,8 @@ public final class RunCoordinator: Sendable {
                               filter: filter, logDir: logDir)
             if job.isLocal {
                 // Resolves links, so a mirror folder that became a link can't lead rclone out of the root.
-                try pathGuard.assertInsideRoot(URL(fileURLWithPath: slice.destination))
-                try pathGuard.assertInsideRoot(URL(fileURLWithPath: slice.backupDir))
+                try job.pathGuard.assertInsideRoot(URL(fileURLWithPath: slice.destination))
+                try job.pathGuard.assertInsideRoot(URL(fileURLWithPath: slice.backupDir))
             }
             out.append(slice)
         }
@@ -777,7 +917,7 @@ public final class RunCoordinator: Sendable {
                 throw GuardFailure.destinationUnclaimed
             }
             let others = try store.loadSets().filter { $0.id != set.id }
-            try pathGuard.validateNewSet(set, existing: others)
+            try job.pathGuard.validateNewSet(set, existing: others)
             if marker == nil, let entries = try await files.list(endpoint, context: context),
                entries.contains(where: { !Self.noise.contains($0) }) {
                 throw GuardFailure.destinationUnclaimed
@@ -787,7 +927,7 @@ public final class RunCoordinator: Sendable {
             if taken.contains(where: { $0.lowercased() == name || $0.lowercased() == name + "/" }) {
                 throw GuardFailure.destinationUnclaimed
             }
-            try await requireICloud(job, at: pathGuard.backupRoot.deletingLastPathComponent())
+            try await requireICloud(job, at: job.pathGuard.backupRoot.deletingLastPathComponent())
             var claimed = marker ?? RootMarker()
             claimed.sets[set.id] = set.name
             let encoder = JSONEncoder()
@@ -795,8 +935,8 @@ public final class RunCoordinator: Sendable {
             try await files.write(try encoder.encode(claimed), to: path, context: context)
             marker = claimed
         }
-        try pathGuard.validateRun(set, destination: job.destination, marker: marker,
-                                  sampleFileCount: 1, state: SetState())
+        try job.pathGuard.validateRun(set, destination: job.destination, marker: marker,
+                                      sampleFileCount: 1, state: SetState(), volume: job.volume)
         clear([.destinationMissing, .signInExpired, .iCloudUnavailable], job.pair)
         state.stoppedBy = nil
     }
@@ -839,7 +979,7 @@ public final class RunCoordinator: Sendable {
     /// Takes a fresh look at files pending or refused, then applies the 24-hour rules. A gone file
     /// drops out, so short-lived temp files never reach an alert.
     private func reconcileUploads(_ job: Job, set: BackupSet, state: inout SetState, tally: inout Tally) async throws {
-        guard job.isLocal else { return }
+        guard job.destination.kind == .iCloudFolder else { return }
         guard !state.uploadingPaths.isEmpty || !state.refusedSince.isEmpty else {
             clear([.uploadStalled, .fileRefused], job.pair)
             state.uploadTotal = 0
@@ -847,7 +987,7 @@ public final class RunCoordinator: Sendable {
             return
         }
         let now = clock()
-        let mirror = mirrorRoot(set)
+        let mirror = mirrorRoot(job)
         let prefix = mirror.path + "/"
         func relative(_ path: String) -> String { path.hasPrefix(prefix) ? String(path.dropFirst(prefix.count)) : path }
 
@@ -919,6 +1059,13 @@ public final class RunCoordinator: Sendable {
         func iCloudStopped() {
             stop(.iCloudUnavailable, "iCloud Drive is unavailable", detail: "Backups are paused until it's back. Nothing was deleted.")
         }
+        // Whatever rclone made of it, a drive that left mid-run is no failure. The next connection resumes.
+        if let volume = job.volume, !(error is CancellationError), !(error is AgentFailure), !isThere(volume) {
+            state.syncIncomplete = true
+            tally.status = .partial
+            tally.errors = ["The drive was disconnected"]
+            return .carryOn
+        }
         switch error {
         case is CancellationError:
             tally.errors = ["Stopped before finishing"]
@@ -938,6 +1085,12 @@ public final class RunCoordinator: Sendable {
                 tally.notices.append((.deletionsHeld, pair, "the source folder is empty, so nothing was changed"))
             case .destinationUnclaimed:
                 stop(.destinationMissing, "Destination isn't claimed by this set", detail: job.destination.name)
+            case .wrongDrive:
+                // Not the drive this destination names, which is the same as it not being here.
+                tally.status = .skipped; tally.scope = Self.notConnected
+            case .internalDiskNotConfirmed:
+                stop(.destinationMissing, "This drive looks like an internal disk and hasn't been confirmed",
+                     detail: "\(job.destination.name) looks like an internal disk and hasn't been confirmed")
             default:
                 fail("\(failure)", job, state: &state, tally: &tally)
             }
@@ -969,6 +1122,14 @@ public final class RunCoordinator: Sendable {
         case Stop.iCloudSignedOut:
             stop(.iCloudUnavailable, "iCloud Drive may be signed out",
                  detail: "iCloud Drive may be signed out, so backups are paused. Nothing was deleted.")
+        case Stop.driveGone:
+            state.syncIncomplete = true
+            tally.status = .partial
+            tally.errors = ["The drive was disconnected"]
+        case Stop.driveFull(let needed, let free):
+            let (want, have) = (Self.size(needed), Self.size(free))
+            stop(.driveFull, "The drive doesn't have room for this backup",
+                 detail: "\(job.destination.name) needs \(want) free and has \(have)")
         case Stop.stateNotSaved:
             fail("State could not be saved", job, state: &state, tally: &tally)
         case VerifyError.mirrorUnreadable:
@@ -1047,6 +1208,8 @@ public final class RunCoordinator: Sendable {
     private func sampleCount(_ source: URL) -> Int {
         ((try? FileManager.default.contentsOfDirectory(atPath: source.path)) ?? []).filter { !Self.noise.contains($0) }.count
     }
+
+    private static func size(_ bytes: Int64) -> String { ByteCountFormatter.string(fromByteCount: bytes, countStyle: .file) }
 
     private static func isPermissionDenied(_ url: URL) -> Bool {
         var st = stat()

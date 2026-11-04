@@ -20,10 +20,14 @@ public struct DestinationProfile: Equatable, Sendable {
     /// True on exFAT. macOS stores extended attributes there as `._*` AppleDouble files, which sync would
     /// otherwise see as extras and delete, tripping `--max-delete`. Filtered on both sides, ahead of the set's filter.
     public var excludeAppleDouble: Bool
+    /// rclone's own retries. A drive gets one try: a retry after an unplug would `mkdir` the vanished mount
+    /// path, and only the coordinator can confirm the volume first.
+    public var retries: Int
 
     public init(kind: DestinationKind, encrypted: Bool, modifyWindow: String, extraFlags: [String],
                 maxDuration: String?, fullPassInterval: TimeInterval, linksAsFiles: Bool = false,
-                trackRenames: Bool = true, excludeAppleDouble: Bool = false) {
+                trackRenames: Bool = true, excludeAppleDouble: Bool = false, retries: Int = 3) {
+        self.retries = retries
         self.trackRenames = trackRenames; self.excludeAppleDouble = excludeAppleDouble
         self.kind = kind; self.encrypted = encrypted; self.modifyWindow = modifyWindow
         self.extraFlags = extraFlags; self.maxDuration = maxDuration; self.fullPassInterval = fullPassInterval
@@ -53,7 +57,7 @@ public struct DestinationProfile: Equatable, Sendable {
             return DestinationProfile(kind: .externalDrive, encrypted: false, modifyWindow: symlinks ? "1ms" : "2s",
                                       extraFlags: [], maxDuration: nil, fullPassInterval: 7 * day,
                                       linksAsFiles: !symlinks, trackRenames: symlinks,
-                                      excludeAppleDouble: !symlinks)
+                                      excludeAppleDouble: !symlinks, retries: 1)
         }
     }
 }
@@ -139,7 +143,7 @@ public enum RcloneCommand {
         if r.profile.excludeAppleDouble { a += ["--filter", "- ._*"] }
         a += ["--backup-dir", r.backupDir, "--filter-from", r.filterFile.path]
         a += ["--checkers", r.fullSpeed ? "8" : "2", "--transfers", r.fullSpeed ? "4" : "2"]
-        a += ["--retries", "3", "--retries-sleep", "30s", "--low-level-retries", "10"]
+        a += ["--retries", String(r.profile.retries), "--retries-sleep", "30s", "--low-level-retries", "10"]
         a += r.profile.extraFlags
         if let d = r.profile.maxDuration { a += ["--max-duration", d, "--cutoff-mode", "soft"] }
         a += common(logFile: r.logFile, context: r.context)
