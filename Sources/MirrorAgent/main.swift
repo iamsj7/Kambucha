@@ -5,6 +5,8 @@ let args = CommandLine.arguments
 if args.count == 2, AgentRequest.subcommands.contains(args[1]) {
     exit(await SecretCommands.run(args[1]))
 }
+// Every launchd run starts by recording whether this process can read the folders it backs up.
+recordAccess()
 #if MIRROR_PROBES
 if args.count > 1, args[1] == "--probe" {
     await Probe.run()

@@ -19,8 +19,9 @@ struct AddSetFlow: View {
 
     private var candidate: BackupSet? {
         guard let folder else { return nil }
-        let s = BackupSet(name: name.trimmingCharacters(in: .whitespacesAndNewlines), source: folder, presets: presets,
+        var s = BackupSet(name: name.trimmingCharacters(in: .whitespacesAndNewlines), source: folder, presets: presets,
                           destinationIDs: model.destinations.filter { chosenDestinations.contains($0.id) }.map(\.id))
+        s.archiveDays = (try? SettingsStore(root: model.support).load().defaultRetentionDays) ?? AppSettings().defaultRetentionDays
         return s
     }
 

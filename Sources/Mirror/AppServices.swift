@@ -41,6 +41,13 @@ private struct UnavailablePreview: PreviewProviding {
     }
 }
 
+private struct UnavailableArchive: ArchiveProviding {
+    func list(set: BackupSet, destination: Destination) async throws -> [ArchiveEntry] { throw ServiceUnavailable(what: "The archive") }
+    func restore(entry: ArchiveEntry, set: BackupSet, destination: Destination, to: URL) async throws {
+        throw ServiceUnavailable(what: "Restore")
+    }
+}
+
 private struct UnavailableDryRun: DeletionDryRunProviding {
     func heldDeletions(set: BackupSet) async throws -> [String] { throw ServiceUnavailable(what: "The deletion list") }
 }
@@ -53,9 +60,11 @@ struct AppServices: Sendable {
     var inspector: (any MirroredExcludeInspecting)?
     var volumes: any VolumeListing
     var agent: AgentClient
+    var archive: any ArchiveProviding
 
     static var live: AppServices {
         AppServices(preview: UnavailablePreview(), dryRun: UnavailableDryRun(), inspector: nil,
-                    volumes: SystemVolumeList(), agent: .bundled(in: Bundle.main.bundleURL))
+                    volumes: SystemVolumeList(), agent: .bundled(in: Bundle.main.bundleURL),
+                    archive: UnavailableArchive())
     }
 }

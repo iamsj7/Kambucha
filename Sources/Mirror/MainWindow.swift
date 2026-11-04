@@ -19,8 +19,37 @@ struct MainWindow: View {
     @State private var addingDestination = false
     @State private var confirmingRemoval = false
     @State private var launchError: String?
+    @State private var archive: ArchiveModel
+    @State private var activity: ActivityModel
+    @State private var onboarding: OnboardingModel
+
+    init(model: AppModel) {
+        self.model = model
+        _archive = State(initialValue: ArchiveModel(provider: model.services.archive, store: ConfigStore(root: model.support)))
+        _activity = State(initialValue: ActivityModel(support: model.support))
+        _onboarding = State(initialValue: OnboardingModel(store: ConfigStore(root: model.support),
+                                                          settings: SettingsStore(root: model.support)))
+    }
 
     var body: some View {
+        // Onboarding stays until every step is done. Nothing is shown until the first read of those
+        // steps finishes, so a finished setup doesn't flash it.
+        Group {
+            if onboarding.hasRefreshed && !onboarding.isComplete {
+                OnboardingView(model: onboarding)
+            } else {
+                split
+            }
+        }
+        .task {
+            while !Task.isCancelled {
+                await onboarding.refresh()
+                try? await Task.sleep(for: .seconds(onboarding.isComplete ? 30 : 2))
+            }
+        }
+    }
+
+    private var split: some View {
         NavigationSplitView {
             sidebar
                 .navigationSplitViewColumnWidth(min: 200, ideal: 230, max: 320)
@@ -112,13 +141,9 @@ struct MainWindow: View {
             if let d = model.destination(id) { DestinationDetailView(model: model, destination: d) }
             else { ContentUnavailableView("Destination Not Found", systemImage: "questionmark.folder") }
         case .archive:
-            // Task 18 replaces this with ArchiveView.
-            RecoveryPlaceholder(title: "Archive", symbol: "archivebox",
-                                text: "Files moved out of your backups are kept here, so they can be restored.")
+            ArchiveView(model: archive, agent: model.services.agent)
         case .activity:
-            // Task 18 replaces this with ActivityView.
-            RecoveryPlaceholder(title: "Activity", symbol: "list.bullet.rectangle",
-                                text: "Recent backups and what each one did will appear here.")
+            ActivityView(model: activity)
         }
     }
 

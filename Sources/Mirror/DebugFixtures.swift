@@ -130,7 +130,8 @@ enum DebugFixtures {
                           ReviewItem(id: "r2", path: "build/notes.tmp", kind: .refusedByICloud)]
         try? store.save(st, for: docsPair)
         let services = AppServices(preview: FakePreview(), dryRun: FakeDryRun(), inspector: nil,
-                                   volumes: FakeVolumes(), agent: .bundled(in: Bundle.main.bundleURL))
+                                   volumes: FakeVolumes(), agent: .bundled(in: Bundle.main.bundleURL),
+                                   archive: AppServices.live.archive)
         let model = AppModel(support: root, services: services)
         PreviewAcceptanceStore(root: root).accept(model.sets[1])
 

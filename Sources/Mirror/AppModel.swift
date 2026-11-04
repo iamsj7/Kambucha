@@ -90,7 +90,7 @@ final class AppModel {
 
     var isPaused: Bool { !sets.isEmpty && sets.allSatisfy(\.isPaused) }
 
-    @ObservationIgnored private let support: URL
+    @ObservationIgnored let support: URL
     @ObservationIgnored private let store: ConfigStore
     @ObservationIgnored let services: AppServices
     @ObservationIgnored let acceptance: PreviewAcceptanceStore

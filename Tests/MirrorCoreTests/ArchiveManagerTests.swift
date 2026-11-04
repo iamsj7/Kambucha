@@ -29,7 +29,7 @@ import Foundation
         await #expect(throws: ArchiveError.self) { try await m.prune(set: makeSet("../Sets/Projects"), now: Date()) }
         await #expect(throws: ArchiveError.self) { try await m.prune(set: makeSet(".."), now: Date()) }
         // Archive/Projects is a link out to the mirror: canonical path leaves Archive/.
-        try box.dir("Archive")
+        _ = try box.dir("Archive")
         try FileManager.default.createSymbolicLink(
             atPath: box.root.appendingPathComponent("Archive/Projects").path,
             withDestinationPath: box.root.appendingPathComponent("Sets/Projects").path)
