@@ -92,11 +92,9 @@ public struct Verifier: Sendable {
     /// True when iCloud has evicted this file, so hashing it would download it.
     public func isFreed(_ url: URL) -> Bool { isDataless(url) }
 
-    /// `oneWay` is for a held set, whose mirror keeps extras on purpose. `mustHash` names evicted files
-    /// to include whatever the sample picks, as nothing else can ever prove them.
+    /// `oneWay` is for a held set, whose mirror keeps extras on purpose.
     public func deep(source: URL, destination: String, profile: DestinationProfile, context: RcloneContext,
-                     filter: URL, sampleFreed: Int, logDir: URL, oneWay: Bool = false,
-                     mustHash: [String] = []) async throws -> VerifyResult {
+                     filter: URL, sampleFreed: Int, logDir: URL, oneWay: Bool = false) async throws -> VerifyResult {
         guard audits(profile) else {
             let check = try await run(CheckRequest(
                 source: source, destination: destination, filterFile: filter, filesFrom: nil, sizeOnly: false,
@@ -120,8 +118,7 @@ public struct Verifier: Sendable {
         for rel in all {
             if isDataless(root.appendingPathComponent(rel)) { freed.append(rel) } else { present.append(rel) }
         }
-        let required = Set(mustHash).intersection(freed)
-        let sampled = Array(required) + freed.filter { !required.contains($0) }.shuffled().prefix(max(0, sampleFreed))
+        let sampled = Array(freed.shuffled().prefix(max(0, sampleFreed)))
         let list = present + sampled
         if !list.isEmpty {
             // No filter alongside a file list: rclone cannot combine them.

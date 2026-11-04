@@ -1662,6 +1662,74 @@ private final class Harness: @unchecked Sendable {
     }
 }
 
+/// Fix round 3: a mismatch is a recorded fact, cleared only by a hash.
+@Suite struct RecordedMismatchTests {
+    private func deepFailed(_ h: Harness, path: String = "flowapp/a.txt") async throws {
+        try h.prime()
+        var s = try h.state; s.hashWholeSet = true; try h.store.save(s, for: h.pair)
+        try FileManager.default.createDirectory(at: h.backupRoot.appendingPathComponent("Sets/x"), withIntermediateDirectories: true)
+        h.rclone.script(differing: [path], deepDifferences: 1)
+        await h.run()
+        #expect(try h.active == [.verificationFailed])
+    }
+
+    @Test func aDeepMismatchIsOwedAndRecorded() async throws {
+        let h = try Harness(); try await deepFailed(h)
+        #expect(try h.state.verifyOwed == ["flowapp/a.txt"])
+        #expect(try h.state.mismatched == ["flowapp/a.txt"])
+    }
+
+    @Test func aDeepMismatchInAFileThatLeftTheSourceIsNotOwed() async throws {
+        let h = try Harness(); try await deepFailed(h, path: "flowapp/deleted.txt")
+        #expect(try h.state.verifyOwed.isEmpty)
+    }
+
+    @Test func aDeepMismatchClearsOnlyOnAPassingHash() async throws {
+        let h = try Harness(); try await deepFailed(h)
+        h.rclone.script()
+        await h.run()
+        #expect(h.rclone.hashed.contains { $0.contains("flowapp/a.txt") })
+        #expect(try h.state.mismatched.isEmpty)
+        #expect(try h.active.isEmpty)
+    }
+
+    @Test func anEvictedDeepMismatchCantClearUnhashed() async throws {
+        let h = try Harness(); try await deepFailed(h)
+        h.rclone.script()
+        h.freed = ["a.txt"]
+        await h.run()
+        #expect(try h.state.mismatched == ["flowapp/a.txt"])
+        #expect(try h.state.verifyOwed == ["flowapp/a.txt"])
+        #expect(try h.active == [.verificationFailed])
+    }
+
+    @Test func anUnrelatedFreedFileDoesNotHoldTheAlertOpen() async throws {
+        let h = try Harness(); try h.prime(); h.change("flowapp/a.txt")
+        try Data().write(to: h.source.appendingPathComponent("flowapp/b.txt"))
+        h.rclone.script(copied: ["a.txt"], hashDifferences: 1, differing: ["flowapp/a.txt"].map { String($0.dropFirst(8)) })
+        await h.run()
+        #expect(try h.active == [.verificationFailed])
+        var s = try h.state; s.verifyOwed.append("flowapp/b.txt"); s.verifyOwed.sort(); try h.store.save(s, for: h.pair)
+        h.rclone.script()
+        h.freed = ["b.txt"]
+        await h.run()
+        #expect(try h.state.mismatched.isEmpty)
+        #expect(try h.state.verifyOwed == ["flowapp/b.txt"])
+        #expect(try h.active.isEmpty)
+    }
+
+    @Test func aFileThatChangedDuringTheRunIsOwedButNotAMismatch() async throws {
+        let h = try Harness(); try h.prime()
+        let a = h.source.appendingPathComponent("flowapp/a.txt").path
+        h.feed.set(ChangeBatch(paths: [a], mustRescan: false, latestEventID: 10),
+                   changedLater: ChangeBatch(paths: [a], mustRescan: false, latestEventID: 11))
+        h.rclone.script(differences: 1, differing: ["a.txt"])
+        await h.run()
+        #expect(try h.state.verifyOwed == ["flowapp/a.txt"])
+        #expect(try h.state.mismatched.isEmpty)
+    }
+}
+
 /// Fix round 3, the self-contained items.
 @Suite struct RoundThreeSmallTests {
     @Test func changedPathsAreMatchedInFullNotBySuffix() async throws {
@@ -1804,12 +1872,12 @@ private final class Harness: @unchecked Sendable {
         h.freed = Set(freed)
     }
 
-    @Test func theDeepCheckSamplesAFreedOwedFile() async throws {
+    @Test func aPassingDeepCheckNeverClearsAFreedOwedFile() async throws {
         let h = try Harness(); try deepDue(h, freed: ["old.txt"])
         await h.run()
-        #expect(h.rclone.hashed.contains { $0.contains("flowapp/old.txt") })
-        #expect(try h.state.verifyOwed.isEmpty)
-        #expect(try h.state.freedSince.isEmpty)
+        #expect(try h.state.verifyOwed == ["flowapp/old.txt"])
+        #expect(try h.state.freedSince.keys.sorted() == ["flowapp/old.txt"])
+        #expect(try h.state.reviewItems.map(\.kind) == [.unprovenFreed])
     }
 
     @Test func aSampledFreedFileThatMismatchesStaysOwedAndFlagged() async throws {
@@ -1819,17 +1887,6 @@ private final class Harness: @unchecked Sendable {
         #expect(try h.state.verifyOwed == ["flowapp/old.txt"])
         #expect(try h.state.reviewItems.map(\.kind) == [.unprovenFreed])
         #expect(try h.active.contains(.verificationFailed))
-    }
-
-    @Test func freedFilesBeyondTheSampleAreFlaggedForReview() async throws {
-        let h = try Harness()
-        let names = (0...RunCoordinator.freedSample).map { "old\($0).txt" }
-        try deepDue(h, freed: names)
-        await h.run()
-        let s = try h.state
-        #expect(s.verifyOwed.count == 1)
-        #expect(s.reviewItems.map(\.path) == s.verifyOwed)
-        #expect(s.reviewItems.map(\.kind) == [.unprovenFreed])
     }
 
     @Test func anOweUnderTheFlagKeepsAMissingFile() async throws {

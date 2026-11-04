@@ -463,7 +463,7 @@ public final class RunCoordinator: Sendable {
         for (slice, summary) in zip(slices, perSlice) {
             // Carried files that have since left the source, or the rules, have nothing to prove.
             let owed = Self.within(slice, carried).filter {
-                Self.existsInSource($0, slice) && !matcher.isExcluded(Self.inSet($0, slice))
+                Self.existsInSource($0, slice.source) && !matcher.isExcluded(Self.inSet($0, slice))
             }
             let names = Array(Set(Self.touched(by: summary) + owed)).sorted()
             let result = try await verifier.quick(source: slice.source, destination: slice.destination, profile: job.profile,
@@ -477,26 +477,23 @@ public final class RunCoordinator: Sendable {
         tally.filesChecked = verified.matchingFiles
         var deepRan = false
         if let slice = slices.first, scope == .wholeSet, flaggedBefore || (plan.isDeepDue && plan.isDailyPass && !holding) {
-            // Oldest first, so a long list still gets through them. They're sampled, not downloaded wholesale.
-            let due = state.freedSince.sorted { ($0.value, $0.key) < ($1.value, $1.key) }.map(\.key).prefix(Self.freedSample)
             let deep = try await verifier.deep(source: slice.source, destination: slice.destination, profile: job.profile,
-                                               context: context, filter: slice.filter,
-                                               sampleFreed: Self.freedSample - due.count, logDir: slice.logDir,
-                                               oneWay: holding, mustHash: Array(due))
+                                               context: context, filter: slice.filter, sampleFreed: Self.freedSample,
+                                               logDir: slice.logDir, oneWay: holding)
             verified.differences += deep.differences
             verified.checksClean = verified.checksClean && deep.checksClean
             verified.differingPaths += deep.differingPaths
-            if deep.checksClean {
-                track(deep.audit, mirror: mirrorRoot(set), state: &state)
-                state.verifyOwed.removeAll(where: due.contains)
-                for path in due { state.freedSince[path] = nil }
-            }
+            if deep.checksClean { track(deep.audit, mirror: mirrorRoot(set), state: &state) }
             flagFreed(state: &state)
             deepRan = true
         }
         guard verified.checksClean else {
             tally.verification = "Quick check found \(verified.differences) differences"
+            // A deep check can name files no earlier run owed. What's gone from the source is the sync's to remove.
+            let named = Set(verified.differingPaths).filter { Self.existsInSource($0, set.source) }
+            owe(Array(named), state: &state)
             if await changedDuringRun(set, verified, since: batch.latestEventID) { throw Stop.changedDuringRun }
+            state.mismatched = Set(state.mismatched).union(named).sorted()
             throw Stop.verificationFailed(differences: verified.differences)
         }
         tally.verification = deepRan ? "Quick and deep checks passed" : "Quick check passed"
@@ -533,8 +530,10 @@ public final class RunCoordinator: Sendable {
         track(result.audit, mirror: mirror, state: &state)
         let root = mirror.path + "/"
         let lost = result.audit.missing.map { $0.hasPrefix(root) ? String($0.dropFirst(root.count)) : $0 }
-        let missing = Self.within(slice, lost).filter { Self.existsInSource($0, slice) }.map { Self.inSet($0, slice) }
+        let missing = Self.within(slice, lost).filter { Self.existsInSource($0, slice.source) }.map { Self.inSet($0, slice) }
         let freed = result.skippedFreed.map { Self.inSet($0, slice) }
+        let unhashed = Set(freed)
+        state.mismatched.removeAll { $0.hasPrefix(prefix) && !unhashed.contains($0) }
         let overflowed = owe(missing + freed, state: &state)
         let now = clock()
         if !overflowed { for path in freed where state.freedSince[path] == nil { state.freedSince[path] = now } }
@@ -593,8 +592,8 @@ public final class RunCoordinator: Sendable {
         }
         if deepRan { state.lastDeepCheck = now }
         var solved: [Problem] = [.repeatedFailures, .signInExpired]
-        // An evicted file passed through unhashed, so a mismatch reported on it still stands.
-        if state.freedSince.isEmpty { solved.append(.verificationFailed) }
+        // A mismatch stands until that file's own hash passes, however clean the rest of the run was.
+        if state.mismatched.isEmpty { solved.append(.verificationFailed) }
         if !holding {
             state.heldDeletions = 0
             solved.append(.deletionsHeld)
@@ -973,9 +972,9 @@ public final class RunCoordinator: Sendable {
     }
 
     /// Rclone's `x.rclonelink` is a link called `x` in the source.
-    private static func existsInSource(_ path: String, _ slice: Slice) -> Bool {
+    private static func existsInSource(_ path: String, _ source: URL) -> Bool {
         let name = path.hasSuffix(".rclonelink") ? String(path.dropLast(".rclonelink".count)) : path
-        return exists(slice.source.appendingPathComponent(name))
+        return exists(source.appendingPathComponent(name))
     }
 
     private static func describe(_ scope: RunScope) -> String {

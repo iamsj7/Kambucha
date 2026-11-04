@@ -129,6 +129,9 @@ public struct SetState: Codable, Equatable, Sendable {
     /// download, so they wait: back on disk, or sampled by the deep check. They stay owed meanwhile,
     /// but don't force a run at every wake-up.
     public var freedSince: [String: Date] = [:]
+    /// Files a check found different, which `.verificationFailed` is about. All are in `verifyOwed`,
+    /// and only a passing hash of the file itself clears one.
+    public var mismatched: [String] = []
     public init() {}
 
     /// Fields added after the first release of this file may be absent, and that must never make
@@ -156,6 +159,7 @@ public struct SetState: Codable, Equatable, Sendable {
         hashWholeSet = try c.decodeIfPresent(Bool.self, forKey: .hashWholeSet) ?? false
         stoppedBy = try c.decodeIfPresent(Problem.self, forKey: .stoppedBy)
         freedSince = try c.decodeIfPresent([String: Date].self, forKey: .freedSince) ?? [:]
+        mismatched = try c.decodeIfPresent([String].self, forKey: .mismatched) ?? []
     }
 
     /// The one source of "Backed Up": the last run finished, checks passed, everything reached iCloud.
