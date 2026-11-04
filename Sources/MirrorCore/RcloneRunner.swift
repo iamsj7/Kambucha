@@ -36,8 +36,8 @@ public protocol HelperValidating: Sendable {
     func verifyHelper(at url: URL) throws
 }
 
-public enum RcloneRunnerError: Error, Equatable {
-    /// The context holds secrets and this runner has nothing to check the binary with.
+public enum RcloneRunnerError: Error, Equatable, Codable, Sendable {
+    /// A `localOnly` runner was handed a context that isn't plainly local.
     case helperNotChecked
 }
 
@@ -50,14 +50,22 @@ public struct RcloneRunner: RcloneRunning {
     /// Called with each live stats record while rclone runs (about every 2 seconds). Off the main thread.
     let onStats: (@Sendable (RcloneStats) -> Void)?
     private let helper: (any HelperValidating)?
-    /// `helper` may be nil only for runs with nothing secret, which is any iCloud run. A context with
-    /// a config or environment is refused without one.
-    public init(binary: URL, helper: (any HelperValidating)? = nil, onStats: (@Sendable (RcloneStats) -> Void)? = nil) {
+
+    public init(binary: URL, helper: any HelperValidating, onStats: (@Sendable (RcloneStats) -> Void)? = nil) {
         self.init(binary: binary, killGrace: 5, helper: helper, onStats: onStats)
     }
-    init(binary: URL, killGrace: TimeInterval, helper: (any HelperValidating)? = nil,
-         onStats: (@Sendable (RcloneStats) -> Void)? = nil) {
+    private init(binary: URL, killGrace: TimeInterval, helper: (any HelperValidating)?,
+                 onStats: (@Sendable (RcloneStats) -> Void)? = nil) {
         self.binary = binary; self.killGrace = killGrace; self.helper = helper; self.onStats = onStats
+    }
+
+    /// No helper check, so it accepts only contexts with nothing secret: `/dev/null` for a config and
+    /// an empty environment. Anything else throws `helperNotChecked` before rclone starts.
+    public static func localOnly(binary: URL, onStats: (@Sendable (RcloneStats) -> Void)? = nil) -> RcloneRunner {
+        localOnly(binary: binary, killGrace: 5, onStats: onStats)
+    }
+    static func localOnly(binary: URL, killGrace: TimeInterval, onStats: (@Sendable (RcloneStats) -> Void)? = nil) -> RcloneRunner {
+        RcloneRunner(binary: binary, killGrace: killGrace, helper: nil, onStats: onStats)
     }
 
     public func sync(_ r: SyncRequest) async throws -> RcloneResult {

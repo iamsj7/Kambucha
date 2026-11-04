@@ -40,6 +40,7 @@ final class MemorySecrets: SecretStoring, @unchecked Sendable {
         lock.withLock { values[key] = nil }
     }
     var isEmpty: Bool { lock.withLock { values.isEmpty } }
+    var keys: Set<String> { lock.withLock { Set(values.keys) } }
 }
 
 final class TempDir {
@@ -541,13 +542,14 @@ private func cryptName(_ endpoint: String) -> String {
                         logFile: f.tmp.url.appendingPathComponent("l"), mode: .copyOnly,
                         profile: .profile(for: Destination(name: "t", kind: .iCloudFolder)), context: context)
         }
-        let unchecked = RcloneRunner(binary: vendoredRclone)
-        await #expect(throws: RcloneRunnerError.helperNotChecked) {
-            try await unchecked.sync(request(RcloneContext(configPath: "/dev/null", environment: ["A": "b"])))
+        let spawned = f.tmp.url.appendingPathComponent("spawned")
+        let unchecked = RcloneRunner.localOnly(binary: try fakeRclone(in: f.tmp.url, body: "touch '\(spawned.path)'"))
+        for context in [RcloneContext(configPath: "/dev/null", environment: ["A": "b"]),
+                        RcloneContext(configPath: "/tmp/x.conf", environment: [:]),
+                        RcloneContext(configPath: "/tmp/x.conf", environment: ["A": "b"])] {
+            await #expect(throws: RcloneRunnerError.helperNotChecked) { try await unchecked.sync(request(context)) }
         }
-        await #expect(throws: RcloneRunnerError.helperNotChecked) {
-            try await unchecked.sync(request(RcloneContext(configPath: "/tmp/x.conf", environment: [:])))
-        }
+        #expect(!FileManager.default.fileExists(atPath: spawned.path))
         await #expect(throws: AgentFailure.untrustedHelper) {
             try await RcloneRunner(binary: vendoredRclone, helper: RefusingHelper())
                 .sync(request(RcloneContext(configPath: "/dev/null", environment: ["A": "b"])))
@@ -556,12 +558,44 @@ private func cryptName(_ endpoint: String) -> String {
 
     // MARK: - Home
 
-    /// Foundation honours CFFIXED_USER_HOME, and the agent's environment comes from its caller.
-    @Test func ownerHomeComesFromTheUserDatabase() throws {
-        let entry = try #require(getpwuid(getuid()))
-        #expect(MirrorPaths.ownerHome.path == String(cString: entry.pointee.pw_dir))
-        #expect(MirrorPaths.support.path.hasPrefix(MirrorPaths.ownerHome.path + "/"))
-        #expect(MirrorPaths.logs.path.hasPrefix(MirrorPaths.ownerHome.path + "/"))
+    // These run in a child process: changing the environment here would reach every parallel test.
+    // Each failure exits with its own code, which the test output shows.
+
+    /// Foundation honours CFFIXED_USER_HOME, and the agent's environment comes from its caller. So
+    /// with Foundation's home spoofed, every default must still land in the real one.
+    @Test func ownerHomeComesFromTheUserDatabase() async {
+        await #expect(processExitsWith: .success) {
+            func check(_ passed: Bool, _ code: Int32) { if !passed { exit(code) } }
+            guard let entry = getpwuid(getuid()) else { exit(2) }
+            let home = String(cString: entry.pointee.pw_dir)
+            setenv("CFFIXED_USER_HOME", "/nonexistent/spoofed-home", 1)
+            check(FileManager.default.homeDirectoryForCurrentUser.path.hasPrefix("/nonexistent/spoofed-home"), 3)   // or this proves nothing
+            check(MirrorPaths.ownerHome.path == home, 4)
+            check(MirrorPaths.support.path == home + "/Library/Application Support/Mirror", 5)
+            check(MirrorPaths.logs.path == home + "/Library/Logs/Mirror", 6)
+            check(MirrorPaths.iCloudDrive.path == home + "/Library/Mobile Documents/com~apple~CloudDocs", 7)
+        }
+    }
+
+    @Test func scrubEnvironmentDropsWhatRedirectsFoundationAndRclone() async {
+        await #expect(processExitsWith: .success) {
+            func check(_ passed: Bool, _ code: Int32) { if !passed { exit(code) } }
+            guard let entry = getpwuid(getuid()) else { exit(2) }
+            let home = String(cString: entry.pointee.pw_dir)
+            setenv("CFFIXED_USER_HOME", "/nonexistent/spoofed-home", 1)
+            setenv("HOME", "/nonexistent/spoofed-home", 1)
+            setenv("TMPDIR", "/nonexistent/spoofed-tmp", 1)
+
+            MirrorPaths.scrubEnvironment()
+
+            check(getenv("CFFIXED_USER_HOME") == nil, 3)
+            check(getenv("TMPDIR") == nil, 4)
+            check(getenv("HOME").map { String(cString: $0) } == home, 5)
+            check(FileManager.default.homeDirectoryForCurrentUser.path.hasPrefix(home), 6)
+            check(!FileManager.default.temporaryDirectory.path.contains("spoofed"), 7)
+            let local = RcloneContext(configPath: "/dev/null", environment: [:])
+            check(RcloneRunner.childEnvironment(local)["HOME"] == home, 8)
+        }
     }
 
     // MARK: - Real crypt
@@ -707,45 +741,6 @@ private func cryptName(_ endpoint: String) -> String {
         let vault = try #require(try rig.secrets.vault(for: d))
         try await rig.setup.connect(d, clientID: "id", clientSecret: "s")
         #expect(try rig.secrets.vault(for: d) == vault)   // new keys would strand every existing backup
-    }
-
-    // MARK: - First reveal
-
-    private func marker(_ rig: Rig, _ d: Destination) throws -> String? {
-        try rig.secrets.read(SecretKeys.firstReveal(d.id))
-    }
-
-    @Test func newVaultMarksItsFirstReveal() async throws {
-        let rig = try Rig()
-        let d = Destination(name: "Drive", kind: .googleDrive)
-        try await rig.setup.connect(d, clientID: "id", clientSecret: "s")
-        #expect(try marker(rig, d) == SecretKeys.firstRevealPending)
-    }
-
-    @Test func existingVaultGetsNoMarker() async throws {
-        let rig = try Rig()
-        let d = Destination(name: "Drive", kind: .googleDrive)
-        try await rig.setup.connect(d, clientID: "id", clientSecret: "s")
-        try rig.secrets.delete(SecretKeys.firstReveal(d.id))
-        try await rig.setup.connect(d, clientID: "id", clientSecret: "s")
-        #expect(try marker(rig, d) == nil)
-    }
-
-    /// The marker waives the owner check. Being able to re-run setup must not earn another waiver.
-    @Test func vaultAppearingDuringTheBrowserGetsNoMarker() async throws {
-        let rig = try Rig()
-        let d = Destination(name: "Drive", kind: .googleDrive)
-        let json = String(decoding: try JSONEncoder().encode(VaultSecrets.generate()), as: UTF8.self)
-        rig.secrets.appearsAfterFirstRead = (SecretKeys.vault(d.id), json)
-        try await rig.setup.connect(d, clientID: "id", clientSecret: "s")
-        #expect(try marker(rig, d) == nil)
-    }
-
-    @Test func unencryptedDestinationGetsNoMarker() async throws {
-        let rig = try Rig()
-        let d = Destination(name: "O", kind: .oneDrive, encrypted: false)
-        try await rig.setup.connect(d, clientID: nil, clientSecret: nil)
-        #expect(try marker(rig, d) == nil)
     }
 
     @Test func connectLeavesUnencryptedDestinationWithoutVault() async throws {
@@ -962,12 +957,24 @@ private func cryptName(_ endpoint: String) -> String {
         #expect(try rig.secrets.vault(for: d) == nil)
     }
 
-    @Test func survivingMatchedSignInMayRestoreOverNothing() async throws {
+    /// A surviving sign-in proves nothing about the Kit, and the flag is only a line in `destinations.json`.
+    @Test(arguments: [emptyCloud, missingCloud])
+    func survivingSignInSeeingNothingIsUnprovenWhateverTheFlag(prelude: String) async throws {
+        let rig = try Rig(prelude: prelude)
+        let d = Destination(name: "Drive", kind: .googleDrive)
+        #expect(!d.recoveryKitConfirmed)
+        try rig.secrets.saveSignIn(["client_id": "kit-id", "client_secret": "kit-secret", "token": fakeToken], for: d)
+        await #expect(throws: RemoteSetupError.kitUnproven) { try await rig.setup.restore(d, from: kit(.generate())) }
+        #expect(try rig.secrets.vault(for: d) == nil)
+    }
+
+    @Test func acceptingKeepsTheSurvivingSignIn() async throws {
         let rig = try Rig(prelude: Self.emptyCloud)
         let d = Destination(name: "Drive", kind: .googleDrive), v = VaultSecrets.generate()
         try rig.secrets.saveSignIn(["client_id": "kit-id", "client_secret": "kit-secret", "token": fakeToken], for: d)
-        try await rig.setup.restore(d, from: kit(v))
+        try await rig.setup.restore(d, from: kit(v), acceptUnproven: true)
         #expect(try rig.secrets.vault(for: d) == v)
+        #expect(try rig.secrets.signIn(for: d)?["token"] == fakeToken)
     }
 
     @Test func ownerCanAcceptAnUnprovenKit() async throws {
@@ -1007,13 +1014,6 @@ private func cryptName(_ endpoint: String) -> String {
         try rig.secrets.saveSignIn(["client_id": "kit-id", "client_secret": "kit-secret", "token": fakeToken], for: d)
         do { try await rig.setup.restore(d, from: kit(.generate())) } catch { #expect(!opens) }
         #expect(try rig.secrets.signIn(for: d)?["token"] == newToken)
-    }
-
-    @Test func restoreNeverMarksAFirstReveal() async throws {
-        let rig = try Rig(prelude: Self.listing)
-        let d = confirmed()
-        try await rig.setup.restore(d, from: kit(.generate()))
-        #expect(try rig.secrets.read(SecretKeys.firstReveal(d.id)) == nil)
     }
 
     private func browserRan(_ rig: Rig) -> Bool {

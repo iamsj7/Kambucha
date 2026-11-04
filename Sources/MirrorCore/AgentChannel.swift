@@ -36,7 +36,7 @@ public enum AgentRequest: Codable, Sendable, CustomStringConvertible, CustomDebu
 /// Typed, so the app sees the same errors the agent did. None of them carries a secret.
 public enum AgentFailure: Error, Equatable, Codable, Sendable {
     case session(RcloneSessionError), setup(RemoteSetupError), kit(RecoveryKitError)
-    case drill(RestoreDrillError), keychain(SecretStoreError)
+    case drill(RestoreDrillError), keychain(SecretStoreError), runner(RcloneRunnerError)
     case untrustedCaller, untrustedHelper, presenceRefused, configUnreadable, busy, lockFailed
     case invalidRequest, cancelled, other
 
@@ -48,6 +48,7 @@ public enum AgentFailure: Error, Equatable, Codable, Sendable {
         case let e as RecoveryKitError: self = .kit(e)
         case let e as RestoreDrillError: self = .drill(e)
         case let e as SecretStoreError: self = .keychain(e)
+        case let e as RcloneRunnerError: self = .runner(e)
         case is CancellationError: self = .cancelled
         default: self = .other   // arbitrary errors could describe anything, so they don't cross
         }
@@ -60,6 +61,7 @@ public enum AgentFailure: Error, Equatable, Codable, Sendable {
         case .kit(let e): e
         case .drill(let e): e
         case .keychain(let e): e
+        case .runner(let e): e
         case .cancelled: CancellationError()
         default: self
         }
@@ -143,7 +145,7 @@ public struct AgentService: Sendable {
                 throw AgentFailure.invalidRequest
             }
             let destination = try resolve(request.destination)
-            // Every command writes: `kit` spends its marker, and closing a drill's session can save a token.
+            // Every command, `kit` too: it mustn't read keys mid-restore, and closing a drill's session can save a token.
             response = try await SecretsLock.withLock(in: support) { try await handle(request, destination) }
         } catch {
             response = AgentResponse(failure: AgentFailure(error))
@@ -182,15 +184,11 @@ public struct AgentService: Sendable {
     }
 
     /// Presence is the real guard here, as the caller check can be beaten by a process of the same
-    /// user. It doesn't depend on `destinations.json`, which that process could edit. The one reveal
-    /// without it is the one at creation, and the marker is spent before the text leaves.
+    /// user. Every reveal asks, the one at creation included, before any secret is read. Nothing
+    /// stored can waive it, so neither `destinations.json` nor the Keychain has a say.
     private func reveal(_ destination: Destination) async throws -> String {
-        let marker = SecretKeys.firstReveal(destination.id)
-        let isFirst = try secrets.read(marker) == SecretKeys.firstRevealPending
-        if !isFirst { try await presence.confirm(reason: "show the Recovery Kit") }
-        let text = try RecoveryKit.make(for: destination, secrets: secrets, binary: binary).text()
-        if isFirst { try secrets.delete(marker) }
-        return text
+        try await presence.confirm(reason: "show the Recovery Kit")
+        return try RecoveryKit.make(for: destination, secrets: secrets, binary: binary).text()
     }
 
     /// The session supplies the sign-in alone, so a lost vault can't stop a kit proving itself.

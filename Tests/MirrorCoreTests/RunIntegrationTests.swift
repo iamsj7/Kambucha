@@ -68,7 +68,7 @@ private struct NoSession: RunSession {
     @Test func captureRefusesSecretsWithoutAHelper() async throws {
         let secret = RcloneContext(configPath: "/dev/null", environment: ["RCLONE_CONFIG_X_TYPE": "crypt"])
         await #expect(throws: RcloneRunnerError.helperNotChecked) {
-            _ = try await RcloneRunner(binary: binary).capture(["version"], context: secret)
+            _ = try await RcloneRunner.localOnly(binary: binary).capture(["version"], context: secret)
         }
     }
 
@@ -105,7 +105,7 @@ private struct NoSession: RunSession {
         let root: URL, source: URL, backupRoot: URL, support: URL
         let set: BackupSet, destination = Destination(name: "iCloud", kind: .iCloudFolder)
         let store: ConfigStore, records: RunRecordStore, problems: ProblemCenter
-        let rclone = RcloneRunner(binary: binary)
+        let rclone = RcloneRunner.localOnly(binary: binary)
         init() throws {
             root = try tempDir("rig")
             source = root.appendingPathComponent("src")

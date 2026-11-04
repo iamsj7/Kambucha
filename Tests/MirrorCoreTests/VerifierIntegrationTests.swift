@@ -21,7 +21,7 @@ private let rcloneBinary = URL(fileURLWithPath: #filePath)
     }
     private let ctx = RcloneContext(configPath: "/dev/null", environment: [:])
     private var profile: DestinationProfile { DestinationProfile.profile(for: Destination(name: "d", kind: .googleDrive, encrypted: false)) }
-    private var verifier: Verifier { Verifier(rclone: RcloneRunner(binary: rcloneBinary), auditor: ICloudAuditor()) }
+    private var verifier: Verifier { Verifier(rclone: RcloneRunner.localOnly(binary: rcloneBinary), auditor: ICloudAuditor()) }
 
     @Test func filteredSizeOnlyCheckReportsFileMissingFromDestination() async throws {
         let t = try setup(); defer { try? FileManager.default.removeItem(at: t.root) }
