@@ -44,6 +44,8 @@ public final class RunCoordinator: Sendable {
     private let progress: RunProgress
     private let volumes: any VolumeLocating
     private let mountWakeWindow: TimeInterval
+    private let priority: @Sendable (Bool) -> Void
+    private let lowPower: @Sendable () -> Bool
 
     public init(store: ConfigStore, records: RunRecordStore, problems: ProblemCenter, rclone: any RcloneRunning,
                 feed: any ChangeFeeding, verifier: Verifier, guard pathGuard: PathGuard, detector: StackDetector,
@@ -52,7 +54,9 @@ public final class RunCoordinator: Sendable {
                 paths: RunPaths, helperCheck: @escaping @Sendable () throws -> Void = {},
                 archives: (@Sendable (String, RcloneContext, DestinationKind) -> ArchiveManager)? = nil,
                 progress: RunProgress? = nil, volumes: any VolumeLocating = SystemVolumes(),
-                mountWakeWindow: TimeInterval = 0) {
+                mountWakeWindow: TimeInterval = 0, priority: @escaping @Sendable (Bool) -> Void = { _ in },
+                lowPower: @escaping @Sendable () -> Bool = { ProcessInfo.processInfo.isLowPowerModeEnabled }) {
+        self.priority = priority; self.lowPower = lowPower
         self.volumes = volumes; self.mountWakeWindow = mountWakeWindow
         self.archives = archives ?? { ArchiveManager(rclone: rclone, endpoint: $0, context: $1, kind: $2) }
         self.progress = progress ?? RunProgress(root: paths.support, clock: clock)
@@ -77,6 +81,8 @@ public final class RunCoordinator: Sendable {
             return false
         }
         defer { lock.release() }
+        let settings = loadSettings()
+        if settings.pauseInLowPowerMode, !command.force, lowPower() { return true }
         // Ahead of everything else: any volume mounting wakes the agent, and most have nothing to do with it.
         var only: Set<PairID>?
         if isMountWake(command) {
@@ -96,9 +102,17 @@ public final class RunCoordinator: Sendable {
         }
         do { try RcloneSession.wipeLeftovers(in: paths.work) } catch { Self.log.error("wiping leftovers failed") }
         do { try await problems.retryPending() } catch { Self.log.error("retrying notifications failed") }
-        let ran = await runPairs(command, only: only)
+        let ran = await runPairs(command, only: only, settings: settings)
         prune()
         return ran
+    }
+
+    /// A damaged file is the app's to report. Backups carry on with the defaults.
+    private func loadSettings() -> AppSettings {
+        do { return try SettingsStore(root: paths.support).load() } catch {
+            Self.log.error("cannot read the settings")
+            return AppSettings()
+        }
     }
 
     /// Scheduled, and too soon after the last full pass to be the interval.
@@ -157,7 +171,7 @@ public final class RunCoordinator: Sendable {
         }
     }
 
-    private func runPairs(_ command: RunCommand, only: Set<PairID>?) async -> Bool {
+    private func runPairs(_ command: RunCommand, only: Set<PairID>?, settings: AppSettings) async -> Bool {
         let sets: [BackupSet], destinations: [Destination]
         do {
             sets = try store.loadSets()
@@ -183,7 +197,7 @@ public final class RunCoordinator: Sendable {
         for pair in RunPlanner.order(pairs) {
             if Task.isCancelled { break }
             guard let destination = destinations.first(where: { $0.id == pair.destination }) else { continue }
-            switch await run(pair, destination: destination, command: command, expired: &expired, drives: &drives) {
+            switch await run(pair, destination: destination, command: command, settings: settings, expired: &expired, drives: &drives) {
             case .carryOn: continue
             case .stop: return true
             case .agentFailed: return false
@@ -237,6 +251,8 @@ public final class RunCoordinator: Sendable {
         /// The live drive, for an external destination. Everything local goes through `pathGuard`.
         var volume: VolumeInfo?
         var pathGuard: PathGuard
+        /// A drive is plugged in to be backed up and then taken away, so it never waits in the background.
+        func isFast(_ command: RunCommand) -> Bool { command.isFast || volume != nil }
     }
 
     /// What stops a run after it starts. Rclone's own text stays out of anything but the record.
@@ -263,8 +279,8 @@ public final class RunCoordinator: Sendable {
         var logDir: URL
     }
 
-    private func run(_ pair: PairID, destination: Destination, command: RunCommand, expired: inout Set<UUID>,
-                     drives: inout DriveOutcomes) async -> PairEnd {
+    private func run(_ pair: PairID, destination: Destination, command: RunCommand, settings: AppSettings,
+                     expired: inout Set<UUID>, drives: inout DriveOutcomes) async -> PairEnd {
         // Read here, not at the start: an earlier pair may have applied presets to this set.
         let found: BackupSet?
         do { found = try store.loadSets().first(where: { $0.id == pair.set }) } catch {
@@ -311,7 +327,7 @@ public final class RunCoordinator: Sendable {
             guard volume != nil else {
                 tally.status = .skipped; tally.scope = Self.notConnected
                 record()
-                if let last = loaded.lastFinished, clock().timeIntervalSince(last) > ExternalVolume.overdueAfter {
+                if let last = loaded.lastFinished, clock().timeIntervalSince(last) > Double(settings.driveReminderDays) * 86_400 {
                     await raise(.driveOverdue, pair, set, detail: destination.name)
                 }
                 return .carryOn
@@ -327,6 +343,7 @@ public final class RunCoordinator: Sendable {
                       approved: loaded.heldDeletions > 0 ? command.approvedDeletions : nil,
                       profile: .profile(for: destination, fileSystem: volume?.fileSystem), isLocal: Self.isLocal(destination.kind),
                       volume: volume, pathGuard: volume.map { .forVolume($0, iCloudDrive: pathGuard.iCloudDrive) } ?? pathGuard)
+        priority(job.isFast(command))
         var state = loaded
         var end = PairEnd.carryOn
         if expired.contains(destination.id) {
@@ -335,7 +352,7 @@ public final class RunCoordinator: Sendable {
             tally.notices.append((.signInExpired, pair, destination.name))
         } else {
             do {
-                try await process(job, command: command, state: &state, tally: &tally)
+                try await process(job, command: command, settings: settings, state: &state, tally: &tally)
             } catch {
                 end = absorb(error, job, state: &state, tally: &tally, expired: &expired)
             }
@@ -379,7 +396,7 @@ public final class RunCoordinator: Sendable {
         if let volume = job.volume, !isThere(volume) { throw Stop.driveGone }
     }
 
-    private func process(_ job: Job, command: RunCommand, state: inout SetState, tally: inout Tally) async throws {
+    private func process(_ job: Job, command: RunCommand, settings: AppSettings, state: inout SetState, tally: inout Tally) async throws {
         var set = job.set
         let pair = job.pair
 
@@ -417,7 +434,8 @@ public final class RunCoordinator: Sendable {
         let fullPass = job.volume.map {
             ExternalVolume.needsFullPass(lastSeenMountID: state.lastSeenMountID, volume: $0, lastFullPass: state.lastFullPass, now: clock())
         }
-        let plan = RunPlanner.plan(state: state, scope: scope, profile: job.profile, now: clock(), fullPass: fullPass)
+        let plan = RunPlanner.plan(state: state, scope: scope, profile: job.profile, now: clock(), fullPass: fullPass,
+                                   deepInterval: Double(settings.deepCheck.days) * 86_400)
         if plan.isDailyPass, tally.trigger == .schedule { tally.trigger = .daily }
 
         if plan.scope == .nothing {
@@ -500,7 +518,7 @@ public final class RunCoordinator: Sendable {
         func request(_ s: Slice, mode: SyncMode, dryRun: Bool) -> SyncRequest {
             SyncRequest(source: s.source, destination: s.destination, backupDir: s.backupDir, filterFile: s.filter,
                         logFile: s.logDir.appendingPathComponent(dryRun ? "dry-run.log" : "sync.log"), mode: mode,
-                        profile: job.profile, context: context, dryRun: dryRun, fullSpeed: command.fullSpeed)
+                        profile: job.profile, context: context, dryRun: dryRun, fullSpeed: job.isFast(command))
         }
 
         progress.enter(.scanning, pair: pair)

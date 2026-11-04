@@ -221,6 +221,9 @@ private final class Harness: @unchecked Sendable {
     var helperError: (any Error)?
     let volumes = FakeVolumes()
     var mountWakeWindow: TimeInterval = 0
+    var lowPower = false
+    private var _priorities: [Bool] = []
+    var priorities: [Bool] { lock.withLock { _priorities } }
     private var _helperChecks = 0
     var helperChecks: Int { lock.withLock { _helperChecks } }
     private var _written: [TransferProgress] = []
@@ -292,7 +295,9 @@ private final class Harness: @unchecked Sendable {
                 ArchiveManager(rclone: runner, endpoint: endpoint, context: context, kind: kind, isUploaded: { _ in true },
                                evict: { [self] url in lock.withLock { _evicted.append(url.lastPathComponent) } })
             },
-            progress: progress, volumes: volumes, mountWakeWindow: mountWakeWindow)
+            progress: progress, volumes: volumes, mountWakeWindow: mountWakeWindow,
+            priority: { [self] fast in lock.withLock { _priorities.append(fast) } },
+            lowPower: { [self] in lowPower })
     }
 
     @discardableResult
@@ -1228,11 +1233,15 @@ private final class Harness: @unchecked Sendable {
         #expect(try h.latest()?.trigger == .manual)
     }
 
-    @Test func fullSpeedReachesRcloneOnlyWhenAsked() async throws {
+    @Test func fullSpeedReachesRcloneForManualRunsAndTheSetting() async throws {
         let h = try Harness(); try h.prime()
-        await h.run(RunCommand(force: true, fullSpeed: true))
-        #expect(!h.rclone.syncs.isEmpty && h.rclone.syncs.allSatisfy { $0.fullSpeed })
         await h.run(RunCommand(force: true))
+        #expect(!h.rclone.syncs.isEmpty && h.rclone.syncs.allSatisfy { $0.fullSpeed })
+        h.change("flowapp/a.txt")
+        await h.run(RunCommand(fullSpeed: true))
+        #expect(h.rclone.syncs.last?.fullSpeed == true)
+        h.change("flowapp/a.txt", id: 11)
+        await h.run()
         #expect(h.rclone.syncs.last?.fullSpeed == false)
     }
 
@@ -2926,5 +2935,116 @@ private struct GoneBeforeTidy: RcloneRunning {
     }
     func capture(_ arguments: [String], context: RcloneContext) async throws -> RcloneCapture {
         try await wrapping.capture(arguments, context: context)
+    }
+}
+
+@Suite struct RunWiringPriorityTests {
+    private func settings(_ h: Harness, _ change: (inout AppSettings) -> Void) throws {
+        var s = AppSettings()
+        change(&s)
+        try SettingsStore(root: h.support).save(s)
+    }
+
+    private func flag(_ r: SyncRequest?) -> Bool? { r?.fullSpeed }
+
+    @Test func aScheduledICloudRunStaysInTheBackground() async throws {
+        let h = try Harness(); try h.prime(); h.change("flowapp/a.txt")
+        await h.run()
+        #expect(h.priorities == [false])
+        #expect(flag(h.rclone.realSyncs.first) == false)
+    }
+
+    @Test func aScheduledCloudRunStaysInTheBackground() async throws {
+        let h = try Harness()
+        let cloud = try h.addCloud()
+        h.set.destinationIDs = [cloud.id]
+        try h.save(extra: [cloud])
+        try h.prime(PairID(set: h.set.id, destination: cloud.id), kind: .googleDrive)
+        h.setSession(cloud, FakeSession(endpoint: "crypt:"))
+        try h.cloudMarker(at: "crypt:.mirror-root")
+        h.change("flowapp/a.txt")
+        await h.run()
+        #expect(h.priorities == [false])
+        #expect(flag(h.rclone.realSyncs.first) == false)
+    }
+
+    @Test func backUpNowRunsAtNormalPriority() async throws {
+        let h = try Harness(); try h.prime()
+        await h.run(RunCommand(force: true))
+        #expect(h.priorities == [true])
+        #expect(flag(h.rclone.realSyncs.first) == true)
+    }
+
+    @Test func aScheduledDriveRunIsRaisedAndUsesMoreTransfers() async throws {
+        let h = try Harness()
+        try h.useDrive()
+        await h.run()
+        #expect(h.priorities == [true])
+        #expect(h.rclone.syncs.allSatisfy { $0.fullSpeed })
+    }
+
+    @Test func aPassWithBothRaisesOnlyForTheDrive() async throws {
+        let h = try Harness(); try h.prime(); h.change("flowapp/a.txt")
+        let mount = h.root.appendingPathComponent("Volumes/D")
+        try FileManager.default.createDirectory(at: mount, withIntermediateDirectories: true)
+        let d = Destination(name: "D", kind: .externalDrive, volumeUUID: "D")
+        h.set.destinationIDs.append(d.id)
+        try h.save(extra: [d])
+        h.volumes.set([VolumeInfo(uuid: "D", name: "D", mountPoint: mount, fileSystem: "apfs", freeBytes: 1 << 50, mountID: "m")])
+        await h.run()
+        #expect(h.priorities == [false, true])
+        #expect(h.rclone.realSyncs.map(\.fullSpeed) == [false, true])
+    }
+
+    @Test func lowPowerModeHoldsScheduledRunsWhenTheOwnerAskedForThat() async throws {
+        let h = try Harness(); try h.prime(); h.change("flowapp/a.txt")
+        try settings(h) { $0.pauseInLowPowerMode = true }
+        h.lowPower = true
+        await h.run()
+        #expect(h.rclone.allCalls == 0)
+        #expect(try h.latest() == nil)
+        await h.run(RunCommand(force: true))
+        #expect(h.rclone.realSyncs.count == 1)
+    }
+
+    @Test func lowPowerModeChangesNothingUnlessAsked() async throws {
+        let h = try Harness(); try h.prime(); h.change("flowapp/a.txt")
+        h.lowPower = true
+        await h.run()
+        #expect(h.rclone.realSyncs.count == 1)
+    }
+
+    @Test func theDeepCheckFollowsTheSetting() async throws {
+        let h = try Harness(); try h.prime(); h.change("flowapp/a.txt", rescan: true)
+        try settings(h) { $0.deepCheck = .weekly }
+        try FileManager.default.createDirectory(atPath: h.mirror, withIntermediateDirectories: true)
+        var s = try h.state
+        s.lastFullPass = h.now.addingTimeInterval(-2 * 86_400)
+        s.lastDeepCheck = h.now.addingTimeInterval(-8 * 86_400)
+        try h.store.save(s, for: h.pair)
+        await h.run()
+        #expect(try h.state.lastDeepCheck == h.now)
+    }
+
+    @Test func aDamagedSettingsFileFallsBackToDefaults() async throws {
+        let h = try Harness(); try h.prime(); h.change("flowapp/a.txt")
+        try FileManager.default.createDirectory(at: h.support, withIntermediateDirectories: true)
+        try Data("nope".utf8).write(to: h.support.appendingPathComponent("settings.json"))
+        await h.run()
+        #expect(h.rclone.realSyncs.count == 1)
+    }
+
+    @Test func theDriveReminderFollowsTheSetting() async throws {
+        let h = try Harness()
+        let (d, _) = try h.useDrive()
+        try settings(h) { $0.driveReminderDays = 3 }
+        let pair = PairID(set: h.set.id, destination: d.id)
+        try h.prime(pair, kind: .externalDrive)
+        var s = try h.state(pair)
+        s.lastFinished = h.now.addingTimeInterval(-4 * 86_400)
+        try h.store.save(s, for: pair)
+        h.volumes.set([])
+        await h.run()
+        #expect(h.notifier.posted == [.driveOverdue])
     }
 }

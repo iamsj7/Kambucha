@@ -20,6 +20,8 @@ public struct AppSettings: Codable, Equatable, Sendable {
     /// Scheduled and mount-triggered runs stay at background priority unless this is on; then they use
     /// normal priority with `--transfers 4 --checkers 8`. Back Up Now and manual SSD runs always do.
     public var fullSpeed = false
+    /// A drive away for longer than this gets one quiet reminder.
+    public var driveReminderDays = 7
 
     public static let retentionChoices = [7, 14, 30, 60, 90]
 
@@ -31,6 +33,7 @@ public struct AppSettings: Codable, Equatable, Sendable {
         defaultRetentionDays = try c.decodeIfPresent(Int.self, forKey: .defaultRetentionDays) ?? 30
         pauseInLowPowerMode = try c.decodeIfPresent(Bool.self, forKey: .pauseInLowPowerMode) ?? false
         fullSpeed = try c.decodeIfPresent(Bool.self, forKey: .fullSpeed) ?? false
+        driveReminderDays = try c.decodeIfPresent(Int.self, forKey: .driveReminderDays) ?? 7
     }
 }
 

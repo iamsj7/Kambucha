@@ -39,10 +39,28 @@ import Foundation
         #expect(RunCommand.parse(["--run-now", id.uuidString, "extra"]) == nil)
     }
 
-    @Test func onlyFullSpeedLeavesBackgroundPriority() {
+    @Test func onlyAScheduledPassStaysInTheBackground() {
         #expect(RunCommand().taskPriority == .background)
-        #expect(RunCommand(force: true).taskPriority == .background)
-        #expect(RunCommand(force: true, fullSpeed: true).taskPriority == .medium)
+        #expect(!RunCommand().isFast)
+        #expect(RunCommand(force: true).taskPriority == .medium)
+        #expect(RunCommand(fullSpeed: true).taskPriority == .medium)
+        #expect(RunCommand(force: true, fullSpeed: true).isFast)
+    }
+
+    @Test func theBundledPlistLeavesPriorityToTheAgent() throws {
+        // A Background job and everything it spawns stay at priority 4, and Nice can't be undone without root.
+        let url = URL(fileURLWithPath: #filePath).deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
+            .appendingPathComponent("Resources/com.shaikjaleel.mirror.agent.plist")
+        let plist = try #require(try PropertyListSerialization.propertyList(from: Data(contentsOf: url), format: nil) as? [String: Any])
+        #expect(plist["ProcessType"] as? String == "Standard")
+        #expect(plist["Nice"] == nil && plist["LowPriorityIO"] == nil)
+        #expect(plist["StartOnMount"] as? Bool == true && plist["StartInterval"] as? Int == 1800)
+    }
+
+    @Test func raisedRunsGiveRcloneNormalPriorityWhateverTheTask() {
+        #expect(RcloneRunner.qos(.background, raised: false) == .background)
+        #expect(RcloneRunner.qos(.background, raised: true) == .default)
+        #expect(RcloneRunner.qos(.medium, raised: false) == .default)
     }
 
     @Test func fullSpeedRaisesTransfersAndCheckers() {

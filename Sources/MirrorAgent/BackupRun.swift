@@ -8,8 +8,12 @@ import os
 enum BackupRun {
     private static let log = Logger(subsystem: MirrorCore.bundleID, category: "BackupRun")
 
-    static func run(_ command: RunCommand) async -> Int32 {
+    static func run(_ requested: RunCommand) async -> Int32 {
         let places = Places()
+        var command = requested
+        if (try? SettingsStore(root: places.support).load())?.fullSpeed == true { command.fullSpeed = true }
+        // First of all, so nothing below runs at the wrong priority.
+        AgentPriority.set(fast: command.isFast)
         let records = RunRecordStore(root: places.support)
         let problems = ProblemCenter(root: places.support, notifier: UNNotifier())
         let presets: [Preset]
@@ -36,9 +40,9 @@ enum BackupRun {
             remote: RcloneRemoteFiles(binary: binary, helper: trust),
             paths: RunPaths(support: places.support, logs: places.logs, work: work),
             helperCheck: { try trust.verifyHelper(at: binary) }, progress: progress,
-            volumes: SystemVolumes(), mountWakeWindow: RunPlanner.mountWakeWindow)
+            volumes: SystemVolumes(), mountWakeWindow: RunPlanner.mountWakeWindow,
+            priority: { AgentPriority.set(fast: $0) })
 
-        if command.fullSpeed { AgentPriority.raiseToNormal() }
         // launchd sends SIGTERM at logout. Dying at once would strand rclone, any sign-in config and
         // the pid file, so it cancels the work instead, which stops the child and cleans up.
         signal(SIGTERM, SIG_IGN)

@@ -1,4 +1,5 @@
 import Foundation
+import os
 
 public struct RunPlan: Equatable, Sendable {
     public var scope: RunScope
@@ -20,10 +21,10 @@ public struct RunPlanner {
 
     /// `fullPass` overrides the interval, for a drive, where a new connection decides.
     public static func plan(state: SetState, scope: RunScope, profile: DestinationProfile, now: Date,
-                            fullPass: Bool? = nil) -> RunPlan {
+                            fullPass: Bool? = nil, deepInterval: TimeInterval = deepCheckInterval) -> RunPlan {
         let fullDue = fullPass ?? state.lastFullPass.map { now.timeIntervalSince($0) >= profile.fullPassInterval } ?? true
         // Never checked isn't overdue: the first full pass sets the baseline.
-        let deepDue = state.lastDeepCheck.map { now.timeIntervalSince($0) >= deepCheckInterval } ?? false
+        let deepDue = state.lastDeepCheck.map { now.timeIntervalSince($0) >= deepInterval } ?? false
         // Evicted files can't be hashed yet, so they don't drive runs. They stay owed, and they wait.
         var planned = including(state.verifyOwed.filter { state.freedSince[$0] == nil }, in: scope)
         if fullDue || state.wholeSetOwed || state.hashWholeSet {
@@ -75,15 +76,18 @@ public struct RunCommand: Codable, Equatable, Sendable {
     public var approvedDeletions: Int?
     /// A manual run: the whole set, with or without changes.
     public var force: Bool
-    /// Normal priority and more rclone concurrency. Manual runs only.
+    /// The `--full-speed` flag, or the Full Speed setting.
     public var fullSpeed: Bool
 
     public init(setID: UUID? = nil, approvedDeletions: Int? = nil, force: Bool = false, fullSpeed: Bool = false) {
         self.setID = setID; self.approvedDeletions = approvedDeletions; self.force = force; self.fullSpeed = fullSpeed
     }
 
-    /// Scheduled and mount-triggered runs stay in the background.
-    public var taskPriority: TaskPriority { fullSpeed ? .medium : .background }
+    /// Normal priority and more rclone concurrency: Back Up Now and Full Speed. A drive gets the same by itself.
+    public var isFast: Bool { force || fullSpeed }
+
+    /// Scheduled passes stay in the background.
+    public var taskPriority: TaskPriority { isFast ? .medium : .background }
 
     /// No argument is a scheduled pass; `--run-now [set-id]` and `--allow-deletes <set-id> <count>` are
     /// manual, and either may add `--full-speed`. Nil for anything else, so a malformed approval
@@ -108,12 +112,17 @@ public struct RunCommand: Codable, Equatable, Sendable {
     }
 }
 
+/// The agent's priority, set by the agent itself. Measured under launchd (docs/proofs.md): a `ProcessType`
+/// Background job and everything it spawns stay at scheduling priority 4 whatever the job then calls, and a
+/// plist `Nice` can't be undone without root. So the plist asks for neither, and a background pass lowers
+/// itself instead: the same kernel policy, inherited by rclone, and unlike launchd's it can be lifted.
 public enum AgentPriority {
-    /// Lifts the background limits launchd or the parent may have set. Best effort: a process can't
-    /// lower its own nice value, so a run started by launchd with `Nice` keeps that.
-    public static func raiseToNormal() {
-        setpriority(PRIO_DARWIN_PROCESS, 0, 0)
-        setiopolicy_np(IOPOL_TYPE_DISK, IOPOL_SCOPE_PROCESS, IOPOL_DEFAULT)
-        setpriority(PRIO_PROCESS, 0, 0)
+    private static let raised = OSAllocatedUnfairLock(initialState: false)
+    static var isRaised: Bool { raised.withLock { $0 } }
+
+    /// `fast` is normal priority for this process and rclone children started from now on.
+    public static func set(fast: Bool) {
+        raised.withLock { $0 = fast }
+        setpriority(PRIO_DARWIN_PROCESS, 0, fast ? 0 : PRIO_DARWIN_BG)
     }
 }

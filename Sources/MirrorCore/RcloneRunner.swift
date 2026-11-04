@@ -86,7 +86,7 @@ public struct RcloneRunner: RcloneRunning {
         process.executableURL = binary
         process.arguments = arguments
         process.environment = Self.childEnvironment(context)
-        process.qualityOfService = Self.qos(Task.currentPriority)
+        process.qualityOfService = Self.qos(Task.currentPriority, raised: AgentPriority.isRaised)
         let out = Pipe(), err = Pipe()
         process.standardOutput = out
         process.standardError = err
@@ -126,7 +126,10 @@ public struct RcloneRunner: RcloneRunning {
         return env
     }
 
-    private static func qos(_ p: TaskPriority) -> QualityOfService {
+    /// The calling agent's priority. A pass that began in the background keeps its task's priority after
+    /// being raised for a drive, so `raised` decides that case.
+    static func qos(_ p: TaskPriority, raised: Bool) -> QualityOfService {
+        if raised, p < .medium { return .default }
         if p >= .userInitiated { return .userInitiated }
         if p >= .medium { return .default }
         if p >= .utility { return .utility }
@@ -148,7 +151,7 @@ public struct RcloneRunner: RcloneRunning {
         process.executableURL = binary
         process.arguments = args
         process.environment = Self.childEnvironment(context)
-        process.qualityOfService = Self.qos(Task.currentPriority)   // same priority as the calling agent
+        process.qualityOfService = Self.qos(Task.currentPriority, raised: AgentPriority.isRaised)
         // Output goes to the log file; stdout is discarded and stderr is drained concurrently,
         // so a full pipe can never block the child.
         let stderrPipe = Pipe()

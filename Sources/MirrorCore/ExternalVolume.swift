@@ -174,9 +174,6 @@ public enum ExternalVolume {
         return volumes.first { $0.uuid.caseInsensitiveCompare(uuid) == .orderedSame }
     }
 
-    /// How long a drive can stay away before one reminder.
-    public static let overdueAfter: TimeInterval = 7 * 86_400
-
     /// Kept free after a run: 1 GB or 2% of the drive, whichever is greater.
     public static func reserve(for volume: VolumeInfo) -> Int64 {
         max(1_000_000_000, volume.totalBytes / 50)
