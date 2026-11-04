@@ -1788,6 +1788,18 @@ private final class Harness: @unchecked Sendable {
         #expect(try h.latest()?.status == .partial)
     }
 
+    /// A run that reaches `prove` puts them back by itself, which hides a wipe. One that stops first can't.
+    @Test func anOverflowThenAFailedSyncStillKeepsFreedFiles() async throws {
+        let h = try Harness(); try withFreedOwed(h); h.change("flowapp/a.txt")
+        h.rclone.script(real: [.permanent], planned: many())
+        await h.run()
+        let s = try h.state
+        #expect(s.hashWholeSet)
+        #expect(s.verifyOwed == ["flowapp/old.txt"])
+        #expect(s.freedSince.keys.sorted() == ["flowapp/old.txt"])
+        #expect(s.mismatched == ["flowapp/old.txt"])
+    }
+
     @Test func aScopedRunNeverClearsTheFlag() async throws {
         let h = try Harness(); try h.prime(); h.change("flowapp/a.txt")
         var s = try h.state; s.hashWholeSet = true; try h.store.save(s, for: h.pair)
