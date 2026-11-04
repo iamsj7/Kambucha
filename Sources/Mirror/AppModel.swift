@@ -88,6 +88,8 @@ final class AppModel {
     @ObservationIgnored let eject: EjectController
     /// Set when the owner chooses Review Deletions; the review window shows that set's held deletions.
     var reviewingSet: UUID?
+    /// Why the review is still open, shown in it. Ends with the review.
+    private(set) var reviewNotice: String?
     /// Sticky: cleared only by `dismissError()` or the next owner action. `refresh()` never touches it.
     private(set) var lastError: String?
 
@@ -236,15 +238,25 @@ final class AppModel {
     }
 
     /// Opens the deletion review. Approving deletions needs the owner to see the list first.
-    func allowDeletes(_ set: UUID) { lastError = nil; reviewingSet = set }
+    func allowDeletes(_ set: UUID) { lastError = nil; reviewNotice = nil; reviewingSet = set }
 
-    func keepHolding() { reviewingSet = nil }
+    func keepHolding() { reviewingSet = nil; reviewNotice = nil }
 
-    /// Launches the agent with the count the owner reviewed; it holds again if the list has grown.
-    func allowOnce(arguments: [String]) {
+    static let busyText = "A backup is running. Try again shortly."
+
+    /// Launches the agent with the count the owner reviewed; it holds again if the list has grown. False, with the
+    /// review left open, while a run holds the lock: the agent couldn't take this, and the approval mustn't vanish.
+    @discardableResult
+    func allowOnce(arguments: [String]) -> Bool {
         lastError = nil
-        reviewingSet = nil
-        launchAgent(arguments)
+        if isBackupActive || AgentLockProbe.isHeld(support: support) {
+            reviewNotice = Self.busyText
+            return false
+        }
+        let reviewed = reviewingSet
+        keepHolding()
+        launchAgent(arguments, reviewing: reviewed)
+        return true
     }
 
     // MARK: Editing sets and destinations
@@ -300,7 +312,7 @@ final class AppModel {
     var heldSet: SetRow? { rows.first { if case .held = $0.status { true } else { false } } }
 
     /// The agent lives next to the app binary. Never derived from argv.
-    private func launchAgent(_ arguments: [String]) {
+    private func launchAgent(_ arguments: [String], reviewing: UUID? = nil) {
         // One agent at a time: a second launch would let the first one's exit advance the new queue.
         if process?.isRunning == true {
             runQueue.start(.all)
@@ -328,16 +340,25 @@ final class AppModel {
                 guard let self else { return }
                 let isCurrent = self.process === proc
                 if isCurrent { self.process = nil }
-                if code != 0 {
-                    let why = tail.split(separator: "\n").last.map(String.init) ?? ""
-                    self.lastError = "The backup agent stopped with code \(code)." + (why.isEmpty ? "" : " \(why)")
-                }
+                self.agentExited(code: code, tail: tail, reviewing: reviewing)
                 self.refresh()
                 if isCurrent, let id = self.runQueue.next(afterExit: code) { self.launchAgent(["--run-now", id.uuidString]) }
             }
         }
         do { try p.run(); process = p }
         catch { lastError = "Mirror could not start a backup: \(error.localizedDescription)" }
+    }
+
+    /// `reviewing` is the set whose approval this launch carried. A launchd run can take the lock between the
+    /// check and the launch, so that review comes back rather than the approval being lost.
+    func agentExited(code: Int32, tail: String, reviewing: UUID?) {
+        guard code != 0 else { return }
+        if code == AgentExit.busy {
+            if let reviewing { reviewingSet = reviewing; reviewNotice = Self.busyText } else { lastError = Self.busyText }
+            return
+        }
+        let why = tail.split(separator: "\n").last.map(String.init) ?? ""
+        lastError = "The backup agent stopped with code \(code)." + (why.isEmpty ? "" : " \(why)")
     }
 
     // MARK: Watching

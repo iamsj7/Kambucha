@@ -63,7 +63,7 @@ struct DeletionReviewSheet: View {
                             Text("\(entry.destination.name): \(entry.isLoaded ? entry.count.formatted() : "…") \(entry.count == 1 ? "deletion" : "deletions")")
                             Spacer()
                             Button("Allow Once", role: .destructive) {
-                                if let args = review.allowOnceArguments(for: entry.id) { model.allowOnce(arguments: args); dismiss() }
+                                if let args = review.allowOnceArguments(for: entry.id), model.allowOnce(arguments: args) { dismiss() }
                             }
                             .disabled(review.allowOnceArguments(for: entry.id) == nil)
                             .accessibilityLabel("Allow once for \(entry.destination.name)")
@@ -76,6 +76,7 @@ struct DeletionReviewSheet: View {
             .accessibilityLabel("Files that would be deleted")
 
             HStack {
+                if let notice = model.reviewNotice { Label(notice, systemImage: "exclamationmark.triangle") }
                 Spacer()
                 Button("Keep Holding") { model.keepHolding(); dismiss() }
                     .keyboardShortcut(.defaultAction)

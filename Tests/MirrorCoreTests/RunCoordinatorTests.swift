@@ -4353,6 +4353,33 @@ private struct LeavesAfterOneMoreLook: RcloneRunning {
     }
 }
 
+/// The agent's exit is all the app hears of a request it couldn't take (final review S10).
+@Suite struct BusyAgentTests {
+    private func holdingTheLock(_ h: Harness, _ command: RunCommand) async throws -> RunEnd {
+        let other = RunLock(url: h.support.appendingPathComponent("locks/agent.lock"))
+        #expect(other.tryAcquire())
+        defer { other.release() }
+        return await h.coordinator().execute(command)
+    }
+
+    @Test func aRequestTheAgentCantTakeIsNotASuccess() async throws {
+        let h = try Harness(); try h.prime()
+        #expect(try await holdingTheLock(h, RunCommand(setID: h.set.id, approvedDeletions: 3, approvedDestination: h.iCloudDest.id, force: true)) == .busy)
+        #expect(try await holdingTheLock(h, RunCommand(force: true)) == .busy)
+        #expect(try h.records.recent(limit: 5).isEmpty)
+    }
+
+    @Test func aScheduledRunStillLeavesQuietly() async throws {
+        let h = try Harness(); try h.prime()
+        #expect(try await holdingTheLock(h, RunCommand()) == .done)
+    }
+
+    @Test func eachEndHasItsOwnExitCode() {
+        #expect(RunEnd.done.exitCode == 0 && RunEnd.failed.exitCode == 1)
+        #expect(RunEnd.busy.exitCode == AgentExit.busy && AgentExit.busy != 0 && AgentExit.busy != 1)
+    }
+}
+
 @Suite struct LivePairsTests {
     @Test func aRunDropsProblemsOfPairsThatAreGone() async throws {
         let h = try Harness(); try h.prime()

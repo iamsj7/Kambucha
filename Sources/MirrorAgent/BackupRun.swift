@@ -47,13 +47,13 @@ enum BackupRun {
         // launchd sends SIGTERM at logout. Dying at once would strand rclone, any sign-in config and
         // the pid file, so it cancels the work instead, which stops the child and cleans up.
         signal(SIGTERM, SIG_IGN)
-        let task = Task(priority: command.taskPriority) { await coordinator.runAll(command: command) }
+        let task = Task(priority: command.taskPriority) { await coordinator.execute(command) }
         let terminated = DispatchSource.makeSignalSource(signal: SIGTERM, queue: .global())
         terminated.setEventHandler { task.cancel() }
         terminated.resume()
-        let ran = await task.value
+        let end = await task.value
         terminated.cancel()
-        return ran ? 0 : 1
+        return end.exitCode
     }
 
     private struct Places {

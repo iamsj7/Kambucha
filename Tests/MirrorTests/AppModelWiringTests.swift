@@ -201,6 +201,55 @@ private func vol(_ uuid: String, internalLooking: Bool = false) -> VolumeInfo {
         #expect(m.reviewEntries.isEmpty)
     }
 
+    // MARK: Allow Once while a run holds the lock (final review S10)
+
+    private func heldModel() throws -> (AppModel, BackupSet) {
+        let d = Destination(name: "iCloud", kind: .iCloudFolder)
+        let s = BackupSet(name: "A", source: URL(fileURLWithPath: "/tmp/a"), destinationIDs: [d.id])
+        return (try make(destinations: [d], sets: [s]), s)
+    }
+
+    @Test func allowOnceWaitsForARunningBackupAndKeepsTheSheet() throws {
+        let (m, s) = try heldModel()
+        m.allowDeletes(s.id)
+        let lock = RunLock(url: m.support.appendingPathComponent("locks/agent.lock"))
+        #expect(lock.tryAcquire())
+        defer { lock.release() }
+        #expect(!m.allowOnce(arguments: ["--allow-deletes"]))
+        #expect(m.reviewingSet == s.id)
+        #expect(m.reviewNotice == "A backup is running. Try again shortly.")
+    }
+
+    @Test func theNoticeEndsWithTheReview() throws {
+        let (m, s) = try heldModel()
+        m.allowDeletes(s.id)
+        let lock = RunLock(url: m.support.appendingPathComponent("locks/agent.lock"))
+        #expect(lock.tryAcquire())
+        #expect(!m.allowOnce(arguments: ["--allow-deletes"]))
+        lock.release()
+        m.keepHolding()
+        #expect(m.reviewNotice == nil)
+    }
+
+    @Test func aBusyExitAfterTheSheetClosedBringsItBack() throws {
+        let (m, s) = try heldModel()
+        m.agentExited(code: AgentExit.busy, tail: "", reviewing: s.id)
+        #expect(m.reviewingSet == s.id)
+        #expect(m.reviewNotice == "A backup is running. Try again shortly.")
+    }
+
+    @Test func aBusyExitWithNothingToReviewIsPlainlySaid() throws {
+        let (m, _) = try heldModel()
+        m.agentExited(code: AgentExit.busy, tail: "", reviewing: nil)
+        #expect(m.lastError == "A backup is running. Try again shortly.")
+    }
+
+    @Test func anotherExitStillReportsItsCode() throws {
+        let (m, _) = try heldModel()
+        m.agentExited(code: 1, tail: "why", reviewing: nil)
+        #expect(m.lastError == "The backup agent stopped with code 1. why")
+    }
+
     // MARK: Problems end with their pair (final review S5)
 
     private func activeProblems(_ m: AppModel) throws -> [Problem] {

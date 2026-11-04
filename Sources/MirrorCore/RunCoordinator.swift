@@ -16,6 +16,23 @@ public struct RunPaths: Sendable {
     }
 }
 
+/// How the agent process ended, for whoever launched it.
+public enum AgentExit {
+    /// Sysexits' "try again later": another run holds the lock, so a request that needs a run wasn't carried out.
+    public static let busy: Int32 = 75
+}
+
+public enum RunEnd: Equatable, Sendable {
+    case done, failed, busy
+    public var exitCode: Int32 {
+        switch self {
+        case .done: 0
+        case .failed: 1
+        case .busy: AgentExit.busy
+        }
+    }
+}
+
 /// Runs every due pair, one at a time, through the flow in spec section 10. This owns the rule the
 /// whole app depends on: the stored event ID moves only after sync and verification both passed
 /// (`finish`), or when a batch held nothing but excluded paths, so nothing was owed. Anything else
@@ -79,27 +96,30 @@ public final class RunCoordinator: Sendable {
         self.helperCheck = helperCheck; self.downloader = downloader; self.requestGrace = requestGrace
     }
 
-    /// Another run holding the lock means leave quietly: no state, record or pid file is touched.
     /// False only when the agent itself couldn't run, which the record and a problem also say.
     @discardableResult
-    public func runAll(command: RunCommand) async -> Bool {
+    public func runAll(command: RunCommand) async -> Bool { await execute(command) != .failed }
+
+    /// Another run holding the lock means leave quietly: no state, record or pid file is touched. Only the
+    /// exit says so, as someone who asked for this run is waiting on the answer.
+    public func execute(_ command: RunCommand) async -> RunEnd {
         let lock = RunLock(url: paths.agentLock)
         switch lock.attempt() {
         case .acquired: break
-        case .held: return true
+        case .held: return command.isScheduled ? .done : .busy
         case .openFailed(let code):
             Self.log.error("cannot open the agent lock, errno \(code)")
             await report("Mirror could not open its run lock")
-            return false
+            return .failed
         }
         defer { lock.release() }
         let settings = loadSettings()
-        if settings.pauseInLowPowerMode, !command.force, lowPower() { return true }
+        if settings.pauseInLowPowerMode, !command.force, lowPower() { return .done }
         // Ahead of everything else: any volume mounting wakes the agent, and most have nothing to do with it.
         var first = Set<PairID>()
         if isMountWake(command) {
             first = dueDrivePairs()
-            if first.isEmpty { return true }
+            if first.isEmpty { return .done }
         }
         if command.isScheduled { noteFullPass() }
         writePID()
@@ -108,14 +128,14 @@ public final class RunCoordinator: Sendable {
         // First of all, so a swapped rclone is caught before any Keychain read.
         do { try helperCheck() } catch {
             await report("The embedded rclone failed its signature check")
-            return false
+            return .failed
         }
         do { try RcloneSession.wipeLeftovers(in: paths.work) } catch { Self.log.error("wiping leftovers failed") }
         do { try await problems.retryPending() } catch { Self.log.error("retrying notifications failed") }
         let ran = await runPairs(command, first: first, settings: settings)
         prune()
         await settleRequests()
-        return ran
+        return ran ? .done : .failed
     }
 
     /// A damaged file is the app's to report. Backups carry on with the defaults.
