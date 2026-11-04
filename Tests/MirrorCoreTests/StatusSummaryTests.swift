@@ -105,9 +105,38 @@ struct StatusSummaryTests {
         #expect(r == .waitingForDownload(1))
     }
 
-    @Test func aPartialRunWithNothingToCountNeverSaysUploadingZero() {
+    @Test func aPartialRunWithNothingToCountIsUnfinishedNotRunning() {
         let s = set([dest])
-        #expect(overall(s, [dest], [pair(s, dest): state()], [record(s, dest, .partial, pending: 0)]) == .running)
+        var st = state(); st.syncIncomplete = true
+        let partial = [record(s, dest, .partial, pending: 0)]
+        #expect(overall(s, [dest], [pair(s, dest): st], partial) == .unfinished)
+        #expect(overall(s, [dest], [pair(s, dest): st], partial, running: true) == .running)
+    }
+
+    @Test func aRefusedFileIsNeverBackedUpEvenWithACleanRecord() {
+        let s = set([dest])
+        var st = state(); st.refusedSince = ["a.tmp": now]
+        #expect(overall(s, [dest], [pair(s, dest): st], [record(s, dest, .success)]) == .notAccepted(1))
+        #expect(overall(s, [dest], [pair(s, dest): st], [record(s, dest, .partial)]) == .notAccepted(1))
+    }
+
+    @Test func aRefusedFileOverItsTimeIsAProblemNotACount() {
+        let s = set([dest])
+        var st = state(); st.refusedSince = ["a.tmp": now]
+        let r = overall(s, [dest], [pair(s, dest): st], [record(s, dest, .partial)], [problem(.fileRefused, s, dest)])
+        #expect(r == .attention(Problem.fileRefused.headline))
+    }
+
+    @Test func aMismatchOutranksARefusedFile() {
+        let s = set([dest])
+        var st = waiting(); st.refusedSince = ["a.tmp": now]
+        #expect(overall(s, [dest], [pair(s, dest): st], [record(s, dest, .partial)]) == .waitingForDownload(1))
+    }
+
+    /// A skipped run says nothing, so the record stays partial after the state has caught up.
+    @Test func aPartialRecordTheStateHasMovedPastIsBackedUp() {
+        let s = set([dest])
+        #expect(overall(s, [dest], [pair(s, dest): state()], [record(s, dest, .partial)]) == .backedUp(last: now, files: 100))
     }
 
     @Test func realUploadsOutrankTheWait() {

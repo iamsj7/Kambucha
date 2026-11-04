@@ -5,6 +5,10 @@ public enum OverallStatus: Equatable, Sendable {
     case uploading(Int)
     /// Recorded mismatches iCloud has evicted, waiting for it to bring them back to be hashed.
     case waitingForDownload(Int)
+    /// Files iCloud has refused so far, not yet old enough for the 24-hour alert.
+    case notAccepted(Int)
+    /// The last run stopped short, and no run is under way. The next wake-up resumes it.
+    case unfinished
     case running
     case held(Int)
     case attention(String)
@@ -15,6 +19,10 @@ public enum OverallStatus: Equatable, Sendable {
 /// Folds the on-disk state into the one status the menu bar shows (spec sections 8a and 12).
 public enum StatusSummary {
     /// A real mismatch said as one, in the status and the run record: never a neutral wait.
+    public static func notAcceptedText(count n: Int) -> String {
+        "\(n.formatted()) \(n == 1 ? "file" : "files") iCloud hasn't accepted yet"
+    }
+
     public static func recheckText(count n: Int) -> String {
         n == 1 ? "Re-checking 1 file that didn't match, waiting for iCloud to download it"
                : "Re-checking \(n.formatted()) files that didn't match, waiting for iCloud to download them"
@@ -22,7 +30,7 @@ public enum StatusSummary {
 
     /// "Backed Up" means every destination of every active set passed. Review items and a due restore
     /// drill never block it. Priority: attention, held, running, uploading, a missing destination,
-    /// waiting for iCloud, a run still to resume, backed up.
+    /// waiting for iCloud, files not accepted, a run still to resume, backed up.
     public static func overall(sets: [BackupSet], destinations: [Destination], states: [PairID: SetState],
                                records: [RunRecord], problems: [ActiveProblem], running: Bool) -> OverallStatus {
         // Before anything that reads the sets: a run that couldn't start may be why they look empty.
@@ -89,8 +97,11 @@ public enum StatusSummary {
         let waiting = pairs.reduce(0) { $0 + (states[$1]?.waitingForDownload ?? 0) }
         if waiting > 0 { return .waitingForDownload(waiting) }
 
-        // 6. A partial run with nothing to count, stopped by a time limit say. The next wake-up resumes it.
-        if pairs.contains(where: { latest[$0]?.status == .partial }) { return .running }
+        // 6. What's left is said as it is. "Backing Up" is only for a run that's really under way.
+        let refused = pairs.reduce(0) { $0 + (states[$1]?.refusedSince.count ?? 0) }
+        if refused > 0 { return .notAccepted(refused) }
+        // A skipped run leaves the record behind, so the state says whether this is still true.
+        if pairs.contains(where: { latest[$0]?.status == .partial && states[$0]?.isBackedUp != true }) { return .unfinished }
 
         // 7. Backed up only when every pair has finished at least once.
         let finished = pairs.compactMap { states[$0]?.lastFinished }

@@ -12,4 +12,14 @@ struct StatusPresentationTests {
         #expect(p.detail == "Re-checking 2 files that didn't match, waiting for iCloud to download them")
         #expect(OverallStatus.waitingForDownload(2).shortText == "Didn't Match")
     }
+
+    @Test func aFileNotAcceptedYetIsCountedAndIsNotBackedUp() {
+        #expect(StatusPresentation(.notAccepted(1)).title == "1 file iCloud hasn't accepted yet")
+        #expect(StatusPresentation(.notAccepted(2)).title == "2 files iCloud hasn't accepted yet")
+    }
+
+    @Test func anUnfinishedBackupNeverReadsAsRunning() {
+        #expect(StatusPresentation(.unfinished).title != StatusPresentation(.running).title)
+        #expect(OverallStatus.unfinished.shortText != OverallStatus.running.shortText)
+    }
 }

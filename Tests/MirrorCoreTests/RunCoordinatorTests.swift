@@ -1806,21 +1806,42 @@ private final class Harness: @unchecked Sendable {
         #expect(try status(h) == .attention(Problem.verificationFailed.headline))
     }
 
-    @Test func aRunStoppedByTheTimeLimitNeverShowsUploadingZero() async throws {
+    @Test func aRunStoppedByTheTimeLimitIsUnfinishedOnceTheAgentHasGone() async throws {
         let h = try Harness(); try h.prime(); h.change("flowapp/a.txt")
         h.rclone.script(real: [.partial])
         await h.run()
         #expect(try h.latest()?.status == .partial)
-        #expect(try status(h) == .running)
+        #expect(try status(h) == .unfinished)
     }
 
-    @Test func aRefusedFileWithNoUploadsNeverShowsUploadingZero() async throws {
-        let h = try Harness(); try h.prime(); h.change("flowapp/a.txt")
+    private func refused(_ h: Harness) async throws {
+        try h.prime(); h.change("flowapp/a.txt")
         h.rclone.script(copied: ["a.txt"])
         h.auditor.set(refused: ["a.txt"])
         await h.run()
         #expect(try h.latest()?.status == .partial)
-        #expect(try status(h) == .running)
+    }
+
+    @Test func aRefusedFileWaitingOnItsAlertIsCounted() async throws {
+        let h = try Harness(); try await refused(h)
+        #expect(try status(h) == .notAccepted(1))
+        #expect(StatusSummary.notAcceptedText(count: 1) == "1 file iCloud hasn't accepted yet")
+    }
+
+    @Test func aRefusedFileTurnsToAttentionAfterADay() async throws {
+        let h = try Harness(); try await refused(h)
+        h.now = h.now.addingTimeInterval(25 * hour)
+        await h.run()
+        #expect(try status(h) == .attention(Problem.fileRefused.headline))
+    }
+
+    @Test func aFileICloudAcceptsAfterAllEndsTheCount() async throws {
+        let h = try Harness(); try await refused(h)
+        h.auditor.set()
+        h.now = h.now.addingTimeInterval(hour)   // records order by time
+        await h.run()   // a skipped run, so the partial record stands
+        #expect(try h.latest()?.status == .skipped)
+        guard case .backedUp = try status(h) else { Issue.record("expected Backed Up"); return }
     }
 }
 
