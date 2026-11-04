@@ -5,7 +5,7 @@ import Foundation
 // MARK: Fakes
 
 private final class FakeTransport: AgentTransport, @unchecked Sendable {
-    var response = Data("{}".utf8)
+    var response = Data(#"{"ok":true}"#.utf8)
     var error: (any Error)?
     private(set) var calls: [(subcommand: String, body: Data)] = []
     func call(subcommand: String, body: Data) async throws -> Data {
@@ -22,7 +22,7 @@ private func bodyText(_ t: FakeTransport) -> String { String(decoding: t.calls[0
 
 @Test func archiveListSendsOnlyIdsAndDecodesEntries() async throws {
     let t = FakeTransport()
-    t.response = json(#"{"entries":[{"id":"Docs/2026-11-04T10-00/a.txt","setName":"Docs","stamp":"2026-11-04T10:00:00Z","path":"Archive/Docs/2026-11-04T10-00/a.txt","size":42}]}"#)
+    t.response = json(#"{"ok":true,"entries":[{"id":"Docs/2026-11-04T10-00/a.txt","setName":"Docs","stamp":"2026-11-04T10:00:00Z","path":"Archive/Docs/2026-11-04T10-00/a.txt","size":42}]}"#)
     let set = UUID(), dest = UUID()
     let entries = try await AgentArchiveClient(transport: t).archiveList(set: set, destination: dest)
     #expect(t.calls.count == 1)
@@ -47,7 +47,7 @@ private func utcStamp(_ s: String) -> Date { ISO8601DateFormatter().date(from: s
 
 @Test func dryRunReturnsTheFiles() async throws {
     let t = FakeTransport()
-    t.response = json(#"{"files":["a","b/c"]}"#)
+    t.response = json(#"{"ok":true,"files":["a","b/c"]}"#)
     let files = try await AgentArchiveClient(transport: t).dryRunDeletions(set: UUID(), destination: UUID())
     #expect(t.calls[0].subcommand == "dry-run-deletions")
     #expect(files == ["a", "b/c"])
@@ -73,7 +73,7 @@ private func utcStamp(_ s: String) -> Date { ISO8601DateFormatter().date(from: s
     let box = try ArchiveSandbox()
     let log = box.root.appendingPathComponent("args.txt"), stdin = box.root.appendingPathComponent("stdin.txt")
     let script = box.root.appendingPathComponent("fake-agent.sh")
-    try "#!/bin/sh\necho \"$#:$1\" > '\(log.path)'\ncat > '\(stdin.path)'\necho '{\"files\":[\"x\"]}'\n"
+    try "#!/bin/sh\necho \"$#:$1\" > '\(log.path)'\ncat > '\(stdin.path)'\necho '{\"ok\":true,\"files\":[\"x\"]}'\n"
         .write(to: script, atomically: true, encoding: .utf8)
     try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: script.path)
     let files = try await AgentArchiveClient(transport: AgentProcessTransport(executable: script))
@@ -87,7 +87,7 @@ private func utcStamp(_ s: String) -> Date { ISO8601DateFormatter().date(from: s
 
 @Test func archiveProviderAsksTheAgentForTheSetAndDestination() async throws {
     let t = FakeTransport()
-    t.response = json(#"{"entries":[]}"#)
+    t.response = json(#"{"ok":true,"entries":[]}"#)
     let set = makeSet("Docs"), dest = Destination(name: "iCloud", kind: .iCloudFolder)
     _ = try await AgentArchiveProvider(client: AgentArchiveClient(transport: t)).list(set: set, destination: dest)
     #expect(bodyText(t).contains(set.id.uuidString) && bodyText(t).contains(dest.id.uuidString))

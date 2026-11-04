@@ -39,50 +39,38 @@ public protocol ArchiveAgentCalling: Sendable {
 
 /// Subcommands `archive-list`, `archive-restore` and `dry-run-deletions`.
 ///
-/// Wire shapes (the request names the set and destination by id, so the agent reads the stored copies):
-///   archive-list         {"set": id, "destination": id}                         -> {"entries": [{id, setName, stamp, path, size}]}
-///   archive-restore      {"set": id, "destination": id, "path": s, "to": s}     -> {}
-///   dry-run-deletions    {"set": id, "destination": id}                         -> {"files": [s]}
-/// Any answer may carry `"failure": AgentFailure`, which is thrown as the same typed error the agent hit.
+/// The shapes are `AgentWire`. An answer needs `ok: true`; `failure` is thrown as the same typed error the agent hit.
 public struct AgentArchiveClient: ArchiveAgentCalling {
     private let transport: any AgentTransport
     public init(transport: any AgentTransport) { self.transport = transport }
-
-    private struct Pair: Codable { var set: UUID; var destination: UUID }
-    private struct Restore: Codable { var set: UUID; var destination: UUID; var path: String; var to: String }
-    private struct WireEntry: Codable { var id: String; var setName: String; var stamp: Date; var path: String; var size: Int64 }
-    private struct Answer: Codable {
-        var failure: AgentFailure?
-        var entries: [WireEntry]?
-        var files: [String]?
-    }
 
     private static var encoder: JSONEncoder {
         let e = JSONEncoder(); e.dateEncodingStrategy = .iso8601; e.outputFormatting = [.withoutEscapingSlashes]; return e
     }
     private static var decoder: JSONDecoder { let d = JSONDecoder(); d.dateDecodingStrategy = .iso8601; return d }
 
-    private func ask<B: Encodable>(_ subcommand: String, _ body: B) async throws -> Answer {
+    private func ask<B: Encodable>(_ subcommand: String, _ body: B) async throws -> AgentWire.Response {
         let output = try await transport.call(subcommand: subcommand, body: try Self.encoder.encode(body))
-        guard let answer = try? Self.decoder.decode(Answer.self, from: output) else {
+        guard let answer = try? Self.decoder.decode(AgentWire.Response.self, from: output) else {
             throw AgentClientError.noResponse(exitCode: 0)
         }
         if let failure = answer.failure { throw failure.underlying }
+        guard answer.ok == true else { throw AgentClientError.noResponse(exitCode: 0) }
         return answer
     }
 
     public func archiveList(set: UUID, destination: UUID) async throws -> [ArchiveEntry] {
-        let answer = try await ask("archive-list", Pair(set: set, destination: destination))
+        let answer = try await ask(AgentWire.archiveList, AgentWire.PairRequest(set: set, destination: destination))
         guard let entries = answer.entries else { throw AgentClientError.noResponse(exitCode: 0) }
         return entries.map { ArchiveEntry(id: $0.id, setName: $0.setName, stamp: $0.stamp, path: $0.path, size: $0.size) }
     }
 
     public func archiveRestore(set: UUID, destination: UUID, path: String, to: URL) async throws {
-        _ = try await ask("archive-restore", Restore(set: set, destination: destination, path: path, to: to.path))
+        _ = try await ask(AgentWire.archiveRestore, AgentWire.RestoreRequest(set: set, destination: destination, path: path, to: to.path))
     }
 
     public func dryRunDeletions(set: UUID, destination: UUID) async throws -> [String] {
-        let answer = try await ask("dry-run-deletions", Pair(set: set, destination: destination))
+        let answer = try await ask(AgentWire.dryRunDeletions, AgentWire.PairRequest(set: set, destination: destination))
         guard let files = answer.files else { throw AgentClientError.noResponse(exitCode: 0) }
         return files
     }
