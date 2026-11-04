@@ -15,11 +15,21 @@ struct SetRow: Identifiable, Equatable {
     var status: OverallStatus
 }
 
+/// One live progress line for the panel.
+struct ProgressItem: Identifiable, Equatable, Sendable {
+    var id: PairID { progress.pair }
+    var label: String
+    var progress: TransferProgress
+}
+
 /// Everything `refresh()` reads from disk, computed off the main thread.
 private struct Snapshot: Sendable {
     var sets: [BackupSet]
     var status: OverallStatus
     var rows: [SetRow]
+    var destinations: [Destination]
+    var states: [PairID: SetState]
+    var progress: [ProgressItem]
 
     static func load(support: URL) -> Snapshot? {
         let store = ConfigStore(root: support)
@@ -34,13 +44,21 @@ private struct Snapshot: Sendable {
         let records = (try? RunRecordStore(root: support).recent(limit: 200)) ?? []
         let problems = (try? ProblemCenter(root: support, notifier: SilentNotifier()).active()) ?? []
         let running = AgentPresence.isRunning(support: support)
+        // Progress belongs to a live agent only; a file left by a killed one is ignored.
+        let live = running ? ((try? ProgressStore(root: support).all(now: Date())) ?? []) : []
+        let items: [ProgressItem] = live.compactMap { p in
+            guard let set = sets.first(where: { $0.id == p.pair.set }) else { return nil }
+            let dest = destinations.first { $0.id == p.pair.destination }?.name
+            return ProgressItem(label: dest.map { "\(set.name) to \($0)" } ?? set.name, progress: p)
+        }.sorted { $0.label < $1.label }
         func overall(_ ss: [BackupSet]) -> OverallStatus {
             StatusSummary.overall(sets: ss, destinations: destinations, states: states,
                                   records: records, problems: problems, running: running)
         }
         return Snapshot(sets: sets, status: overall(sets),
                         rows: sets.map { SetRow(id: $0.id, name: $0.name, isPaused: $0.isPaused,
-                                                status: $0.isPaused ? .paused : overall([$0])) })
+                                                status: $0.isPaused ? .paused : overall([$0])) },
+                        destinations: destinations, states: states, progress: items)
     }
 }
 
@@ -62,23 +80,31 @@ final class AppModel {
     private(set) var sets: [BackupSet] = []
     private(set) var rows: [SetRow] = []
     private(set) var status: OverallStatus = .notConfigured
-    /// Set when the owner chooses Review Deletions; Task 17 replaces the placeholder with the real sheet.
+    private(set) var destinations: [Destination] = []
+    private(set) var states: [PairID: SetState] = [:]
+    private(set) var progress: [ProgressItem] = []
+    /// Set when the owner chooses Review Deletions; the review window shows that set's held deletions.
     var reviewingSet: UUID?
     /// Sticky: cleared only by `dismissError()` or the next owner action. `refresh()` never touches it.
     private(set) var lastError: String?
 
     var isPaused: Bool { !sets.isEmpty && sets.allSatisfy(\.isPaused) }
 
-    @ObservationIgnored private let support: URL
+    @ObservationIgnored let support: URL
     @ObservationIgnored private let store: ConfigStore
+    @ObservationIgnored let services: AppServices
+    @ObservationIgnored let acceptance: PreviewAcceptanceStore
     @ObservationIgnored private nonisolated(unsafe) var watchers: [String: DispatchSourceFileSystemObject] = [:]
     @ObservationIgnored private var generation = 0
     @ObservationIgnored private var process: Process?
+    @ObservationIgnored private var runQueue = RunQueue()
     @ObservationIgnored private var panelVisible = false
     @ObservationIgnored private var poller: Task<Void, Never>?
 
-    init(support: URL = MirrorPaths.support) {
+    init(support: URL = MirrorPaths.support, services: AppServices = .live) {
         self.support = support
+        self.services = services
+        acceptance = PreviewAcceptanceStore(root: support)
         store = ConfigStore(root: support)
         if let snap = Snapshot.load(support: support) { apply(snap) }   // first paint is synchronous
         else { status = .attention("Mirror could not read its settings") }
@@ -107,13 +133,19 @@ final class AppModel {
     }
 
     private func apply(_ snap: Snapshot) {
-        sets = snap.sets; rows = snap.rows; status = snap.status
+        sets = snap.sets; rows = snap.rows; status = snap.status; progress = snap.progress
+        destinations = snap.destinations; states = snap.states
     }
 
     // MARK: Panel visibility and polling
 
     func panelAppeared() { panelVisible = true; refresh(); updatePolling() }
-    func panelDisappeared() { panelVisible = false; updatePolling() }
+    func panelDisappeared() {
+        panelVisible = false
+        // The progress folder is written every 2 s during a run; nobody is looking, so stop watching it.
+        watchers.removeValue(forKey: "progress")?.cancel()
+        updatePolling()
+    }
 
     private var isRunning: Bool { if case .running = status { true } else { false } }
 
@@ -138,7 +170,20 @@ final class AppModel {
     /// Runs the agent for one set, or all sets when nil.
     func runNow(_ set: UUID?) {
         lastError = nil
-        launchAgent(["--run-now"] + (set.map { [$0.uuidString] } ?? []))
+        runQueue.start(.all)
+        // No backup for a set starts until its preview was accepted once (spec section 9).
+        // Accepted sets still run; the others are named so the owner can preview them.
+        let plan = RunNowPlan.make(sets: sets, target: set, isAccepted: { acceptance.isAccepted($0) })
+        if !plan.unaccepted.isEmpty {
+            lastError = "Preview before the first backup: \(plan.unaccepted.joined(separator: ", ")). Open each in Mirror and choose Preview Backup."
+        }
+        guard !plan.run.isEmpty else { return }
+        if set == nil && plan.unaccepted.isEmpty {
+            launchAgent(["--run-now"])
+        } else {
+            runQueue.start(.sets(plan.run))
+            if let id = runQueue.first { launchAgent(["--run-now", id.uuidString]) }
+        }
     }
 
     func setPaused(_ paused: Bool) {
@@ -149,16 +194,71 @@ final class AppModel {
         catch { lastError = "Mirror could not save the pause setting." }
     }
 
-    /// Placeholder until the review sheet (Task 17) exists: approving deletions needs the owner to see the list.
+    /// Opens the deletion review. Approving deletions needs the owner to see the list first.
     func allowDeletes(_ set: UUID) { lastError = nil; reviewingSet = set }
 
     func keepHolding() { reviewingSet = nil }
+
+    /// Launches the agent with the count the owner reviewed; it holds again if the list has grown.
+    func allowOnce(arguments: [String]) {
+        lastError = nil
+        reviewingSet = nil
+        launchAgent(arguments)
+    }
+
+    // MARK: Editing sets and destinations
+
+    func set(_ id: UUID) -> BackupSet? { sets.first { $0.id == id } }
+    func destination(_ id: UUID) -> Destination? { destinations.first { $0.id == id } }
+
+    /// Adds a new set or replaces the one with the same id.
+    func save(set updated: BackupSet) {
+        var all = sets
+        if let i = all.firstIndex(where: { $0.id == updated.id }) { all[i] = updated } else { all.append(updated) }
+        persist { try store.saveSets(all) }
+    }
+
+    func removeSet(_ id: UUID) {
+        persist { try store.saveSets(sets.filter { $0.id != id }) }
+        acceptance.forget(id)
+    }
+
+    func save(destination updated: Destination) {
+        var all = destinations
+        if let i = all.firstIndex(where: { $0.id == updated.id }) { all[i] = updated } else { all.append(updated) }
+        persist { try store.saveDestinations(all) }
+    }
+
+    func removeDestination(_ id: UUID) {
+        var updatedSets = sets
+        for i in updatedSets.indices { updatedSets[i].destinationIDs.removeAll { $0 == id } }
+        persist {
+            try store.saveDestinations(destinations.filter { $0.id != id })
+            try store.saveSets(updatedSets)
+        }
+    }
+
+    func report(_ message: String) { lastError = message }
+
+    private func persist(_ write: () throws -> Void) {
+        lastError = nil
+        do { try write() } catch { lastError = "Mirror could not save your changes." }
+        // Apply at once so the screen the owner is on reflects the change before the file watcher fires.
+        if let snap = Snapshot.load(support: support) { apply(snap) }
+        refresh()
+    }
 
     /// The first set that has deletions held, for the Review Deletions action.
     var heldSet: SetRow? { rows.first { if case .held = $0.status { true } else { false } } }
 
     /// The agent lives next to the app binary. Never derived from argv.
     private func launchAgent(_ arguments: [String]) {
+        // One agent at a time: a second launch would let the first one's exit advance the new queue.
+        if process?.isRunning == true {
+            runQueue.start(.all)
+            lastError = "A backup is already running. Try again when it finishes."
+            return
+        }
         let exe = Bundle.main.bundleURL.appendingPathComponent("Contents/MacOS/MirrorAgent")
         let p = Process()
         p.executableURL = exe
@@ -178,12 +278,14 @@ final class AppModel {
             let tail = buffer.text
             Task { @MainActor in
                 guard let self else { return }
-                if self.process === proc { self.process = nil }
+                let isCurrent = self.process === proc
+                if isCurrent { self.process = nil }
                 if code != 0 {
                     let why = tail.split(separator: "\n").last.map(String.init) ?? ""
                     self.lastError = "The backup agent stopped with code \(code)." + (why.isEmpty ? "" : " \(why)")
                 }
                 self.refresh()
+                if isCurrent, let id = self.runQueue.next(afterExit: code) { self.launchAgent(["--run-now", id.uuidString]) }
             }
         }
         do { try p.run(); process = p }
@@ -197,7 +299,8 @@ final class AppModel {
     /// Attaches a watcher for each folder that doesn't have one. A folder that was replaced has its
     /// old watcher cancelled first, so the new one is picked up on the next refresh.
     private func attachMissingWatchers() {
-        for sub in Self.watched where watchers[sub] == nil {
+        let wanted = panelVisible ? Self.watched + ["progress"] : Self.watched
+        for sub in wanted where watchers[sub] == nil {
             let dir = sub.isEmpty ? support : support.appendingPathComponent(sub, isDirectory: true)
             try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
             let fd = open(dir.path, O_EVTONLY)

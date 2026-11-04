@@ -5,6 +5,7 @@ import MirrorCore
 @main
 struct MirrorApp: App {
     @State private var model: AppModel
+    @State private var settings = SettingsModel()
 
     init() {
         #if DEBUG
@@ -16,7 +17,17 @@ struct MirrorApp: App {
             exit(0)
         }
         if let i = dbg.firstIndex(of: "--snapshot-views"), i + 1 < dbg.count {
+            _ = NSApplication.shared
             DebugViewSnapshots.snapshotAll(to: URL(fileURLWithPath: dbg[i + 1]))
+            exit(0)
+        }
+        if let i = dbg.firstIndex(of: "--snapshot-main"), i + 1 < dbg.count {
+            _ = NSApplication.shared
+            DebugFixtures.snapshotMain(to: URL(fileURLWithPath: dbg[i + 1]))
+            exit(0)
+        }
+        if let i = dbg.firstIndex(of: "--snapshot-progress"), i + 1 < dbg.count {
+            DebugFixtures.snapshotProgress(to: URL(fileURLWithPath: dbg[i + 1]))
             exit(0)
         }
         if let i = dbg.firstIndex(of: "--fixture"), i + 1 < dbg.count, let f = DebugFixtures.Name(rawValue: dbg[i + 1]) {
@@ -54,7 +65,8 @@ struct MirrorApp: App {
         }
         .menuBarExtraStyle(.window)
 
-        Window("Mirror", id: "main") { MainWindowPlaceholder() }
-        Window("Review Deletions", id: "review") { ReviewDeletionsPlaceholder() }
+        Window("Mirror", id: "main") { MainWindow(model: model) }
+
+        Settings { SettingsView(model: settings) }
     }
 }

@@ -160,6 +160,7 @@ final class OnboardingModel {
     private(set) var notificationsDenied = false
     private(set) var message: String?
     private(set) var isChecking = false
+    private(set) var hasRefreshed = false
     private(set) var checkFailed = false
     private(set) var kickFailed = false
     @ObservationIgnored private var firstCheckDone = false
@@ -192,6 +193,7 @@ final class OnboardingModel {
         if access == .allowed { d.insert(.notifications) }
         if let sets = try? store.loadSets(), !sets.isEmpty { d.insert(.firstSet) }
         done = d
+        hasRefreshed = true
     }
 
     /// Asks launchd to start the agent and waits up to 15 seconds for its access report. This starts a
