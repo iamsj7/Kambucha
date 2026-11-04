@@ -462,7 +462,7 @@ private final class Harness: @unchecked Sendable {
                                sessions: { _ in FakeSession(endpoint: "x:") }, remote: h.files,
                                paths: RunPaths(support: h.support, logs: h.logs, work: h.work))
         await c.runAll(command: RunCommand())
-        #expect(spy.seen == String(ProcessInfo.processInfo.processIdentifier))
+        #expect(spy.seen == AgentPresence.record(for: ProcessInfo.processInfo.processIdentifier))
         #expect(!FileManager.default.fileExists(atPath: pidFile.path))
     }
 

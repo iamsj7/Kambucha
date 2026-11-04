@@ -30,6 +30,21 @@ struct AgentPresenceTests {
         #expect(!FileManager.default.fileExists(atPath: url.path))
     }
 
+    @Test func theRecordNamesThisProcessAndItsStart() throws {
+        let d = try dir()
+        try AgentPresence.record(for: getpid()).write(to: d.appendingPathComponent("agent.pid"), atomically: true, encoding: .utf8)
+        #expect(AgentPresence.isRunning(support: d))
+    }
+
+    /// The pid is alive, but it's another process: macOS reused the number after a crash.
+    @Test func aReusedPidIsNotTheAgent() throws {
+        let d = try dir()
+        let url = d.appendingPathComponent("agent.pid")
+        try "\(getpid())\n12345\n".write(to: url, atomically: true, encoding: .utf8)
+        #expect(AgentPresence.isRunning(support: d) == false)
+        #expect(!FileManager.default.fileExists(atPath: url.path))
+    }
+
     @Test func garbageFileIsNotRunning() throws {
         let d = try dir()
         try "nope".write(to: d.appendingPathComponent("agent.pid"), atomically: true, encoding: .utf8)

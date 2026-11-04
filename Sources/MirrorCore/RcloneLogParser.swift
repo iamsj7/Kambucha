@@ -93,6 +93,10 @@ public enum RcloneLogParser {
         var s = LogSummary()
         var sizeSum: Int64 = 0
         var statsBytes: Int64?
+        var archived = Set<String>(), deleted = Set<String>()
+        func appendUnique(_ list: inout [String], _ item: String, seen: inout Set<String>) {
+            if seen.insert(item).inserted { list.append(item) }
+        }
         for line in lines(data) {
             if let b = line.statsBytes { statsBytes = b }
             guard let msg = line.msg else { continue }
@@ -110,12 +114,13 @@ public enum RcloneLogParser {
             } else if msg.hasPrefix("Copied") {
                 s.copied.append(object); sizeSum += line.size ?? 0
             } else if msg == "Moved into backup dir" {
-                s.deleted.append(object); appendUnique(&s.archived, object)
+                s.deleted.append(object); deleted.insert(object)
+                appendUnique(&s.archived, object, seen: &archived)
             } else if msg == "Moved (server-side)" {
                 // With --backup-dir this is the move of an overwritten or deleted file into the archive.
-                appendUnique(&s.archived, object)
+                appendUnique(&s.archived, object, seen: &archived)
             } else if msg == "Deleted" || msg.hasPrefix("Skipped delete") || msg.hasPrefix("Skipped move into backup dir") {
-                appendUnique(&s.deleted, object)   // the latter two are --dry-run
+                appendUnique(&s.deleted, object, seen: &deleted)   // the latter two are --dry-run
             } else if msg.hasPrefix("Renamed from \"") {
                 let old = msg.dropFirst("Renamed from \"".count).dropLast()
                 s.renamed.append("\(old) -> \(object)")
@@ -123,10 +128,6 @@ public enum RcloneLogParser {
         }
         s.bytes = statsBytes ?? sizeSum
         return s
-    }
-
-    private static func appendUnique(_ list: inout [String], _ item: String) {
-        if !list.contains(item) { list.append(item) }
     }
 
     private static func differenceCount(_ msg: String) -> Int? {

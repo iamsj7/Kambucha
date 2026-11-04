@@ -17,8 +17,8 @@ public struct AppSettings: Codable, Equatable, Sendable {
     public var defaultRetentionDays = 30
     /// Scheduled runs wait while macOS is in Low Power Mode.
     public var pauseInLowPowerMode = false
-    /// Scheduled and mount-triggered runs stay at background priority unless this is on; then they use
-    /// normal priority with `--transfers 4 --checkers 8`. Back Up Now and manual SSD runs always do.
+    /// Scheduled iCloud and cloud runs lower themselves to background priority unless this is on; then they use
+    /// normal priority with `--transfers 4 --checkers 8`. Back Up Now and every external drive run always do.
     public var fullSpeed = false
     /// A drive away for longer than this gets one quiet reminder.
     public var driveReminderDays = 7

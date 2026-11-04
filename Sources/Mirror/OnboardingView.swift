@@ -201,6 +201,7 @@ final class OnboardingModel {
     func refresh() async {
         var d: Set<OnboardingStep> = []
         let disk = await system.fullDiskAccess()
+        if disk == .confirmed { clearCheckFailure() }
         let finished = store.onboardingFinished
         if disk == .confirmed || finished { d.insert(.fullDiskAccess) }
         accessWarning = finished && disk == .failing
@@ -233,15 +234,22 @@ final class OnboardingModel {
         isChecking = true
         let outcome = await system.checkFullDiskAccessNow()
         isChecking = false
+        clearCheckFailure()
         checkFailed = outcome != .confirmed
         kickFailed = outcome == .kickFailed
         switch outcome {
-        case .confirmed: done.insert(.fullDiskAccess); message = nil
+        case .confirmed: done.insert(.fullDiskAccess)
         case .notConfirmed: done.remove(.fullDiskAccess)
         case .kickFailed:
             done.remove(.fullDiskAccess)
             message = "Mirror couldn't start its background helper. Check that it is turned on in Login Items, then try again."
         }
+    }
+
+    private func clearCheckFailure() {
+        if kickFailed { message = nil }
+        kickFailed = false
+        checkFailed = false
     }
 
     /// The one automatic check, once the helper is on and Full Disk Access isn't confirmed yet.

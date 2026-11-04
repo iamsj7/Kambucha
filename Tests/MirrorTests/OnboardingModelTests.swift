@@ -95,6 +95,24 @@ struct OnboardingModelTests {
         #expect(m.message != nil && m.kickFailed && !m.isChecking)
     }
 
+    @Test func aKickFailureClearsOnceTheNextKickWorks() async {
+        let sys = FakeSystem(); sys.agent = .enabled; sys.kickOutcome = .kickFailed
+        let (m, _) = make(sys)
+        await m.checkAccessNow()
+        sys.kickOutcome = .notConfirmed
+        await m.checkAccessNow()
+        #expect(m.message == nil && !m.kickFailed && m.checkFailed)
+    }
+
+    @Test func aKickFailureClearsWhenAccessIsConfirmedAnotherWay() async {
+        let sys = FakeSystem(); sys.agent = .enabled; sys.kickOutcome = .kickFailed
+        let (m, _) = make(sys)
+        await m.checkAccessNow()
+        sys.fda = true
+        await m.refresh()
+        #expect(m.message == nil && !m.kickFailed && !m.checkFailed)
+    }
+
     @Test func theFirstCheckHappensOnceOnly() async {
         let sys = FakeSystem(); sys.agent = .enabled
         let (m, _) = make(sys)

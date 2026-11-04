@@ -7,7 +7,7 @@ public struct RunPaths: Sendable {
     public init(support: URL, logs: URL, work: URL) { self.support = support; self.logs = logs; self.work = work }
 
     var agentLock: URL { support.appendingPathComponent("locks/agent.lock") }
-    /// The app reads this to see a run in progress. A crash leaves it behind, and the app checks the pid.
+    /// The app reads this to see a run in progress. A crash leaves it behind, and the app checks the process.
     var pidFile: URL { support.appendingPathComponent("agent.pid") }
     /// When the last full wake-up began, which is how a mount wake-up is told from an interval one.
     var lastPassFile: URL { support.appendingPathComponent("last-pass.json") }
@@ -186,7 +186,7 @@ public final class RunCoordinator: Sendable {
 
     private func writePID() {
         do {
-            try Data(String(ProcessInfo.processInfo.processIdentifier).utf8).write(to: paths.pidFile, options: .atomic)
+            try Data(AgentPresence.record(for: ProcessInfo.processInfo.processIdentifier).utf8).write(to: paths.pidFile, options: .atomic)
         } catch {
             Self.log.error("cannot write the pid file")
         }
