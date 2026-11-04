@@ -49,6 +49,38 @@ private final class Sandbox {
 @Suite struct RcloneIntegrationTests {
     let runner = RcloneRunner.localOnly(binary: rcloneBinary)
 
+    /// `ruleFor` is what Include writes. rclone reads the filter first match wins, so only a rule that
+    /// covers the folder's contents can beat the preset's `- /proj/vendor/**`.
+    private func syncTrackedFolder(project: String, scope: String?) async throws -> Bool {
+        let box = try Sandbox()
+        let php = Preset(id: "php", name: "PHP", markers: ["composer.json"], alwaysExclude: [], ambiguousExclude: ["vendor/"])
+        try box.write("\(project)/composer.json", "{}")
+        try box.write("\(project)/vendor/lib/a.php", "tracked")
+        let item = ReviewItem(id: "tracked:\(project)/vendor", path: "\(project)/vendor", kind: .trackedInExcluded)
+        var set = BackupSet(name: "S", source: box.src, presets: ["php"])
+        set.rules = [try #require(ReviewActions.rule(for: item, include: true))]
+        let projects = [DetectedProject(relativePath: project, presetIDs: ["php"])]
+        let lines = FilterBuilder(presets: [php]).lines(for: set, projects: projects, scope: scope)
+        try FilterBuilder(presets: [php]).write(lines, to: box.filter)
+        let source = scope.map { box.src.appendingPathComponent($0) } ?? box.src
+        let destination = scope.map { box.dst.appendingPathComponent($0) } ?? box.dst
+        let result = try await runner.sync(box.request(source: source, destination: destination))
+        #expect(result.outcome == .success)
+        return box.read(box.dst, "\(project)/vendor/lib/a.php") == "tracked"
+    }
+
+    @Test func includingATrackedFolderReallyBacksItUp() async throws {
+        #expect(try await syncTrackedFolder(project: "proj", scope: nil))
+    }
+
+    @Test func includingATrackedFolderHoldsForAScopedSync() async throws {
+        #expect(try await syncTrackedFolder(project: "proj", scope: "proj"))
+    }
+
+    @Test func includingATrackedFolderWithGlobCharactersInItsPath() async throws {
+        #expect(try await syncTrackedFolder(project: "pro[j] {1}", scope: nil))
+    }
+
     @Test func addModifyDelete() async throws {
         let sb = try Sandbox()
         try sb.write("a.txt", "one"); try sb.write("sub/b.txt", "two")

@@ -95,8 +95,12 @@ public struct ReviewItem: Codable, Equatable, Identifiable, Sendable {
     public var kind: Kind
     public init(id: String, path: String, kind: Kind) { self.id = id; self.path = path; self.kind = kind }
 
-    /// The anchored rule that answers this item. Once the owner has one, the item is settled.
-    public var rulePattern: String { "/" + FilterBuilder.escape(path) }
+    /// The anchored rule that answers this item. Once the owner has one, the item is settled. A tracked
+    /// item is a folder, and rclone only lets a rule beat `- folder/**` if it covers the same contents.
+    public var rulePattern: String {
+        let exact = "/" + FilterBuilder.escape(path)
+        return kind == .trackedInExcluded ? exact + "/**" : exact
+    }
 }
 
 /// How far an upload batch had got, and when. Two of these make a rate across wake-ups.

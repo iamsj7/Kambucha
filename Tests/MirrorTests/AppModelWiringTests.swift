@@ -166,6 +166,20 @@ private func vol(_ uuid: String, internalLooking: Bool = false) -> VolumeInfo {
         #expect(m.destinationStatus(d).text == "Preview needed")
     }
 
+    @Test func anUndecidedTrackedFolderStaysListedAndIncludingItSavesTheFolderRule() throws {
+        let dest = Destination(name: "iCloud", kind: .iCloudFolder)
+        let set = BackupSet(name: "Docs", source: URL(fileURLWithPath: "/tmp/docs"), destinationIDs: [dest.id])
+        let item = ReviewItem(id: "tracked:proj/vendor", path: "proj/vendor", kind: .trackedInExcluded)
+        let m = try make(destinations: [dest], sets: [set]) { store, _ in
+            var st = SetState(); st.reviewItems = [item]
+            try store.save(st, for: PairID(set: set.id, destination: dest.id))
+        }
+        #expect(m.reviewEntries.count == 1)
+        m.resolve(m.reviewEntries[0], include: true)
+        #expect(m.set(set.id)?.rules.map(\.pattern) == ["/proj/vendor/**"])
+        #expect(m.reviewEntries.isEmpty)
+    }
+
     @Test func resolvingAReviewItemKeepsAnAcceptedSetAccepted() throws {
         let dest = Destination(name: "iCloud", kind: .iCloudFolder)
         var set = BackupSet(name: "Docs", source: URL(fileURLWithPath: "/tmp/docs"), destinationIDs: [dest.id])
