@@ -6,9 +6,9 @@ import Security
 /// The login Keychain, used from `MirrorAgent` only. Items are never synchronizable, so they stay on
 /// this Mac.
 ///
-/// `kSecUseKeychain` isn't set: it needs a `SecKeychainRef`, and the SDK no longer declares any way
-/// to get one. Staying off the data-protection Keychain sends items to the default file Keychain,
-/// which is the login Keychain, and a test confirms that.
+/// `kSecUseKeychain` isn't set: it takes a `SecKeychainRef`, and the `SecKeychain` APIs that make one
+/// are deprecated. Staying off the data-protection Keychain sends items to the default keychain,
+/// and a test observes that being the login Keychain.
 public struct KeychainStore: SecretStoring {
     private let service: String
     public init(service: String = "com.shaikjaleel.mirror") { self.service = service }
