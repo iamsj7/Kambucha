@@ -19,14 +19,27 @@ public struct RunPlanner {
         let fullDue = state.lastFullPass.map { now.timeIntervalSince($0) >= profile.fullPassInterval } ?? true
         // Never checked isn't overdue: the first full pass sets the baseline.
         let deepDue = state.lastDeepCheck.map { now.timeIntervalSince($0) >= deepCheckInterval } ?? false
-        var planned = scope
-        if fullDue || state.wholeSetOwed {
+        var planned = including(state.verifyOwed, in: scope)
+        if fullDue || state.wholeSetOwed || state.hashWholeSet {
             planned = .wholeSet
-        } else if state.heldDeletions > 0, scope != .nothing {
+        } else if state.heldDeletions > 0, planned != .nothing {
             // A scoped dry run can't see the held deletions, and would read as "none left".
             planned = .wholeSet
         }
         return RunPlan(scope: planned, isDailyPass: fullDue, isDeepDue: deepDue)
+    }
+
+    /// Files a run still owes proof for keep their folders in scope, with or without new changes.
+    private static func including(_ owed: [String], in scope: RunScope) -> RunScope {
+        guard !owed.isEmpty, scope != .wholeSet else { return scope }
+        var projects = Set<String>()
+        if case .projects(let names) = scope { projects.formUnion(names) }
+        for path in owed {
+            let parts = path.split(separator: "/", maxSplits: 1)
+            guard parts.count == 2 else { return .wholeSet }   // a root-level file belongs to no project
+            projects.insert(String(parts[0]))
+        }
+        return projects.count > ScopeMapper().maxProjects ? .wholeSet : .projects(projects.sorted())
     }
 
     /// iCloud pairs first, as they finish quickly, then cloud pairs. Least recently finished first

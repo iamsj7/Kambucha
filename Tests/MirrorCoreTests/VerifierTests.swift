@@ -58,6 +58,16 @@ private struct Env {
 }
 
 @Suite struct VerifierTests {
+    @Test func aLinkIsAuditedByItsNameInTheMirror() async throws {
+        let e = try Env(); defer { e.cleanup() }
+        let rclone = FakeRclone(), auditor = FakeAuditor()
+        let v = Verifier(rclone: rclone, auditor: auditor, isDataless: { _ in false })
+        _ = try await v.quick(source: e.src, destination: e.dst.path, profile: profile(.iCloudFolder), context: ctx(),
+                              filter: e.filter, copied: ["p/link.rclonelink"], oneWay: false, logDir: e.logs)
+        #expect(auditor.calls.first?.map(\.lastPathComponent) == ["link"])
+        #expect(rclone.lists.last == ["p/link.rclonelink"])   // the hash list keeps rclone's own name
+    }
+
     @Test func quickRunsSizeOnlyThenHashOfCopied() async throws {
         let e = try Env(); defer { e.cleanup() }
         try e.mirror(["a.txt", "d/b.txt"])

@@ -45,6 +45,33 @@ private struct NoSession: RunSession {
         #expect(try await files.list(dir.path, context: plain) == [".mirror-root"])
     }
 
+    @Test func anExpiredSignInIsToldApartFromAFailedRead() async throws {
+        let dir = try tempDir("auth"); defer { try? FileManager.default.removeItem(at: dir) }
+        let fake = dir.appendingPathComponent("rclone")
+        try """
+        #!/bin/sh
+        while [ $# -gt 0 ]; do
+          if [ "$1" = "--log-file" ]; then
+            echo '{"level":"error","msg":"Failed to create file system: couldn'"'"'t fetch token: invalid_grant"}' > "$2"
+          fi
+          shift
+        done
+        exit 1
+        """.write(to: fake, atomically: true, encoding: .utf8)
+        try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: fake.path)
+        let remote = RcloneRemoteFiles(binary: fake, helper: AnyHelper())
+        await #expect(throws: RemoteFileError.authExpired) { _ = try await remote.read("x:.mirror-root", context: plain) }
+        await #expect(throws: RemoteFileError.authExpired) { _ = try await remote.list("x:", context: plain) }
+        await #expect(throws: RemoteFileError.authExpired) { try await remote.write(Data(), to: "x:m", context: plain) }
+    }
+
+    @Test func captureRefusesSecretsWithoutAHelper() async throws {
+        let secret = RcloneContext(configPath: "/dev/null", environment: ["RCLONE_CONFIG_X_TYPE": "crypt"])
+        await #expect(throws: RcloneRunnerError.helperNotChecked) {
+            _ = try await RcloneRunner(binary: binary).capture(["version"], context: secret)
+        }
+    }
+
     @Test func aFailedReadIsNotAMissingFile() async throws {
         await #expect(throws: RemoteFileError.self) {
             _ = try await files.read("nosuchremote:.mirror-root", context: plain)
@@ -196,6 +223,28 @@ private struct NoSession: RunSession {
         let record = try await r.run()
         #expect(record.status == .failed)
         #expect(FileManager.default.fileExists(atPath: r.mirror.appendingPathComponent("p/f.txt").path))
+    }
+
+    @Test func symlinksAreAuditedAtTheirRealMirrorName() async throws {
+        let r = try Rig()
+        try r.write("p/f.txt")
+        try FileManager.default.createSymbolicLink(atPath: r.source.appendingPathComponent("p/link").path, withDestinationPath: "f.txt")
+        #expect(try await r.run().status == .success)
+        #expect(try r.store.state(for: r.pair).verifyOwed.isEmpty)
+    }
+
+    @Test func aRealDryRunListsWhatItWouldCopy() async throws {
+        let r = try Rig()
+        try r.write("p/f.txt")
+        _ = try await r.run()
+        try r.write("p/g.txt")
+        let log = r.root.appendingPathComponent("dry.log")
+        let filter = r.root.appendingPathComponent("f"); try Data().write(to: filter)
+        let result = try await r.rclone.sync(SyncRequest(
+            source: r.source, destination: r.mirror.path, backupDir: r.backupRoot.appendingPathComponent("Archive/x/t").path,
+            filterFile: filter, logFile: log, mode: .mirror(maxDelete: -1),
+            profile: .profile(for: r.destination), context: plain, dryRun: true))
+        #expect(result.summary.planned == ["p/g.txt"])
     }
 
     @Test func anEmptyFirstRunPasses() async throws {

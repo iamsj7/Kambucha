@@ -7,6 +7,9 @@ public struct VerifyResult: Equatable, Sendable {
     public var checksClean: Bool
     /// Files the size check found on both sides, so a whole-set check is the set's file count.
     public var matchingFiles = 0
+    /// What the checks named as different, relative to what was checked. May be shorter than
+    /// `differences`, so its being empty says nothing.
+    public var differingPaths: [String] = []
     /// The only value that may drive "Backed Up": clean checks and nothing pending, refused or missing.
     public var backedUp: Bool {
         checksClean && audit.pending.isEmpty && audit.refused.isEmpty && audit.missing.isEmpty
@@ -42,36 +45,43 @@ public struct Verifier: Sendable {
             source: source, destination: destination, filterFile: filter, filesFrom: nil, sizeOnly: true,
             oneWay: oneWay, cryptCheck: false, context: context, logFile: logDir.appendingPathComponent("quick-size.log")))
         var differences = size.differences
+        var differing = size.flagged
         var toHash = copied
         let root = URL(fileURLWithPath: destination)
         if audits(profile) { toHash = copied.filter { !isDataless(root.appendingPathComponent($0)) } }
         if !toHash.isEmpty {
             let list = try writeList(toHash, to: logDir.appendingPathComponent("quick-copied.list"))
-            differences += try await run(CheckRequest(
+            let hash = try await run(CheckRequest(
                 source: source, destination: destination, filterFile: filter, filesFrom: list, sizeOnly: false,
                 oneWay: oneWay, cryptCheck: profile.encrypted, context: context,
-                logFile: logDir.appendingPathComponent("quick-hash.log"))).differences
+                logFile: logDir.appendingPathComponent("quick-hash.log")))
+            differences += hash.differences
+            differing += hash.flagged
         }
         var audit = AuditResult(pending: [], refused: [])
         if audits(profile) {
             // A missing mirror here means nothing was copied: the size check above already compared it.
-            let paths = auditWholeMirror ? Self.files(under: root) ?? [] : copied
+            // Rclone names a link `x.rclonelink`, but a local mirror holds it as `x`.
+            let paths = auditWholeMirror ? Self.files(under: root) ?? []
+                : copied.map { $0.hasSuffix(Self.linkSuffix) ? String($0.dropLast(Self.linkSuffix.count)) : $0 }
             audit = try await runAudit(paths.map { root.appendingPathComponent($0) })
         }
         var result = VerifyResult(differences: differences, audit: audit)
         result.matchingFiles = size.matching
+        result.differingPaths = differing
         return result
     }
 
     /// Re-reads files already known to be pending or refused.
     public func audit(_ urls: [URL]) async throws -> AuditResult { try await runAudit(urls) }
 
+    /// `oneWay` is for a held set, whose mirror keeps extras on purpose.
     public func deep(source: URL, destination: String, profile: DestinationProfile, context: RcloneContext,
-                     filter: URL, sampleFreed: Int, logDir: URL) async throws -> VerifyResult {
+                     filter: URL, sampleFreed: Int, logDir: URL, oneWay: Bool = false) async throws -> VerifyResult {
         guard audits(profile) else {
             let d = try await run(CheckRequest(
                 source: source, destination: destination, filterFile: filter, filesFrom: nil, sizeOnly: false,
-                oneWay: false, cryptCheck: profile.encrypted, context: context,
+                oneWay: oneWay, cryptCheck: profile.encrypted, context: context,
                 logFile: logDir.appendingPathComponent("deep.log"))).differences
             return VerifyResult(differences: d, audit: AuditResult(pending: [], refused: []), checksClean: d == 0)
         }
@@ -81,7 +91,7 @@ public struct Verifier: Sendable {
         // Same filtered size-only check as Quick, so a file missing from the mirror fails Deep too.
         var differences = try await run(CheckRequest(
             source: source, destination: destination, filterFile: filter, filesFrom: nil, sizeOnly: true,
-            oneWay: false, cryptCheck: false, context: context, logFile: logDir.appendingPathComponent("deep-size.log"))).differences
+            oneWay: oneWay, cryptCheck: false, context: context, logFile: logDir.appendingPathComponent("deep-size.log"))).differences
         var present: [String] = [], freed: [String] = []
         for rel in all {
             if isDataless(root.appendingPathComponent(rel)) { freed.append(rel) } else { present.append(rel) }
@@ -93,13 +103,14 @@ public struct Verifier: Sendable {
             differences += try await run(CheckRequest(
                 source: source, destination: destination, filterFile: nil,
                 filesFrom: try writeList(list, to: logDir.appendingPathComponent("deep.list")),
-                sizeOnly: false, oneWay: false, cryptCheck: profile.encrypted, context: context,
+                sizeOnly: false, oneWay: oneWay, cryptCheck: profile.encrypted, context: context,
                 logFile: logDir.appendingPathComponent("deep.log"))).differences
         }
         let audit = try await runAudit((present + freed).map { root.appendingPathComponent($0) })
         return VerifyResult(differences: differences, audit: audit)
     }
 
+    private static let linkSuffix = ".rclonelink"
     private static let auditQueue = DispatchQueue(label: "mirror.upload-audit", qos: .utility)
 
     /// Audits read resource values from disk, so they run on a dispatch queue, never the cooperative

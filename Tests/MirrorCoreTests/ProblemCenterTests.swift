@@ -146,3 +146,29 @@ struct ProblemCenterTests {
         #expect(a[0].notified == false)
     }
 }
+
+private struct StuckNotifier: Notifying {
+    func post(_: Problem, pair: PairID, setName: String, detail: String) async -> Bool {
+        await withCheckedContinuation { (_: CheckedContinuation<Void, Never>) in }   // never answers
+        return true
+    }
+}
+
+@Suite struct ProblemCenterTimeoutTests {
+    @Test func aStuckNotifierCostsOnlyTheTimeoutAndIsRetriedLater() async throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent("pc-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: root) }
+        let center = ProblemCenter(root: root, notifier: StuckNotifier(), postTimeout: .milliseconds(50))
+        let pair = PairID(set: UUID(), destination: UUID())
+        let started = Date()
+        try await center.raise(.uploadStalled, pair: pair, setName: "x", detail: "")
+        #expect(Date().timeIntervalSince(started) < 5)
+        #expect(try center.active().first?.notified == false)
+        try await center.retryPending()
+        #expect(try center.active().first?.notified == false)
+    }
+
+    @Test func theDefaultTimeoutIsTenSeconds() {
+        #expect(ProblemCenter.defaultPostTimeout == .seconds(10))
+    }
+}

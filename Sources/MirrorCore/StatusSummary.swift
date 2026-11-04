@@ -16,6 +16,8 @@ public enum StatusSummary {
     /// drill never block it. Priority: attention, held, running, uploading, backed up.
     public static func overall(sets: [BackupSet], destinations: [Destination], states: [PairID: SetState],
                                records: [RunRecord], problems: [ActiveProblem], running: Bool) -> OverallStatus {
+        // Before anything that reads the sets: a run that couldn't start may be why they look empty.
+        if let failed = problems.first(where: { $0.pair == .agent }) { return .attention(failed.problem.headline) }
         if sets.isEmpty { return .notConfigured }
         let active = sets.filter { !$0.isPaused }
         if active.isEmpty { return .paused }

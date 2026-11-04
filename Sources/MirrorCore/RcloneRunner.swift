@@ -73,6 +73,7 @@ public struct RcloneRunner: RcloneRunning {
     }
 
     public func capture(_ arguments: [String], context: RcloneContext) async throws -> RcloneCapture {
+        try checkHelper(for: context)
         let process = Process()
         process.executableURL = binary
         process.arguments = arguments
@@ -124,9 +125,13 @@ public struct RcloneRunner: RcloneRunning {
         return .background
     }
 
-    private func run(_ args: [String], context: RcloneContext, logFile: URL, isCheck: Bool) async throws -> RcloneResult {
+    private func checkHelper(for context: RcloneContext) throws {
         if let helper { try helper.verifyHelper(at: binary) }
         else if !context.environment.isEmpty || context.configPath != "/dev/null" { throw RcloneRunnerError.helperNotChecked }
+    }
+
+    private func run(_ args: [String], context: RcloneContext, logFile: URL, isCheck: Bool) async throws -> RcloneResult {
+        try checkHelper(for: context)
 
         // The log file is per run; a leftover would be parsed as this run's output.
         try? FileManager.default.removeItem(at: logFile)

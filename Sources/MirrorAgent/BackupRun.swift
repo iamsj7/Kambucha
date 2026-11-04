@@ -10,10 +10,13 @@ enum BackupRun {
 
     static func run(_ command: RunCommand) async -> Int32 {
         let places = Places()
+        let records = RunRecordStore(root: places.support)
+        let problems = ProblemCenter(root: places.support, notifier: UNNotifier())
         let presets: [Preset]
         do { presets = try PresetCatalog.all() } catch {
             // Without them junk would upload and ambiguous folders change meaning. Better to stop.
             log.error("cannot load presets")
+            await AgentFailureReport.file("Mirror could not load its presets", records: records, problems: problems, now: Date())
             return 1
         }
         // Never derive the executable path from argv: resolve it from the enclosing bundle.
@@ -23,14 +26,15 @@ enum BackupRun {
         let secrets = KeychainStore()
         let work = RcloneSession.defaultWorkDir
         let coordinator = RunCoordinator(
-            store: ConfigStore(root: places.support), records: RunRecordStore(root: places.support),
-            problems: ProblemCenter(root: places.support, notifier: UNNotifier()), rclone: rclone,
+            store: ConfigStore(root: places.support), records: records, problems: problems, rclone: rclone,
             feed: FSEventsFeed(), verifier: Verifier(rclone: rclone, auditor: ICloudAuditor()),
             guard: PathGuard(iCloudDrive: places.iCloudDrive, backupRoot: places.backupRoot),
             detector: StackDetector(presets: presets), filters: FilterBuilder(presets: presets), clock: { Date() },
             sessions: { RcloneSession(destination: $0, secrets: secrets, binary: binary, helper: trust, workDir: work) },
             remote: RcloneRemoteFiles(binary: binary, helper: trust),
-            paths: RunPaths(support: places.support, logs: places.logs, work: work))
+            paths: RunPaths(support: places.support, logs: places.logs, work: work),
+            helperCheck: { try trust.verifyHelper(at: binary) },
+            iCloudSignedIn: { FileManager.default.ubiquityIdentityToken != nil })
 
         if command.fullSpeed { AgentPriority.raiseToNormal() }
         // launchd sends SIGTERM at logout. Dying at once would strand rclone, any sign-in config and
@@ -40,9 +44,9 @@ enum BackupRun {
         let terminated = DispatchSource.makeSignalSource(signal: SIGTERM, queue: .global())
         terminated.setEventHandler { task.cancel() }
         terminated.resume()
-        await task.value
+        let ran = await task.value
         terminated.cancel()
-        return 0
+        return ran ? 0 : 1
     }
 
     private struct Places {

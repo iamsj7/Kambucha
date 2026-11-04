@@ -9,7 +9,7 @@ public protocol RunSession {
 extension RcloneSession: RunSession {}
 
 public enum RemoteFileError: Error, Equatable, Sendable {
-    case tooLarge
+    case tooLarge, authExpired
     case failed(exitCode: Int32)
 }
 
@@ -24,15 +24,19 @@ public protocol RemoteFileAccessing: Sendable {
 }
 
 /// Through rclone, so an encrypted destination's marker is encrypted like everything else in it.
+/// This is a cloud run's first rclone call, so an expired sign-in shows up here first.
 public struct RcloneRemoteFiles: RemoteFileAccessing {
     private static let directoryNotFound: Int32 = 3, fileNotFound: Int32 = 4
     private let binary: URL
     private let helper: any HelperValidating
-    public init(binary: URL, helper: any HelperValidating) { self.binary = binary; self.helper = helper }
+    private let workDir: URL
+
+    public init(binary: URL, helper: any HelperValidating, workDir: URL = RcloneSession.defaultWorkDir) {
+        self.binary = binary; self.helper = helper; self.workDir = workDir
+    }
 
     public func read(_ path: String, context: RcloneContext) async throws -> Data? {
-        let (code, output) = try await RcloneTool.execute(["cat", path, "--config", context.configPath],
-                                                          binary: binary, helper: helper, context: context, capture: true)
+        let (code, output) = try await run(["cat", path], context: context, capture: true)
         if code == Self.directoryNotFound || code == Self.fileNotFound { return nil }
         guard code == 0 else { throw RemoteFileError.failed(exitCode: code) }
         return output
@@ -40,17 +44,29 @@ public struct RcloneRemoteFiles: RemoteFileAccessing {
 
     public func write(_ data: Data, to path: String, context: RcloneContext) async throws {
         guard data.count < RcloneTool.maxStdin else { throw RemoteFileError.tooLarge }
-        let (code, _) = try await RcloneTool.execute(["rcat", path, "--config", context.configPath],
-                                                     binary: binary, helper: helper, context: context, stdin: data, capture: false)
+        let (code, _) = try await run(["rcat", path], context: context, stdin: data, capture: false)
         guard code == 0 else { throw RemoteFileError.failed(exitCode: code) }
     }
 
     public func list(_ path: String, context: RcloneContext) async throws -> [String]? {
-        let (code, output) = try await RcloneTool.execute(["lsf", path, "--max-depth", "1", "--config", context.configPath],
-                                                          binary: binary, helper: helper, context: context, capture: true)
+        let (code, output) = try await run(["lsf", path, "--max-depth", "1"], context: context, capture: true)
         if code == Self.directoryNotFound { return nil }
         guard code == 0 else { throw RemoteFileError.failed(exitCode: code) }
         return String(decoding: output, as: UTF8.self).split(whereSeparator: \.isNewline).map(String.init)
+    }
+
+    /// The log exists only to classify the failure, in a private folder gone before this returns.
+    private func run(_ arguments: [String], context: RcloneContext, stdin: Data? = nil,
+                     capture: Bool) async throws -> (code: Int32, output: Data) {
+        let dir = try RcloneTool.makePrivateDirectory(in: workDir)
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let log = dir.appendingPathComponent("rclone.log")
+        let result = try await RcloneTool.execute(
+            arguments + ["--use-json-log", "--log-file", log.path, "--config", context.configPath],
+            binary: binary, helper: helper, context: context, stdin: stdin, capture: capture)
+        let text = (try? Data(contentsOf: log)) ?? Data()
+        if RcloneLogParser.outcome(exitCode: result.code, log: text) == .authExpired { throw RemoteFileError.authExpired }
+        return result
     }
 }
 

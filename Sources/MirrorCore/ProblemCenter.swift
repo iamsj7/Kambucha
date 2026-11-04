@@ -3,6 +3,7 @@ import Foundation
 public enum Problem: String, Codable, CaseIterable, Sendable {
     case verificationFailed, deletionsHeld, destinationMissing, permissionLost, iCloudUnavailable
     case repeatedFailures, uploadStalled, fileRefused, signInExpired, drillFailed, drillDue
+    case agentFailed
 
     /// Plain, specific lead-in. Never includes file contents or secrets.
     public var headline: String {
@@ -18,6 +19,7 @@ public enum Problem: String, Codable, CaseIterable, Sendable {
         case .signInExpired: "Sign-in expired"
         case .drillFailed: "Restore test failed"
         case .drillDue: "Restore test is due"
+        case .agentFailed: "Mirror could not run"
         }
     }
 }
@@ -66,8 +68,11 @@ public struct ProblemCenter: Sendable {
     private let root: URL
     private let url: URL
     private let notifier: any Notifying
-    public init(root: URL, notifier: any Notifying) {
+    private let postTimeout: Duration
+    public static let defaultPostTimeout: Duration = .seconds(10)
+    public init(root: URL, notifier: any Notifying, postTimeout: Duration = ProblemCenter.defaultPostTimeout) {
         self.root = root; url = root.appendingPathComponent("problems.json"); self.notifier = notifier
+        self.postTimeout = postTimeout
     }
 
     public func raise(_ problem: Problem, pair: PairID, setName: String, detail: String) async throws {
@@ -82,8 +87,7 @@ public struct ProblemCenter: Sendable {
         }
         guard toPost else { return }
         let stored = try active().first { $0.problem == problem && $0.pair == pair }
-        let ok = await notifier.post(problem, pair: pair, setName: stored?.setName ?? setName,
-                                     detail: stored?.detail ?? detail)
+        let ok = await deliver(problem, pair: pair, setName: stored?.setName ?? setName, detail: stored?.detail ?? detail)
         // Duplicate posts are harmless: the notification identifier is stable, so a repeat replaces the first.
         if ok, let since = stored?.since { try markNotified(problem, pair, since: since) }
     }
@@ -91,8 +95,23 @@ public struct ProblemCenter: Sendable {
     /// Retries every problem whose notification was not delivered. Call once per run.
     public func retryPending() async throws {
         for p in try active() where !p.notified {
-            if await notifier.post(p.problem, pair: p.pair, setName: p.setName, detail: p.detail) {
+            if await deliver(p.problem, pair: p.pair, setName: p.setName, detail: p.detail) {
                 try markNotified(p.problem, p.pair, since: p.since)
+            }
+        }
+    }
+
+    /// A notifier that never answers counts as not delivered, so it's retried. It can't be cancelled
+    /// (a permission prompt, say), so it's left behind, and ends with the process.
+    private func deliver(_ problem: Problem, pair: PairID, setName: String, detail: String) async -> Bool {
+        let (notifier, timeout) = (self.notifier, postTimeout)
+        let answer = FirstAnswer()
+        return await withCheckedContinuation { continuation in
+            answer.attach(continuation)
+            Task { answer.give(await notifier.post(problem, pair: pair, setName: setName, detail: detail)) }
+            Task {
+                try? await Task.sleep(for: timeout)
+                answer.give(false)
             }
         }
     }
@@ -144,5 +163,19 @@ public struct ProblemCenter: Sendable {
         e.dateEncodingStrategy = .secondsSince1970  // full precision, so `since` identifies an occurrence
         e.outputFormatting = [.prettyPrinted, .sortedKeys]
         try e.encode(list).write(to: url, options: .atomic)
+    }
+}
+
+/// Resumes one continuation with whichever answer comes first.
+private final class FirstAnswer: @unchecked Sendable {
+    private let lock = NSLock()
+    private var continuation: CheckedContinuation<Bool, Never>?
+    func attach(_ c: CheckedContinuation<Bool, Never>) { lock.withLock { continuation = c } }
+    func give(_ value: Bool) {
+        let waiting: CheckedContinuation<Bool, Never>? = lock.withLock {
+            defer { continuation = nil }
+            return continuation
+        }
+        waiting?.resume(returning: value)
     }
 }
