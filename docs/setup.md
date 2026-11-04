@@ -39,6 +39,8 @@ Mirror's first-run screen has four steps, in this order, and stays until each is
 3. **Allow Notifications.** Mirror tells you about problems this way.
 4. **Add Your First Set.** See section 3.
 
+When the last step is done, Mirror turns on Open Mirror at login, so the menu bar icon is there after a restart. Backups run whether or not it is on. To turn it off, choose Settings in the menu bar panel. After the first run the window no longer opens by itself: choose Open Mirror from the menu bar.
+
 The background helper is inside the app, so this one permission covers both. Mirror checks it by having the helper, started by macOS, read a file that only Full Disk Access can open. Reading Documents and iCloud Drive is not enough, because macOS can allow those on their own.
 
 If Full Disk Access is ever lost, Mirror sends a notification and shows "Needs Attention", and the main window shows a warning with a button to open the setting. Switch it back on in the same place. A long upload never counts as losing it.

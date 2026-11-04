@@ -29,6 +29,7 @@ enum DebugViewSnapshots {
         func checkFullDiskAccessNow() async -> AccessConfirmation.Outcome { .confirmed }
         func agentStatus() -> SMAppService.Status { .requiresApproval }
         func enableAgent() throws {}
+        func enableOpenAtLogin() throws {}
         func notificationAccess() async -> NotificationAccess { .notDetermined }
         func requestNotifications() async -> NotificationAccess { .allowed }
         func openFullDiskAccessPane() {}

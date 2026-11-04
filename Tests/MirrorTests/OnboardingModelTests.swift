@@ -19,6 +19,9 @@ private final class FakeSystem: OnboardingSystem {
     func checkFullDiskAccessNow() async -> AccessConfirmation.Outcome { checked += 1; return kickOutcome ?? (fda ? .confirmed : .notConfirmed) }
     func agentStatus() -> SMAppService.Status { agent }
     func enableAgent() throws { if let enableError { throw enableError }; agent = .enabled }
+    var loginTurnedOn = 0
+    var loginError: (any Error)?
+    func enableOpenAtLogin() throws { if let loginError { throw loginError }; loginTurnedOn += 1 }
     func notificationAccess() async -> NotificationAccess { notes }
     func requestNotifications() async -> NotificationAccess { notes = .allowed; return notes }
     private(set) var opened: [String] = []
@@ -111,6 +114,29 @@ struct OnboardingModelTests {
         await m.refresh()
         #expect(m.isComplete)
         return m
+    }
+
+    @Test func finishingTurnsOnOpenAtLoginOnce() async throws {
+        let sys = FakeSystem()
+        let m = try await finished(sys)
+        #expect(sys.loginTurnedOn == 1)
+        await m.refresh()
+        #expect(sys.loginTurnedOn == 1)   // turning it off later in Settings stays off
+    }
+
+    @Test func nothingTurnsItOnBeforeOnboardingFinishes() async {
+        let sys = FakeSystem()
+        let (m, _) = make(sys)
+        await m.refresh()
+        m.enableAgent()
+        await m.refresh()
+        #expect(sys.loginTurnedOn == 0)
+    }
+
+    @Test func aRefusedLoginItemDoesNotHoldOnboardingUp() async throws {
+        let sys = FakeSystem(); sys.loginError = URLError(.unknown)
+        let m = try await finished(sys)
+        #expect(m.isComplete)
     }
 
     @Test func anOldReportIsNotEnoughBeforeOnboardingFinishes() async {

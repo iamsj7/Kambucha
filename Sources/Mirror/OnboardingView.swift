@@ -16,6 +16,7 @@ protocol OnboardingSystem {
     func checkFullDiskAccessNow() async -> AccessConfirmation.Outcome
     func agentStatus() -> SMAppService.Status
     func enableAgent() throws
+    func enableOpenAtLogin() throws
     func notificationAccess() async -> NotificationAccess
     func requestNotifications() async -> NotificationAccess
     func openFullDiskAccessPane()
@@ -32,6 +33,7 @@ struct LiveOnboardingSystem: OnboardingSystem {
     func checkFullDiskAccessNow() async -> AccessConfirmation.Outcome { await AccessConfirmation.confirm(support: MirrorPaths.support) }
     func agentStatus() -> SMAppService.Status { AgentRegistration.status() }
     func enableAgent() throws { try AgentRegistration.enable() }
+    func enableOpenAtLogin() throws { try AgentRegistration.LoginItem().register() }
 
     func notificationAccess() async -> NotificationAccess {
         guard Bundle.main.bundleIdentifier != nil else { return .notDetermined }   // the center traps without a bundle
@@ -212,7 +214,12 @@ final class OnboardingModel {
         if let sets = try? store.loadSets(), !sets.isEmpty { d.insert(.firstSet) }
         done = d
         hasRefreshed = true
-        if isComplete, !finished { try? store.noteOnboardingFinished() }
+        if isComplete, !finished {
+            try? store.noteOnboardingFinished()
+            // Once, so an owner who later turns it off in Settings isn't overruled. It isn't worth stopping them
+            // here if macOS refuses: the toggle in Settings shows it's off.
+            try? system.enableOpenAtLogin()
+        }
     }
 
     /// Asks launchd to start the agent and waits up to 15 seconds for its access report. This starts a
@@ -366,7 +373,7 @@ private struct StepRow: View {
         case .agent:
             model.agentNeedsApproval
                 ? "macOS needs your approval. Switch on Mirror in Login Items, then come back."
-                : "A small background helper runs backups on a schedule, even when Mirror is closed."
+                : "A small background helper runs backups on a schedule, even when Mirror is closed. Mirror also opens at login, so its menu bar icon stays with you. You can change that in Settings."
         case .notifications:
             model.notificationsDenied
                 ? "Notifications are off for Mirror. Switch them on in System Settings so you hear about problems."
