@@ -17,10 +17,15 @@ public enum ExternalDriveSetup {
     public static let internalConfirmationMessage =
         "Backing up to a disk inside this Mac doesn't protect you if the Mac is lost or fails. Use it anyway?"
 
-    public static func choices(from locator: any VolumeLocating) -> [Choice] {
-        let usable = locator.mounted().map {
-            Choice(id: $0.uuid, name: $0.name, formatName: displayName(fileSystem: $0.fileSystem),
-                   freeBytes: $0.freeBytes, volume: $0, unavailableReason: nil)
+    /// A drive that an existing destination already names is listed but not selectable: one drive, one destination.
+    public static func choices(from locator: any VolumeLocating, existing: [Destination] = []) -> [Choice] {
+        let usable = locator.mounted().map { v -> Choice in
+            if let dup = DestinationRules.duplicateDrive(of: v.uuid, in: existing, excluding: nil) {
+                return Choice(id: v.uuid, name: v.name, formatName: displayName(fileSystem: v.fileSystem),
+                              freeBytes: v.freeBytes, volume: nil, unavailableReason: DestinationRules.duplicateDriveMessage(dup))
+            }
+            return Choice(id: v.uuid, name: v.name, formatName: displayName(fileSystem: v.fileSystem),
+                          freeBytes: v.freeBytes, volume: v, unavailableReason: nil)
         }
         let bad = locator.unsupported().map {
             Choice(id: "unsupported:" + $0.mountPoint.path, name: $0.name, formatName: "", freeBytes: nil,
@@ -30,6 +35,16 @@ public enum ExternalDriveSetup {
     }
 
     public static func needsInternalConfirmation(_ v: VolumeInfo) -> Bool { v.looksInternal }
+
+    /// True for a saved drive that is connected, looks like an internal disk and was never confirmed. Runs refuse it
+    /// until the owner confirms in the destination's details.
+    public static func needsConfirmation(_ destination: Destination, volume: VolumeInfo?) -> Bool {
+        destination.kind == .externalDrive && !destination.internalDiskConfirmed && (volume?.looksInternal ?? false)
+    }
+
+    public static func confirmed(_ destination: Destination) -> Destination {
+        var d = destination; d.internalDiskConfirmed = true; return d
+    }
 
     public static func destination(name: String, volume: VolumeInfo, internalConfirmed: Bool) -> Destination {
         Destination(name: name, kind: .externalDrive, encrypted: false, volumeUUID: volume.uuid,

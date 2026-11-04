@@ -1,5 +1,6 @@
 import Foundation
 import Observation
+import AppKit
 import MirrorCore
 
 /// A notifier that never posts: the app only reads problems; the agent raises them.
@@ -83,6 +84,9 @@ final class AppModel {
     private(set) var destinations: [Destination] = []
     private(set) var states: [PairID: SetState] = [:]
     private(set) var progress: [ProgressItem] = []
+    /// Mounted drives, read off the main thread and refreshed when the system mounts or unmounts one.
+    @ObservationIgnored let volumeCache: VolumeCache
+    @ObservationIgnored let eject: EjectController
     /// Set when the owner chooses Review Deletions; the review window shows that set's held deletions.
     var reviewingSet: UUID?
     /// Sticky: cleared only by `dismissError()` or the next owner action. `refresh()` never touches it.
@@ -97,16 +101,28 @@ final class AppModel {
     @ObservationIgnored private var generation = 0
     @ObservationIgnored private var process: Process?
     @ObservationIgnored private var runQueue = RunQueue()
-    @ObservationIgnored private var panelVisible = false
+    @ObservationIgnored private var surfaces = SurfaceVisibility()
     @ObservationIgnored private var poller: Task<Void, Never>?
 
     init(support: URL = MirrorPaths.support, services: AppServices = .live) {
         self.support = support
         self.services = services
         store = ConfigStore(root: support)
+        let cache = VolumeCache(locator: services.volumes, center: NSWorkspace.shared.notificationCenter,
+                                names: [NSWorkspace.didMountNotification, NSWorkspace.didUnmountNotification,
+                                        NSWorkspace.didRenameVolumeNotification])
+        volumeCache = cache
+        eject = EjectController(ejector: services.ejector, isBackupRunning: { false }, refresh: { await cache.refresh() })
+        eject.isBackupRunning = { [weak self] in self?.isBackupActive ?? false }
         if let snap = Snapshot.load(support: support) { apply(snap) }   // first paint is synchronous
         else { status = .attention("Mirror could not read its settings") }
         attachMissingWatchers()
+        Task { await cache.refresh() }
+    }
+
+    /// An agent this app launched, or one launchd started, is working.
+    var isBackupActive: Bool {
+        isRunning || process?.isRunning == true || AgentPresence.isRunning(support: support)
     }
 
     deinit {
@@ -137,20 +153,33 @@ final class AppModel {
 
     // MARK: Panel visibility and polling
 
-    func panelAppeared() { panelVisible = true; refresh(); updatePolling() }
-    func panelDisappeared() {
-        panelVisible = false
-        // The progress folder is written every 2 s during a run; nobody is looking, so stop watching it.
-        watchers.removeValue(forKey: "progress")?.cancel()
+    func panelAppeared() { surfaceAppeared(.panel) }
+    func panelDisappeared() { surfaceDisappeared(.panel) }
+    func windowAppeared() { surfaceAppeared(.window) }
+    func windowDisappeared() { surfaceDisappeared(.window) }
+
+    private func surfaceAppeared(_ s: SurfaceVisibility.Surface) {
+        surfaces.appeared(s)
+        attachMissingWatchers()
+        refresh(); updatePolling()
+    }
+
+    private func surfaceDisappeared(_ s: SurfaceVisibility.Surface) {
+        surfaces.disappeared(s)
+        // The progress folder is written every 2 s during a run; once nobody is looking, stop watching it.
+        if !surfaces.anyVisible { watchers.removeValue(forKey: "progress")?.cancel() }
         updatePolling()
     }
 
+    /// Whether the progress folder is being watched. For tests.
+    var isWatchingProgress: Bool { watchers["progress"] != nil }
+
     private var isRunning: Bool { if case .running = status { true } else { false } }
 
-    /// A light timer runs only while the panel is visible or a backup is running: it keeps relative
+    /// A light timer runs only while the panel or the main window is visible or a backup is running: it keeps relative
     /// times current and clears a stale pid file after a crash. Idle costs nothing.
     private func updatePolling() {
-        guard panelVisible || isRunning else { poller?.cancel(); poller = nil; return }
+        guard surfaces.anyVisible || isRunning else { poller?.cancel(); poller = nil; return }
         guard poller == nil else { return }
         poller = Task { [weak self] in
             while !Task.isCancelled {
@@ -221,6 +250,12 @@ final class AppModel {
     }
 
     func save(destination updated: Destination) {
+        // One drive is one destination: identity is the volume UUID.
+        if updated.kind == .externalDrive, let uuid = updated.volumeUUID,
+           let existing = DestinationRules.duplicateDrive(of: uuid, in: destinations, excluding: updated.id) {
+            lastError = DestinationRules.duplicateDriveMessage(existing)
+            return
+        }
         var all = destinations
         if let i = all.firstIndex(where: { $0.id == updated.id }) { all[i] = updated } else { all.append(updated) }
         persist { try store.saveDestinations(all) }
@@ -296,7 +331,7 @@ final class AppModel {
     /// Attaches a watcher for each folder that doesn't have one. A folder that was replaced has its
     /// old watcher cancelled first, so the new one is picked up on the next refresh.
     private func attachMissingWatchers() {
-        let wanted = panelVisible ? Self.watched + ["progress"] : Self.watched
+        let wanted = surfaces.anyVisible ? Self.watched + ["progress"] : Self.watched
         for sub in wanted where watchers[sub] == nil {
             let dir = sub.isEmpty ? support : support.appendingPathComponent(sub, isDirectory: true)
             try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)

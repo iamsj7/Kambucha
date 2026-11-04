@@ -1,31 +1,18 @@
 import Foundation
+import AppKit
 import MirrorCore
 
-struct ServiceUnavailable: LocalizedError {
-    var what: String
-    var errorDescription: String? { "\(what) isn't available in this build yet." }
-}
-
-private struct UnavailablePreview: PreviewProviding {
-    func preview(set: BackupSet) async throws -> PreviewResult { throw ServiceUnavailable(what: "Preview") }
-    func rule(for group: PreviewGroup, included: Bool) -> UserRule {
-        UserRule(pattern: group.pattern, action: included ? .include : .exclude)
+/// Unmounts through the system, off the main thread (the call blocks until the volume is released).
+struct WorkspaceEjector: VolumeEjecting {
+    func eject(_ mountPoint: URL) async throws {
+        try await Task.detached(priority: .userInitiated) {
+            try NSWorkspace.shared.unmountAndEjectDevice(at: mountPoint)
+        }.value
     }
-}
-
-private struct UnavailableArchive: ArchiveProviding {
-    func list(set: BackupSet, destination: Destination) async throws -> [ArchiveEntry] { throw ServiceUnavailable(what: "The archive") }
-    func restore(entry: ArchiveEntry, set: BackupSet, destination: Destination, to: URL) async throws {
-        throw ServiceUnavailable(what: "Restore")
-    }
-}
-
-private struct UnavailableDryRun: DeletionDryRunProviding {
-    func heldDeletions(set: BackupSet) async throws -> [String] { throw ServiceUnavailable(what: "The deletion list") }
 }
 
 /// Everything the main window needs from the engine, injected so views can be rendered and tested
-/// with fakes. Until Tasks 14 and 15 land, the live set reports these as unavailable.
+/// with fakes.
 struct AppServices: Sendable {
     var preview: any PreviewProviding
     var dryRun: any DeletionDryRunProviding
@@ -33,10 +20,21 @@ struct AppServices: Sendable {
     var volumes: any VolumeLocating
     var agent: AgentClient
     var archive: any ArchiveProviding
+    var ejector: any VolumeEjecting = WorkspaceEjector()
 
+    /// Real providers. rclone and the agent come only from the app bundle, never from the environment or argv.
     static var live: AppServices {
-        AppServices(preview: UnavailablePreview(), dryRun: UnavailableDryRun(), inspector: nil,
-                    volumes: SystemVolumes(), agent: .bundled(in: Bundle.main.bundleURL),
-                    archive: UnavailableArchive())
+        let bundle = Bundle.main.bundleURL
+        let agent = AgentClient.bundled(in: bundle)
+        let support = MirrorPaths.support
+        let store = ConfigStore(root: support)
+        let calls = AgentArchiveClient(transport: AgentProcessTransport(executable: agent.executable))
+        let preview = LivePreviewProvider(binary: bundle.appendingPathComponent("Contents/Helpers/rclone"))
+        let volumes = SystemVolumes()
+        return AppServices(
+            preview: preview,
+            dryRun: AgentDeletionDryRun(client: calls, store: store),
+            inspector: LocalMirrorInspector(store: store, preview: preview, volumes: volumes, support: support),
+            volumes: volumes, agent: agent, archive: AgentArchiveProvider(client: calls))
     }
 }

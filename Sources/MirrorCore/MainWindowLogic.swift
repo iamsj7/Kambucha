@@ -123,6 +123,19 @@ public enum DestinationRules {
         }
     }
 
+    /// Another destination that already names this drive. Identity is by volume UUID, so one drive is one destination.
+    public static func duplicateDrive(of volumeUUID: String, in destinations: [Destination], excluding: UUID?) -> Destination? {
+        guard !volumeUUID.isEmpty else { return nil }
+        return destinations.first {
+            $0.kind == .externalDrive && $0.id != excluding &&
+                $0.volumeUUID?.caseInsensitiveCompare(volumeUUID) == .orderedSame
+        }
+    }
+
+    public static func duplicateDriveMessage(_ existing: Destination) -> String {
+        "This drive is already a destination called \"\(existing.name)\"."
+    }
+
     public static func filesystemWarning(_ name: String) -> String? {
         name.lowercased().contains("exfat")
             ? "exFAT can't keep symbolic links as real links, stores timestamps to 2 second precision, and files named ._* are skipped. APFS is recommended."
@@ -141,10 +154,24 @@ public enum SetupFailureText {
         }
     }
 
+    public static func isBusy(_ error: any Error) -> Bool { (error as? AgentFailure) == .busy }
+
     public static func message(for error: any Error) -> String {
         switch error {
         case let e as RemoteSetupError: return message(e)
         case let e as GuardFailure: return message(e)
+        case let e as AgentFailure: return message(e)
+        case let e as LocalMirrorInspectorError:
+            switch e {
+            case .backupRunning: return "A backup is running. Try again when it finishes."
+            case .unsafePath: return "One of those files is not inside the backup, so Mirror left everything where it was."
+            }
+        case let e as RestoreError:
+            switch e {
+            case .overSource: return "That folder is, or holds, a folder Mirror backs up. Choose a different place to restore to."
+            case .destinationNotEmpty: return "That folder isn't empty. Choose an empty folder."
+            }
+        case is ArchiveError: return "That file isn't in the archive."
         case let e as AgentClientError:
             switch e {
             case .requestTooLarge: return "That text is too long to be a Recovery Kit."
@@ -152,6 +179,19 @@ public enum SetupFailureText {
             }
         case is CancellationError: return "Cancelled."
         default: return "Something went wrong: \(error.localizedDescription)"
+        }
+    }
+
+    private static func message(_ e: AgentFailure) -> String {
+        switch e {
+        case .busy: "Another Mirror action is using your sign-in. Wait for it to finish, then try again."
+        case .presenceRefused: "Touch ID or your password wasn't accepted, so Mirror did not continue."
+        case .untrustedCaller, .untrustedHelper: "The backup agent does not trust this copy of Mirror. Reinstall Mirror and try again."
+        case .configUnreadable: "The backup agent could not read Mirror's settings."
+        case .lockFailed: "Mirror could not start that action. Try again."
+        case .invalidRequest, .other: "The backup agent could not finish that. Try again."
+        case .cancelled: "Cancelled."
+        case .session, .setup, .kit, .drill, .keychain, .runner: "The backup agent could not finish that. Try again."
         }
     }
 
@@ -184,7 +224,7 @@ public enum SetupFailureText {
         case .iCloudUnavailable: "iCloud Drive isn't available."
         case .destinationOutsideRoot, .destinationUnclaimed: "The backup folder isn't safe to use."
         case .wrongDrive: "This isn't the drive this destination was set up with. Connect the right drive."
-        case .internalDiskNotConfirmed: "This looks like an internal disk and hasn't been confirmed. Remove the destination and add it again to confirm."
+        case .internalDiskNotConfirmed: "This looks like an internal disk and hasn't been confirmed. Open the destination in Mirror and confirm it to use this disk."
         case .sourceSuspiciouslyEmpty: "That folder looks empty compared with the last backup."
         }
     }

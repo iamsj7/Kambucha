@@ -142,7 +142,7 @@ struct AddDestinationFlow: View {
     }
 
     private func refreshVolumes() {
-        volumes = ExternalDriveSetup.choices(from: model.services.volumes)
+        volumes = ExternalDriveSetup.choices(from: model.services.volumes, existing: model.destinations)
         if let id = volumeID, !volumes.contains(where: { $0.id == id && $0.selectable }) { volumeID = nil }
     }
 
@@ -229,6 +229,10 @@ struct AddDestinationFlow: View {
         let finalName = trimmed.isEmpty ? defaultName : trimmed
         if model.destinations.contains(where: { $0.name.caseInsensitiveCompare(finalName) == .orderedSame }) {
             error = "A destination called \"\(finalName)\" already exists."
+            return
+        }
+        if let existing = DestinationRules.duplicateDrive(of: v.uuid, in: model.destinations, excluding: nil) {
+            error = DestinationRules.duplicateDriveMessage(existing)
             return
         }
         let d = ExternalDriveSetup.destination(name: finalName, volume: v, internalConfirmed: internalConfirmed)
