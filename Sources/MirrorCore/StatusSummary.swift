@@ -14,6 +14,12 @@ public enum OverallStatus: Equatable, Sendable {
 
 /// Folds the on-disk state into the one status the menu bar shows (spec sections 8a and 12).
 public enum StatusSummary {
+    /// A real mismatch said as one, in the status and the run record: never a neutral wait.
+    public static func recheckText(count n: Int) -> String {
+        n == 1 ? "Re-checking 1 file that didn't match, waiting for iCloud to download it"
+               : "Re-checking \(n.formatted()) files that didn't match, waiting for iCloud to download them"
+    }
+
     /// "Backed Up" means every destination of every active set passed. Review items and a due restore
     /// drill never block it. Priority: attention, held, running, uploading, a missing destination,
     /// waiting for iCloud, a run still to resume, backed up.

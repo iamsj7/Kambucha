@@ -270,7 +270,7 @@ public final class RunCoordinator: Sendable {
         tally.pending = state.pendingUploads
         tally.refused = state.refusedSince.count
         if state.waitingForDownload > 0, tally.status != .verificationFailed {
-            tally.verification = "Waiting for iCloud to download \(state.waitingForDownload) files to verify"
+            tally.verification = StatusSummary.recheckText(count: state.waitingForDownload)
         }
         // Saved ahead of the record, so a kill between them can't leave a stop no one was told of.
         for notice in tally.notices { keep(notice.problem, notice.pair, set, detail: notice.detail) }

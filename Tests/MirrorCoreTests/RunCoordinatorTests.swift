@@ -1759,7 +1759,7 @@ private final class Harness: @unchecked Sendable {
         let h = try Harness(); try owedFreed(h, ["a.txt", "b.txt"])
         await h.run()
         #expect(try h.state.waitingForDownload == 2)
-        #expect(try h.latest()?.verification == "Waiting for iCloud to download 2 files to verify")
+        #expect(try h.latest()?.verification == StatusSummary.recheckText(count: 2))
     }
 }
 
@@ -1788,6 +1788,7 @@ private final class Harness: @unchecked Sendable {
         let h = try Harness(); try await evictedAfterAMismatch(h)
         #expect(try status(h) == .waitingForDownload(1))
         #expect(try h.active == [.verificationFailed])   // told at once, and still open until the hash
+        #expect(try h.latest()?.verification == "Re-checking 1 file that didn't match, waiting for iCloud to download it")
     }
 
     @Test func thePassingHashEndsTheWait() async throws {

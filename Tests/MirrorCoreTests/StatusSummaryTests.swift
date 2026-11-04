@@ -155,6 +155,11 @@ struct StatusSummaryTests {
         #expect(gone == .attention("A destination was removed"))
     }
 
+    @Test func theMismatchWordingSaysWhatsTrue() {
+        #expect(StatusSummary.recheckText(count: 1) == "Re-checking 1 file that didn't match, waiting for iCloud to download it")
+        #expect(StatusSummary.recheckText(count: 1200) == "Re-checking 1,200 files that didn't match, waiting for iCloud to download them")
+    }
+
     @Test func drillDueDoesNotBlockBackedUp() {
         let s = set([dest])
         let r = overall(s, [dest], [pair(s, dest): state()], [record(s, dest, .success)], [problem(.drillDue, s, dest)])
