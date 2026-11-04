@@ -141,7 +141,7 @@ public enum DestinationRules {
         "Without encryption the provider can read secrets such as .env files and private keys. This can't be changed later without creating a new destination."
 
     public static func notConnectedText(lastBackedUp: Date?, now: Date = Date()) -> String {
-        guard let last = lastBackedUp else { return "Not connected, not backed up yet" }
+        guard let last = lastBackedUp else { return "Not connected yet" }
         let days = Calendar.current.dateComponents([.day], from: last, to: now).day ?? 0
         switch days {
         case ..<1: return "Not connected, last backed up today"

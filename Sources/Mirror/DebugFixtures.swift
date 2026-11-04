@@ -136,6 +136,18 @@ enum DebugFixtures {
         spin(0.5)
 
         func at(_ n: String) -> URL { dir.appendingPathComponent(n) }
+        // A set whose only destination is a drive that isn't plugged in.
+        let awayRoot = FileManager.default.temporaryDirectory.appendingPathComponent("mirror-away-\(UUID().uuidString)")
+        let away = Destination(name: "Travel SSD", kind: .externalDrive, encrypted: false, volumeUUID: "Z")
+        var awaySet = BackupSet(name: "Photos", source: URL(fileURLWithPath: "/Users/me/Photos"), destinationIDs: [away.id])
+        awaySet.acceptPreview()
+        let awayStore = ConfigStore(root: awayRoot)
+        try? awayStore.saveDestinations([away]); try? awayStore.saveSets([awaySet])
+        var awayState = SetState(); awayState.lastFinished = Date().addingTimeInterval(-6 * 86_400 - 60)
+        try? awayStore.save(awayState, for: PairID(set: awaySet.id, destination: away.id))
+        let awayModel = AppModel(support: awayRoot, services: services)
+        spin(0.5)
+        render(MenuBarPanel(model: awayModel), size: CGSize(width: 320, height: 300), to: at("panel-drive-away"))
         // MainWindow itself shows onboarding until the real system checks pass, so the overview is rendered directly.
         render(NavigationStack { OverviewView(model: model, select: { _ in }) }, size: CGSize(width: 700, height: 900), to: at("main-overview"))
         render(NavigationStack { SetDetailView(model: model, setID: model.sets[0].id) }, size: CGSize(width: 620, height: 2000), to: at("set-detail"))

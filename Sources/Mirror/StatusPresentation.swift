@@ -30,6 +30,9 @@ struct StatusPresentation {
             detail = "New and changed files still back up. Deletions wait for your review."
         case .attention(let why):
             symbol = "exclamationmark.icloud"; title = "Needs Attention"; detail = why
+        case .driveNotConnected(let name, let last):
+            symbol = "externaldrive.badge.xmark"; title = DestinationRules.notConnectedText(lastBackedUp: last)
+            detail = "\(name) backs up when you plug it in."
         case .paused:
             symbol = "pause.circle"; title = "Paused"; detail = "Backups are turned off."
         case .notConfigured:

@@ -121,6 +121,7 @@ extension OverallStatus {
         case .running: "Backing Up"
         case .held(let n): "\(n.formatted()) held"
         case .attention: "Needs Attention"
+        case .driveNotConnected: "Not Connected"
         case .paused: "Paused"
         case .notConfigured: "Not Set Up"
         }

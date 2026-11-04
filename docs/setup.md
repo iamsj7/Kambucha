@@ -77,7 +77,8 @@ Status always shows words and a symbol, never colour alone.
 | Needs Attention | Something stopped a backup, such as a failed check, lost Full Disk Access, an expired sign-in or a missing destination marker. The line under it says why. | Read the reason and fix it. Mirror also sends one notification per problem. |
 | Paused | You turned backups off. | Choose Resume when ready. |
 | Not Set Up | No backup set yet. | Add one. |
-| Not connected, last backed up N days ago | An external drive is not plugged in. This is not a failure. | Plug it in when convenient. After 7 days Mirror gives one quiet reminder. |
+| Not connected, last backed up N days ago | An external drive is not plugged in. This is not a failure, and it does not stop your other destinations reading Backed Up. | Plug it in when convenient. After 7 days Mirror gives one quiet reminder. |
+| Not connected yet | An external drive has never finished a backup and is not plugged in. | Plug it in to start its first backup. |
 
 "Backed Up" also shows a count of items to review. These are files your rules skip that you may want, such as a new `.env` file inside a build folder. They never block a backup.
 

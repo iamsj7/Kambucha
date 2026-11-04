@@ -22,4 +22,14 @@ struct StatusPresentationTests {
         #expect(StatusPresentation(.unfinished).title != StatusPresentation(.running).title)
         #expect(OverallStatus.unfinished.shortText != OverallStatus.running.shortText)
     }
+
+    @Test func aDriveNotConnectedHasItsOwnLine() {
+        let never = StatusPresentation(.driveNotConnected(name: "SSD", last: nil))
+        #expect(never.title == "Not connected yet")
+        #expect(never.detail == "SSD backs up when you plug it in.")
+        #expect(never.symbol == "externaldrive.badge.xmark")
+        let last = Date().addingTimeInterval(-6 * 86_400 - 60)
+        #expect(StatusPresentation(.driveNotConnected(name: "SSD", last: last)).title == "Not connected, last backed up 6 days ago")
+        #expect(OverallStatus.driveNotConnected(name: "SSD", last: nil).shortText == "Not Connected")
+    }
 }

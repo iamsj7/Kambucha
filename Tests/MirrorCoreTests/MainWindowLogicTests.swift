@@ -190,7 +190,7 @@ private let driveB = Destination(name: "iCloud", kind: .iCloudFolder)
     #expect(DestinationRules.notConnectedText(lastBackedUp: six, now: now) == "Not connected, last backed up 6 days ago")
     #expect(DestinationRules.notConnectedText(lastBackedUp: now.addingTimeInterval(-86_400), now: now) == "Not connected, last backed up 1 day ago")
     #expect(DestinationRules.notConnectedText(lastBackedUp: now, now: now) == "Not connected, last backed up today")
-    #expect(DestinationRules.notConnectedText(lastBackedUp: nil, now: now) == "Not connected, not backed up yet")
+    #expect(DestinationRules.notConnectedText(lastBackedUp: nil, now: now) == "Not connected yet")
 }
 
 @Test func exFATWarns() {

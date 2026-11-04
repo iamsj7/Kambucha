@@ -68,6 +68,27 @@ private func vol(_ uuid: String, internalLooking: Bool = false) -> VolumeInfo {
         #expect(m.destinationStatus(m.destinations[0]).text != "Confirm this internal disk")
     }
 
+    @Test func aDriveThatWasNeverConnectedReadsNotConnectedYet() async throws {
+        let d = Destination(name: "SSD", kind: .externalDrive, encrypted: false, volumeUUID: "U")
+        let m = try make(destinations: [d], sets: [BackupSet(name: "A", source: URL(fileURLWithPath: "/tmp/a"), destinationIDs: [d.id])])
+        await m.volumeCache.refresh()
+        #expect(m.destinationStatus(d).text == "Not connected yet")
+    }
+
+    @Test func theStatusFollowsTheDriveBeingConnected() async throws {
+        let d = Destination(name: "SSD", kind: .externalDrive, encrypted: false, volumeUUID: "U")
+        var s = BackupSet(name: "A", source: URL(fileURLWithPath: "/tmp/a"), destinationIDs: [d.id])
+        s.acceptPreview()
+        let m = try make(destinations: [d], sets: [s]) { store, _ in
+            var st = SetState(); st.lastFinished = Date(); st.syncIncomplete = true
+            try store.save(st, for: PairID(set: s.id, destination: d.id))
+        }
+        await m.volumeCache.refresh()
+        m.reload()
+        guard case .driveNotConnected(let name, _) = m.status else { Issue.record("was \(m.status)"); return }
+        #expect(name == "SSD")
+    }
+
     @Test func aDriveThatIsNotMountedIsNotConnected() async throws {
         let d = Destination(name: "SSD", kind: .externalDrive, encrypted: false, volumeUUID: "U")
         let m = try make(destinations: [d])

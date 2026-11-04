@@ -28,7 +28,8 @@ private struct Snapshot: Sendable {
     var progress: [ProgressItem]
     var running: Bool
 
-    static func load(support: URL) -> Snapshot? {
+    /// `volumes` is nil until the first read of the mounted drives: no drive is called away on a guess.
+    static func load(support: URL, volumes: [VolumeInfo]?) -> Snapshot? {
         let store = ConfigStore(root: support)
         guard let sets = try? store.loadSets(), let destinations = try? store.loadDestinations() else { return nil }
         var states: [PairID: SetState] = [:]
@@ -48,9 +49,10 @@ private struct Snapshot: Sendable {
             let dest = destinations.first { $0.id == p.pair.destination }?.name
             return ProgressItem(label: dest.map { "\(set.name) to \($0)" } ?? set.name, progress: p)
         }.sorted { $0.label < $1.label }
+        let disconnected = volumes.map { ExternalVolume.disconnected(destinations, in: $0) } ?? []
         func overall(_ ss: [BackupSet]) -> OverallStatus {
             StatusSummary.overall(sets: ss, destinations: destinations, states: states,
-                                  records: records, problems: problems, running: running)
+                                  records: records, problems: problems, running: running, disconnected: disconnected)
         }
         func needsPreview(_ ss: [BackupSet]) -> OverallStatus { StatusSummary.withPreviewNeeded(overall(ss), sets: ss) }
         return Snapshot(sets: sets, status: needsPreview(sets),
@@ -116,9 +118,10 @@ final class AppModel {
             guard let self else { return false }
             return self.isBackupActive || AgentLockProbe.isHeld(support: self.support)
         }
-        if let snap = Snapshot.load(support: support) { apply(snap) }   // first paint is synchronous
+        if let snap = Snapshot.load(support: support, volumes: nil) { apply(snap) }   // first paint is synchronous
         else { status = .attention("Mirror could not read its settings") }
         attachMissingWatchers()
+        cache.onChange = { [weak self] in self?.refresh() }
         Task { await cache.refresh() }
     }
 
@@ -137,9 +140,9 @@ final class AppModel {
     func refresh() {
         generation += 1
         let mine = generation
-        let support = support
+        let support = support, volumes = loadedVolumes
         Task { [weak self] in
-            let snap = await Task.detached(priority: .utility) { Snapshot.load(support: support) }.value
+            let snap = await Task.detached(priority: .utility) { Snapshot.load(support: support, volumes: volumes) }.value
             guard let self, mine == self.generation else { return }
             if let snap { self.apply(snap) } else { self.status = .attention("Mirror could not read its settings") }
             self.attachMissingWatchers()
@@ -149,8 +152,10 @@ final class AppModel {
 
     /// Reads state now, for a change made outside this model that the next line depends on.
     func reload() {
-        if let snap = Snapshot.load(support: support) { apply(snap) }
+        if let snap = Snapshot.load(support: support, volumes: loadedVolumes) { apply(snap) }
     }
+
+    private var loadedVolumes: [VolumeInfo]? { volumeCache.hasLoaded ? volumeCache.volumes : nil }
 
     private func apply(_ snap: Snapshot) {
         sets = snap.sets; rows = snap.rows; status = snap.status; progress = snap.progress
