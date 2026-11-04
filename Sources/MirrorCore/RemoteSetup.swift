@@ -18,12 +18,26 @@ public struct RemoteSetup: Sendable {
     private let secrets: any SecretStoring
     private let helper: any HelperValidating
     private let workDir: URL
+    private let tokenLock: URL?
+    private let tokenLockWait: TimeInterval
 
     public init(binary: URL, secrets: any SecretStoring, helper: any HelperValidating) {
         self.init(binary: binary, secrets: secrets, helper: helper, workDir: RcloneSession.interactiveWorkDir)
     }
-    init(binary: URL, secrets: any SecretStoring, helper: any HelperValidating, workDir: URL) {
+    init(binary: URL, secrets: any SecretStoring, helper: any HelperValidating, workDir: URL, tokenLock: URL? = nil,
+         tokenLockWait: TimeInterval = 5) {
         self.binary = binary; self.secrets = secrets; self.helper = helper; self.workDir = workDir
+        self.tokenLock = tokenLock; self.tokenLockWait = tokenLockWait
+    }
+
+    /// For the sign-in writes alone, never the browser. A run's token save may be under way, and its
+    /// holder is only writing to the Keychain, so one that won't let go is an error, not a reason to write.
+    func locked(_ write: () throws -> Void) throws {
+        guard let tokenLock else { return try write() }
+        let lock = RunLock(url: tokenLock)
+        guard try lock.acquire(timeout: tokenLockWait) else { throw AgentFailure.busy }
+        defer { lock.release() }
+        try write()
     }
 
     /// First sign-in. Also creates the crypt keys of a new encrypted destination. Existing keys are
@@ -67,7 +81,7 @@ public struct RemoteSetup: Sendable {
                 try secrets.saveVault(.generate(), for: destination)
             }
         }
-        try secrets.saveSignIn(signedIn, for: destination)
+        try locked { try secrets.saveSignIn(signedIn, for: destination) }
     }
 
     /// Signs in again with the stored client, after a token has expired. Crypt keys are left alone.
@@ -85,7 +99,8 @@ public struct RemoteSetup: Sendable {
             guard case .present = try vaultState(destination) else { throw RemoteSetupError.vaultLostNeedsRecoveryKit }
         }
         options["token"] = nil
-        try secrets.saveSignIn(try await signIn(destination, options: options), for: destination)
+        let signedIn = try await signIn(destination, options: options)
+        try locked { try secrets.saveSignIn(signedIn, for: destination) }
     }
 
     /// Puts back keys and client from a pasted Recovery Kit, after a Keychain loss. Signs in with the
@@ -143,8 +158,10 @@ public struct RemoteSetup: Sendable {
         func keepRefresh() throws {
             let now = latest()
             guard now != options else { return }
-            if surviving == nil { try secrets.saveHeldSignIn(now, for: destination) }
-            else if try secrets.signIn(for: destination) == surviving { try secrets.saveSignIn(now, for: destination) }
+            try locked {
+                if surviving == nil { try secrets.saveHeldSignIn(now, for: destination) }
+                else if try secrets.signIn(for: destination) == surviving { try secrets.saveSignIn(now, for: destination) }
+            }
         }
         let proof: KitProof
         do { proof = try await kitOpens(kit, encryptedRoot: root, context: context) } catch {
@@ -164,7 +181,7 @@ public struct RemoteSetup: Sendable {
         try refuseOtherKeys(keys, destination)   // the browser and the proof took time
         try secrets.saveVault(keys, for: destination)
         if surviving == nil {
-            try secrets.saveSignIn(latest(), for: destination)
+            try locked { try secrets.saveSignIn(latest(), for: destination) }
             try secrets.delete(SecretKeys.heldSignIn(destination.id))
         }
     }

@@ -29,9 +29,13 @@ public final class RcloneSession {
     private let workDir: URL
     private var runDir: URL?
     private var openedWith: [String: String] = [:]
+    private let tokenLock: URL?
+    private let tokenLockWait: TimeInterval
 
     /// `helper` is required, so no caller can forget it. It's `SignedCodeTrust` outside tests.
-    public init(destination: Destination, secrets: any SecretStoring, binary: URL, helper: any HelperValidating, workDir: URL) {
+    public init(destination: Destination, secrets: any SecretStoring, binary: URL, helper: any HelperValidating, workDir: URL,
+                tokenLock: URL? = nil, tokenLockWait: TimeInterval = 5) {
+        self.tokenLock = tokenLock; self.tokenLockWait = tokenLockWait
         self.destination = destination; self.secrets = secrets; self.binary = binary
         self.helper = helper; self.workDir = workDir
     }
@@ -136,8 +140,17 @@ public final class RcloneSession {
     private func saveRefreshedSignIn(from config: URL) throws {
         guard let text = try? String(contentsOf: config, encoding: .utf8),
               let found = RcloneBackend.parse(text, remote: RcloneBackend.remoteName(destination)),
-              RcloneBackend.hasUsableToken(found), found != openedWith,
-              try secrets.signIn(for: destination) == openedWith else { return }
+              RcloneBackend.hasUsableToken(found), found != openedWith else { return }
+        // Compare and write as one step. If another writer won't let go, the stored token still works,
+        // so this refresh is what's given up rather than writing over whatever they're saving.
+        var lock: RunLock?
+        if let tokenLock {
+            let held = RunLock(url: tokenLock)
+            guard try held.acquire(timeout: tokenLockWait) else { return }
+            lock = held
+        }
+        defer { lock?.release() }
+        guard try secrets.signIn(for: destination) == openedWith else { return }
         try secrets.saveSignIn(found, for: destination)
     }
 }

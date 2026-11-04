@@ -96,14 +96,12 @@ public final class RunCoordinator: Sendable {
         let settings = loadSettings()
         if settings.pauseInLowPowerMode, !command.force, lowPower() { return true }
         // Ahead of everything else: any volume mounting wakes the agent, and most have nothing to do with it.
-        var only: Set<PairID>?
+        var first = Set<PairID>()
         if isMountWake(command) {
-            let due = dueDrivePairs()
-            if due.isEmpty { return true }
-            only = due
-        } else if command.isScheduled {
-            noteFullPass()
+            first = dueDrivePairs()
+            if first.isEmpty { return true }
         }
+        if command.isScheduled { noteFullPass() }
         writePID()
         defer { try? FileManager.default.removeItem(at: paths.pidFile) }
 
@@ -114,7 +112,7 @@ public final class RunCoordinator: Sendable {
         }
         do { try RcloneSession.wipeLeftovers(in: paths.work) } catch { Self.log.error("wiping leftovers failed") }
         do { try await problems.retryPending() } catch { Self.log.error("retrying notifications failed") }
-        let ran = await runPairs(command, only: only, settings: settings)
+        let ran = await runPairs(command, first: first, settings: settings)
         prune()
         await settleRequests()
         return ran
@@ -150,7 +148,7 @@ public final class RunCoordinator: Sendable {
         guard let sets = try? store.loadSets(), let destinations = try? store.loadDestinations() else { return [] }
         let mounted = volumes.mounted()
         var due = Set<PairID>()
-        for set in sets {
+        for set in sets where !set.isPaused && set.isPreviewAccepted {
             for destination in destinations where set.destinationIDs.contains(destination.id) {
                 guard let volume = ExternalVolume.find(destination, in: mounted) else { continue }
                 let pair = PairID(set: set.id, destination: destination.id)
@@ -184,7 +182,9 @@ public final class RunCoordinator: Sendable {
         }
     }
 
-    private func runPairs(_ command: RunCommand, only: Set<PairID>?, settings: AppSettings) async -> Bool {
+    /// `first` goes ahead of the usual order. The rest still run: a mount wake is only inferred from the time,
+    /// and if this was really the interval they'd otherwise wait another half hour.
+    private func runPairs(_ command: RunCommand, first: Set<PairID>, settings: AppSettings) async -> Bool {
         let sets: [BackupSet], destinations: [Destination]
         do {
             sets = try store.loadSets()
@@ -200,14 +200,14 @@ public final class RunCoordinator: Sendable {
             for id in set.destinationIDs {
                 guard let destination = destinations.first(where: { $0.id == id }) else { continue }
                 let pair = PairID(set: set.id, destination: id)
-                if let only, !only.contains(pair) { continue }
                 // Ordering only. An unreadable state fails properly in `run`.
                 pairs.append((pair, destination.kind, (try? store.state(for: pair)) ?? SetState()))
             }
         }
         var expired = Set<UUID>()
         var drives = DriveOutcomes()
-        for pair in RunPlanner.order(pairs) {
+        let ordered = RunPlanner.order(pairs)
+        for pair in ordered.filter(first.contains) + ordered.filter({ !first.contains($0) }) {
             if Task.isCancelled { break }
             guard let destination = destinations.first(where: { $0.id == pair.destination }) else { continue }
             switch await run(pair, destination: destination, command: command, settings: settings, expired: &expired, drives: &drives) {
@@ -755,6 +755,7 @@ public final class RunCoordinator: Sendable {
         }
         fresh.entries.removeAll { matcher.isExcluded($0.path) }
         guard fresh != old else { return }
+        if let volume = job.volume, !isThere(volume) { return }
         // The manifest's own check can't see a Manifests folder that is itself a link.
         try job.pathGuard.assertInsideRoot(try SymlinkManifest.location(set: set.name, backupRoot: root))
         try fresh.write(backupRoot: root)
@@ -1062,6 +1063,7 @@ public final class RunCoordinator: Sendable {
             try await requireICloud(job, at: job.pathGuard.backupRoot.deletingLastPathComponent())
             var claimed = marker ?? RootMarker()
             claimed.sets[set.id] = set.name
+            try confirmDrive(job)
             let encoder = JSONEncoder()
             encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
             try await files.write(try encoder.encode(claimed), to: path, context: context)
@@ -1248,6 +1250,9 @@ public final class RunCoordinator: Sendable {
             // is a resume, not a failure.
             state.syncIncomplete = true
             tally.status = .partial
+        case Stop.rclone(_, let errors) where job.volume != nil && errors.contains(where: Self.isOutOfSpace):
+            // The dry run's figure was right when it was taken, and something else filled the drive since.
+            stop(.driveFull, "The drive ran out of room", detail: "\(job.destination.name) ran out of room during the backup")
         case Stop.rclone(_, let errors):
             let scrubbed = errors.prefix(20).map(RcloneLogParser.scrub)
             fail(scrubbed.first ?? "rclone failed", job, state: &state, tally: &tally)
@@ -1358,6 +1363,9 @@ public final class RunCoordinator: Sendable {
     private func sampleCount(_ source: URL) -> Int {
         ((try? FileManager.default.contentsOfDirectory(atPath: source.path)) ?? []).filter { !Self.noise.contains($0) }.count
     }
+
+    /// ENOSPC as rclone words it.
+    private static func isOutOfSpace(_ error: String) -> Bool { error.lowercased().contains("no space left on device") }
 
     private static func size(_ bytes: Int64) -> String { ByteCountFormatter.string(fromByteCount: bytes, countStyle: .file) }
 

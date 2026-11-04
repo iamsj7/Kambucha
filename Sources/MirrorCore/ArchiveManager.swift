@@ -1,4 +1,5 @@
 import Foundation
+import os
 
 public enum ArchiveError: Error, Equatable, Sendable {
     case outsideArchive(String)
@@ -126,6 +127,7 @@ enum ArchiveScope {
 /// Lists, prunes and evicts `Archive/<set>/<stamp>/...` at one destination. `endpoint` is the backup root as
 /// rclone sees it: a folder path for iCloud, a crypt remote such as `mirrorcrypt:` for the cloud kinds.
 public struct ArchiveManager: Sendable {
+    private static let log = Logger(subsystem: MirrorCore.bundleID, category: "ArchiveManager")
     let rclone: any RcloneRunning
     let endpoint: String
     let context: RcloneContext
@@ -229,7 +231,7 @@ public struct ArchiveManager: Sendable {
         for case let url as URL in walker {
             guard (try? url.resourceValues(forKeys: [.isRegularFileKey]))?.isRegularFile == true,
                   !Dataless.isDataless(url), isUploaded(url) else { continue }
-            do { try evict(url); count += 1 } catch { continue }
+            do { try evict(url); count += 1 } catch { Self.log.error("could not evict an archive file") }
         }
         return count
     }

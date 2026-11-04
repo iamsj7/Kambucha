@@ -38,6 +38,10 @@ public enum MirrorPaths {
     }
     public static var support: URL { support() }
 
+    /// Held only around writing a sign-in to the Keychain. `locks/secrets.lock` can be held for minutes in a
+    /// browser, and a scheduled run's token save can't wait for that.
+    public static func tokenLock(support: URL) -> URL { support.appendingPathComponent("locks/tokens.lock") }
+
     public static func logs(home: URL = ownerHome) -> URL {
         home.appendingPathComponent("Library/Logs/Mirror", isDirectory: true)
     }

@@ -365,6 +365,55 @@ private func cryptName(_ endpoint: String) -> String {
         try s.close()   // a second close is harmless
     }
 
+    private func refreshed(_ f: Fixture, lock: URL, wait: TimeInterval) throws -> (RcloneSession, Destination, String) {
+        let d = Destination(name: "D", kind: .googleDrive, encrypted: false)
+        try f.secrets.saveSignIn(["client_id": "c", "token": fakeToken], for: d)
+        let s = RcloneSession(destination: d, secrets: f.secrets, binary: vendoredRclone, helper: AnyHelper(), workDir: f.work,
+                              tokenLock: lock, tokenLockWait: wait)
+        let (_, context) = try s.open()
+        var text = try String(contentsOfFile: context.configPath, encoding: .utf8)
+        text = text.replacingOccurrences(of: "access-one", with: "access-two")
+        try text.write(toFile: context.configPath, atomically: true, encoding: .utf8)
+        return (s, d, context.configPath)
+    }
+
+    @Test func aRefreshedTokenIsSavedUnderTheShortLock() throws {
+        let f = try Fixture()
+        let (s, d, _) = try refreshed(f, lock: f.tmp.url.appendingPathComponent("tokens.lock"), wait: 0.1)
+        try s.close()
+        #expect(try f.secrets.signIn(for: d)?["token"]?.contains("access-two") == true)
+    }
+
+    @Test func aHeldLockCostsTheRefreshNeverTheFileOrTheStoredToken() throws {
+        let f = try Fixture()
+        let url = f.tmp.url.appendingPathComponent("tokens.lock")
+        let (s, d, config) = try refreshed(f, lock: url, wait: 0.05)
+        let holder = RunLock(url: url)
+        #expect(holder.tryAcquire())
+        defer { holder.release() }
+        try s.close()
+        #expect(try f.secrets.signIn(for: d)?["token"]?.contains("access-one") == true)
+        #expect(!FileManager.default.fileExists(atPath: config))
+    }
+
+    @Test func theTokenLockIsNotTheBrowserLengthOne() {
+        let support = URL(fileURLWithPath: "/tmp/s")
+        #expect(MirrorPaths.tokenLock(support: support).lastPathComponent == "tokens.lock")
+        #expect(MirrorPaths.tokenLock(support: support).lastPathComponent != "secrets.lock")
+    }
+
+    @Test func setupAnswersBusyRatherThanWriteUnderSomeoneElse() throws {
+        let f = try Fixture()
+        let url = f.tmp.url.appendingPathComponent("tokens.lock")
+        let holder = RunLock(url: url)
+        #expect(holder.tryAcquire())
+        defer { holder.release() }
+        let setup = RemoteSetup(binary: vendoredRclone, secrets: f.secrets, helper: AnyHelper(), workDir: f.work, tokenLock: url, tokenLockWait: 0.05)
+        var ran = false
+        #expect(throws: AgentFailure.busy) { try setup.locked { ran = true } }
+        #expect(!ran)
+    }
+
     @Test func closeNeverReplacesTokenWithGarbage() throws {
         for damaged in ["", "[other]\ntoken = \(newToken)\n", "[NAME]\ntoken = \n", "[NAME]\ntoken = not json\n",
                         "[NAME]\ntoken = {\"expiry\":\"2031\"}\n"] {

@@ -45,14 +45,6 @@ public extension Notifying {
     func postSafeToEject(volumeName: String, volumeUUID: String) async -> Bool { false }
 }
 
-/// How the agent's "safe to eject" notification names itself. The app answers the action, as the agent
-/// has exited by then and ejecting takes `NSWorkspace`.
-public enum DriveNotification {
-    public static let category = "mirror.drive-finished"
-    public static let ejectAction = "mirror.eject"
-    public static let volumeKey = "volumeUUID"
-}
-
 public struct ActiveProblem: Codable, Equatable, Sendable {
     public var problem: Problem
     public var pair: PairID

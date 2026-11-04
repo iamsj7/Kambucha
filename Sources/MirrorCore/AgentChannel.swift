@@ -140,7 +140,7 @@ public struct AgentService: Sendable {
     init(secrets: any SecretStoring, binary: URL, trust: any AgentTrust, presence: any UserPresence, support: URL, workDir: URL,
          volumes: any VolumeLocating = SystemVolumes(), iCloudDrive: URL = MirrorPaths.iCloudDrive,
          presets: @escaping @Sendable () throws -> [Preset] = { try PresetCatalog.all() }) {
-        recovery = AgentRecovery(store: ConfigStore(root: support), secrets: secrets, binary: binary, trust: trust, workDir: workDir,
+        recovery = AgentRecovery(store: ConfigStore(root: support), tokenLock: MirrorPaths.tokenLock(support: support), secrets: secrets, binary: binary, trust: trust, workDir: workDir,
                                  volumes: volumes, iCloudDrive: iCloudDrive, presets: presets)
         self.secrets = secrets; self.binary = binary; self.trust = trust; self.presence = presence
         self.support = support; self.workDir = workDir
@@ -194,7 +194,7 @@ public struct AgentService: Sendable {
 
     private func handle(_ request: AgentRequest, _ destination: Destination) async throws -> AgentResponse {
         try? RcloneSession.wipeLeftovers(in: workDir, olderThan: Self.leftoverAge)
-        let setup = RemoteSetup(binary: binary, secrets: secrets, helper: trust, workDir: workDir)
+        let setup = RemoteSetup(binary: binary, secrets: secrets, helper: trust, workDir: workDir, tokenLock: MirrorPaths.tokenLock(support: support))
         switch request {
         case .connect(_, let clientID, let clientSecret):
             try await setup.connect(destination, clientID: clientID, clientSecret: clientSecret)
@@ -225,7 +225,8 @@ public struct AgentService: Sendable {
 
     /// The session supplies the sign-in alone, so a lost vault can't stop a kit proving itself.
     private func drill(_ destination: Destination, kit: RecoveryKit, relativePath: String, original: URL) async throws -> Bool {
-        let session = RcloneSession(destination: destination, secrets: secrets, binary: binary, helper: trust, workDir: workDir)
+        let session = RcloneSession(destination: destination, secrets: secrets, binary: binary, helper: trust, workDir: workDir,
+                                    tokenLock: MirrorPaths.tokenLock(support: support))
         guard let root = session.encryptedRoot else { throw RcloneSessionError.encryptionNotSupported }
         let context = try session.openSignInOnly()
         do {

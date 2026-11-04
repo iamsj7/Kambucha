@@ -5,6 +5,7 @@ import Foundation
 /// Sets and destinations come from the stored config, so a request can only name them.
 struct AgentRecovery: Sendable {
     let store: ConfigStore
+    let tokenLock: URL
     let secrets: any SecretStoring
     let binary: URL
     let trust: any AgentTrust
@@ -62,7 +63,8 @@ struct AgentRecovery: Sendable {
             let root = try PathGuard.forVolume(volume, iCloudDrive: iCloudDrive).driveRoot(destination, volume: volume)
             return Access(endpoint: root.path, context: local, volume: volume, localRoot: root.url)
         case .googleDrive, .oneDrive:
-            let session = RcloneSession(destination: destination, secrets: secrets, binary: binary, helper: trust, workDir: workDir)
+            let session = RcloneSession(destination: destination, secrets: secrets, binary: binary, helper: trust, workDir: workDir,
+                                        tokenLock: tokenLock)
             let (endpoint, context) = try session.open()
             return Access(endpoint: endpoint, context: context, session: session)
         }

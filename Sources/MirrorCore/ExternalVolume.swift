@@ -233,7 +233,7 @@ public enum ExternalVolume {
     }
 
     /// `<volume>/Mac Backup`. The root marker sits at `<volume>/Mac Backup/.mirror-root`.
-    public static func backupRoot(on volume: VolumeInfo) -> URL {
+    static func backupRoot(on volume: VolumeInfo) -> URL {
         volume.mountPoint.appendingPathComponent(MirrorPaths.rootFolderName, isDirectory: true)
     }
 }

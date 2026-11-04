@@ -155,9 +155,18 @@ private final class FakeVolumes: VolumeLocating, @unchecked Sendable {
     private let lock = NSLock()
     private var _list: [VolumeInfo] = []
     private var _reads = 0
+    private var _goneAfter: Int?
     var reads: Int { lock.withLock { _reads } }
     func set(_ list: [VolumeInfo]) { lock.withLock { _list = list } }
-    func mounted() -> [VolumeInfo] { lock.withLock { _reads += 1; return _list } }
+    /// The drive leaves once this many looks have been answered.
+    func gone(after reads: Int) { lock.withLock { _goneAfter = reads; _reads = 0 } }
+    func mounted() -> [VolumeInfo] {
+        lock.withLock {
+            _reads += 1
+            if let _goneAfter, _reads > _goneAfter { return [] }
+            return _list
+        }
+    }
 }
 
 private final class FakeDownloader: ICloudDownloading, @unchecked Sendable {
@@ -3684,7 +3693,7 @@ private struct CancelledCapture: RcloneRunning {
         #expect(try h.latest() == nil)
     }
 
-    @Test func aMountRunsOnlyTheDrivesThatJustArrived() async throws {
+    @Test func aMountRunsTheDriveThatJustArrivedFirstAndThenTheRest() async throws {
         let h = try Harness(); try h.prime(); h.change("flowapp/a.txt")
         let mount = h.root.appendingPathComponent("Volumes/D")
         try FileManager.default.createDirectory(at: mount, withIntermediateDirectories: true)
@@ -3696,7 +3705,10 @@ private struct CancelledCapture: RcloneRunning {
         h.mountWakeWindow = 1440
         try lastPass(h, 60)
         await h.run()
-        #expect(h.rclone.realSyncs.map(\.destination) == [root(v).appendingPathComponent("Sets/x").path])
+        // The time is only an inference, and an interval wake read as a mount mustn't lose the other pairs.
+        #expect(h.rclone.realSyncs.map(\.destination).first == root(v).appendingPathComponent("Sets/x").path)
+        #expect(h.rclone.realSyncs.map(\.destination).last == h.mirror + "/flowapp")
+        #expect(h.priorities == [true, false])
     }
 
     @Test func aWakeUpPastTheWindowIsAFullPass() async throws {
@@ -4148,5 +4160,110 @@ private struct ThrowingCapture: RcloneRunning {
         #expect(h.rclone.captures.isEmpty)
         #expect(try h.latest()?.status == .partial)
         #expect(try h.state(pair).stoppedBy == nil)
+    }
+}
+
+@Suite struct FixRoundOneMinorTests {
+    private func lastPass(_ h: Harness, _ ago: TimeInterval) throws {
+        try FileManager.default.createDirectory(at: h.support, withIntermediateDirectories: true)
+        try JSONEncoder().encode(h.now.addingTimeInterval(-ago)).write(to: h.support.appendingPathComponent("last-pass.json"))
+    }
+
+    private func root(_ v: VolumeInfo) -> URL { v.mountPoint.appendingPathComponent("Mac Backup") }
+
+    private func settled(_ h: Harness, _ d: Destination, _ v: VolumeInfo) throws -> PairID {
+        try RootMarker(sets: [h.set.id: h.set.name]).save(backupRoot: root(v))
+        let pair = PairID(set: h.set.id, destination: d.id)
+        try h.prime(pair, kind: .externalDrive)
+        var s = try h.state(pair)
+        s.lastSeenMountID = "m1"
+        try h.store.save(s, for: pair)
+        return pair
+    }
+
+    // M2
+
+    @Test func aPausedSetIsNotADueDrive() async throws {
+        let h = try Harness()
+        h.set.isPaused = true
+        try h.useDrive()
+        h.mountWakeWindow = 1440
+        try lastPass(h, 60)
+        await h.run()
+        #expect(try h.latest() == nil)
+    }
+
+    @Test func anUnacceptedSetIsNotADueDrive() async throws {
+        let h = try Harness()
+        try h.useDrive()
+        try h.save(extra: try h.store.loadDestinations().filter { $0.id != h.iCloudDest.id }, accepted: false)
+        h.mountWakeWindow = 1440
+        try lastPass(h, 60)
+        await h.run()
+        #expect(try h.latest() == nil)
+    }
+
+    // M3
+
+    @Test func noMarkerIsWrittenToADriveThatJustLeft() async throws {
+        let h = try Harness()
+        let (_, v) = try h.useDrive()
+        h.volumes.gone(after: 1)   // the look that found it
+        await h.run()
+        #expect(!FileManager.default.fileExists(atPath: RootMarker.url(backupRoot: root(v)).path))
+        #expect(try h.latest()?.status == .partial)
+    }
+
+    private func looksInAScopedRun() async throws -> Int {
+        let h = try Harness()
+        let (d, v) = try h.useDrive()
+        _ = try settled(h, d, v)
+        h.change("flowapp/a.txt")
+        h.volumes.gone(after: 1000)
+        await h.run()
+        return h.volumes.reads
+    }
+
+    @Test func noManifestIsWrittenToADriveThatJustLeft() async throws {
+        let looks = try await looksInAScopedRun()
+        let h = try Harness()
+        try FileManager.default.createSymbolicLink(atPath: h.source.appendingPathComponent("flowapp/link").path, withDestinationPath: "a.txt")
+        let (d, v) = try h.useDrive()
+        _ = try settled(h, d, v)
+        h.change("flowapp/a.txt")
+        h.volumes.gone(after: looks - 1)   // it leaves between housekeeping's first look and the write
+        await h.run()
+        #expect(!FileManager.default.fileExists(atPath: root(v).appendingPathComponent("Manifests").path))
+        #expect(try h.latest()?.errors == [])
+    }
+
+    // M4
+
+    @Test func runningOutOfSpaceMidCopyIsADriveFull() async throws {
+        let h = try Harness()
+        let (d, v) = try h.useDrive()
+        let pair = try settled(h, d, v)
+        h.change("flowapp/a.txt")
+        h.rclone.script(real: [.permanent], errors: ["big.bin: write /Volumes/x/big.bin: no space left on device"])
+        await h.run()
+        let state = try h.state(pair)
+        #expect(state.stoppedBy == .driveFull && state.consecutiveFailures == 0)
+        #expect(try h.active == [.driveFull])
+        #expect(state.lastEventID == 5)
+    }
+
+    @Test func thatWordingMeansNothingSpecialOffADrive() async throws {
+        let h = try Harness(); try h.prime(); h.change("flowapp/a.txt")
+        h.rclone.script(real: [.permanent], errors: ["no space left on device"])
+        await h.run()
+        #expect(try h.state.consecutiveFailures == 1)
+        #expect(try !h.active.contains(.driveFull))
+    }
+
+    // M5
+
+    @Test func aFailedPriorityChangeIsToldApart() {
+        #expect(AgentPriority.succeeded(0))
+        #expect(!AgentPriority.succeeded(-1))
     }
 }

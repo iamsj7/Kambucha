@@ -23,14 +23,9 @@ struct UNNotifier: Notifying {
         guard Bundle.main.bundleIdentifier != nil else { return false }
         let center = UNUserNotificationCenter.current()
         guard (try? await center.requestAuthorization(options: [.alert, .sound])) == true else { return false }
-        let eject = UNNotificationAction(identifier: DriveNotification.ejectAction, title: "Eject")
-        center.setNotificationCategories([UNNotificationCategory(identifier: DriveNotification.category, actions: [eject],
-                                                                 intentIdentifiers: [])])
         let content = UNMutableNotificationContent()
         content.title = "Backup finished"
         content.body = "\(volumeName) is safe to eject."
-        content.categoryIdentifier = DriveNotification.category
-        content.userInfo = [DriveNotification.volumeKey: volumeUUID]
         do {
             try await center.add(UNNotificationRequest(identifier: "mirror.drive-finished.\(volumeUUID)", content: content, trigger: nil))
             return true

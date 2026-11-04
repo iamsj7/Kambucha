@@ -125,12 +125,18 @@ public struct RunCommand: Codable, Equatable, Sendable {
 /// plist `Nice` can't be undone without root. So the plist asks for neither, and a background pass lowers
 /// itself instead: the same kernel policy, inherited by rclone, and unlike launchd's it can be lifted.
 public enum AgentPriority {
+    private static let log = Logger(subsystem: MirrorCore.bundleID, category: "AgentPriority")
     private static let raised = OSAllocatedUnfairLock(initialState: false)
     static var isRaised: Bool { raised.withLock { $0 } }
 
     /// `fast` is normal priority for this process and rclone children started from now on.
     public static func set(fast: Bool) {
         raised.withLock { $0 = fast }
-        setpriority(PRIO_DARWIN_PROCESS, 0, fast ? 0 : PRIO_DARWIN_BG)
+        if !succeeded(setpriority(PRIO_DARWIN_PROCESS, 0, fast ? 0 : PRIO_DARWIN_BG)) {
+            let code = errno
+            log.error("could not change priority, errno \(code)")
+        }
     }
+
+    static func succeeded(_ result: Int32) -> Bool { result == 0 }
 }

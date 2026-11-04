@@ -23,7 +23,7 @@ public struct PathGuard: Sendable {
     }
 
     /// A guard whose `Mac Backup` root is at the top of an external volume.
-    public static func forVolume(_ volume: VolumeInfo, iCloudDrive: URL) -> PathGuard {
+    static func forVolume(_ volume: VolumeInfo, iCloudDrive: URL) -> PathGuard {
         PathGuard(iCloudDrive: iCloudDrive, backupRoot: ExternalVolume.backupRoot(on: volume))
     }
 
@@ -48,7 +48,7 @@ public struct PathGuard: Sendable {
     }
 
     /// The one way to a drive's backup root. It must sit on the mounted drive whose UUID the destination names.
-    public func driveRoot(_ destination: Destination, volume: VolumeInfo?) throws -> ValidatedRoot {
+    func driveRoot(_ destination: Destination, volume: VolumeInfo?) throws -> ValidatedRoot {
         let mount = volume?.mountPoint.standardizedFileURL.path ?? "/"
         guard let volume, !volume.isSystem, mount != "/", !mount.hasPrefix("/System/Volumes"),
               let uuid = destination.volumeUUID,
