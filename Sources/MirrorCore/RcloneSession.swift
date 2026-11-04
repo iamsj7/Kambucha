@@ -222,6 +222,8 @@ enum RcloneTool {
     static let runPrefix = "mirror-run-"
     /// Pipes hold at least this much, so input can be written before the child exists.
     static let maxStdin = 8192
+    /// Seconds between SIGTERM and SIGKILL when a child is cancelled.
+    static let killGrace: TimeInterval = 5
 
     /// Through stdin, so the value is never in argv. `rclone obscure -` reads one line and turns
     /// empty input into a literal hyphen, so anything but one non-empty line is refused rather than
@@ -277,8 +279,8 @@ enum RcloneTool {
 
     /// Runs a child with the minimal environment, and stderr discarded. Input must fit `maxStdin`.
     /// Cancelling the task stops the child.
-    static func execute(_ args: [String], binary: URL, context: RcloneContext, stdin: Data? = nil,
-                        capture: Bool) async throws -> (code: Int32, output: Data) {
+    static func execute(_ args: [String], binary: URL, context: RcloneContext, stdin: Data? = nil, capture: Bool,
+                        killGrace: TimeInterval = killGrace) async throws -> (code: Int32, output: Data) {
         let process = Process()
         process.executableURL = binary
         process.arguments = args
@@ -288,7 +290,7 @@ enum RcloneTool {
         let out = capture ? Pipe() : nil
         process.standardOutput = out ?? FileHandle.nullDevice
         let reader = Task.detached { () -> Data in (try? out?.fileHandleForReading.readToEnd()) ?? Data() }
-        let child = CancellableChild(process)
+        let child = CancellableChild(process, killGrace: killGrace)
         let code: Int32
         do {
             code = try await withTaskCancellationHandler {
@@ -333,9 +335,10 @@ enum RcloneTool {
 private final class CancellableChild: @unchecked Sendable {
     private let lock = NSLock()
     private let process: Process
+    private let killGrace: TimeInterval
     private var cancelled = false
     private var started = false
-    init(_ process: Process) { self.process = process }
+    init(_ process: Process, killGrace: TimeInterval) { self.process = process; self.killGrace = killGrace }
 
     var wasCancelled: Bool { lock.withLock { cancelled } }
 
@@ -355,7 +358,7 @@ private final class CancellableChild: @unchecked Sendable {
             return process.processIdentifier
         }
         guard let pid else { return }
-        DispatchQueue.global().asyncAfter(deadline: .now() + 5) { [self] in
+        DispatchQueue.global().asyncAfter(deadline: .now() + killGrace) { [self] in
             if lock.withLock({ process.isRunning }) { kill(pid, SIGKILL) }
         }
     }

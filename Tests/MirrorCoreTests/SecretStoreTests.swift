@@ -2,6 +2,7 @@ import Testing
 import Foundation
 import Security
 @testable import MirrorCore
+@testable import MirrorSecrets
 
 @Suite struct SecretStoreTests {
     @Test func generatedSecretsAreUniqueAndLongEnough() {

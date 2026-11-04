@@ -23,7 +23,9 @@ cp Resources/Info.plist "$app/Contents/Info.plist"
 cp Resources/com.shaikjaleel.mirror.agent.plist "$app/Contents/Library/LaunchAgents/"
 
 sign() { codesign --force --timestamp=none --options runtime --sign "$IDENTITY" "$@"; }
-sign "$app/Contents/Helpers/rclone"
+# The agent pins this identifier. It must differ from the app's: rclone can run commands, so it must
+# never pass the agent's caller check.
+sign --identifier com.shaikjaleel.mirror.rclone "$app/Contents/Helpers/rclone"
 sign --identifier com.shaikjaleel.mirror.agent "$app/Contents/MacOS/MirrorAgent"
 sign "$app/Contents/MacOS/Mirror"
 sign "$app"

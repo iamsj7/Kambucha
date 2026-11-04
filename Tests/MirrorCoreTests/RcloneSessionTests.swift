@@ -11,7 +11,21 @@ final class MemorySecrets: SecretStoring, @unchecked Sendable {
     private let lock = NSLock()
     private var values: [String: String] = [:]
     var failWrites = false
-    func read(_ key: String) throws -> String? { lock.withLock { values[key] } }
+    /// Stands in for another command writing during a long step: the first read of `key` sees what
+    /// was there, and `value` is in place straight after. A later save would overwrite it, visibly.
+    var appearsAfterFirstRead: (key: String, value: String)?
+    private(set) var reads = 0
+    func read(_ key: String) throws -> String? {
+        lock.withLock {
+            reads += 1
+            let found = values[key]
+            if let a = appearsAfterFirstRead, a.key == key {
+                values[key] = a.value
+                appearsAfterFirstRead = nil
+            }
+            return found
+        }
+    }
     func write(_ value: String, key: String) throws {
         struct WriteFailed: Error {}
         if failWrites { throw WriteFailed() }
@@ -658,6 +672,44 @@ private func cryptName(_ endpoint: String) -> String {
         await #expect(throws: RemoteSetupError.signInLostNeedsRecoveryKit) { try await rig.setup.connect(d, clientID: "id", clientSecret: "s") }
     }
 
+    /// connect stores keys before the sign-in, so this state only comes from a loss. The flag may lie.
+    @Test func signInWithoutVaultIsALossEvenUnconfirmed() async throws {
+        let rig = try Rig()
+        let d = Destination(name: "Drive", kind: .googleDrive)
+        try rig.secrets.saveSignIn(["client_id": "id", "client_secret": "s", "token": fakeToken], for: d)
+        await #expect(throws: RemoteSetupError.vaultLostNeedsRecoveryKit) { try await rig.setup.connect(d, clientID: "id", clientSecret: "s") }
+        await #expect(throws: RemoteSetupError.vaultLostNeedsRecoveryKit) { try await rig.setup.reconnect(d) }
+        #expect(try rig.secrets.vault(for: d) == nil)
+    }
+
+    @Test func damagedVaultRoutesToRecoveryKit() async throws {
+        let rig = try Rig()
+        let d = Destination(name: "Drive", kind: .googleDrive)
+        try rig.secrets.write("not json", key: SecretKeys.vault(d.id))
+        await #expect(throws: RemoteSetupError.vaultLostNeedsRecoveryKit) { try await rig.setup.connect(d, clientID: "id", clientSecret: "s") }
+        try rig.secrets.saveSignIn(["client_id": "id", "client_secret": "s", "token": fakeToken], for: d)
+        await #expect(throws: RemoteSetupError.vaultLostNeedsRecoveryKit) { try await rig.setup.reconnect(d) }
+    }
+
+    @Test func damagedSignInOnEncryptedDestinationNeedsTheKit() async throws {
+        let rig = try Rig()
+        let d = Destination(name: "Drive", kind: .googleDrive)
+        try rig.secrets.saveVault(.generate(), for: d)
+        try rig.secrets.write("not json", key: SecretKeys.signIn(d.id))
+        await #expect(throws: RemoteSetupError.signInLostNeedsRecoveryKit) { try await rig.setup.connect(d, clientID: "id", clientSecret: "s") }
+    }
+
+    /// Keys written while the browser was open must survive: the earlier read is stale by then.
+    @Test func connectRereadsVaultAfterTheBrowser() async throws {
+        let rig = try Rig()
+        let d = Destination(name: "Drive", kind: .googleDrive)
+        let other = VaultSecrets.generate()
+        let json = String(decoding: try JSONEncoder().encode(other), as: UTF8.self)
+        rig.secrets.appearsAfterFirstRead = (SecretKeys.vault(d.id), json)
+        try await rig.setup.connect(d, clientID: "id", clientSecret: "s")
+        #expect(try rig.secrets.vault(for: d) == other)
+    }
+
     @Test func clientChangeOnExistingDestinationIsRefused() async throws {
         let rig = try Rig()
         let d = Destination(name: "Drive", kind: .googleDrive)
@@ -701,6 +753,115 @@ private func cryptName(_ endpoint: String) -> String {
         #expect(try rig.secrets.vault(for: d) == v)
         let saved = try #require(try rig.secrets.signIn(for: d))
         #expect(saved["client_id"] == "kit-id" && saved["client_secret"] == "kit-secret" && saved["token"] == newToken)
+    }
+
+    /// Lost-sign-in recovery must work when the stored item is damaged, not only when it's gone.
+    @Test func kitRestoreReplacesADamagedSignIn() async throws {
+        let rig = try Rig(prelude: Self.listing)
+        let d = confirmed(), v = VaultSecrets.generate()
+        try rig.secrets.write("not json", key: SecretKeys.signIn(d.id))
+        try await rig.setup.restore(d, from: kit(v))
+        #expect(try rig.secrets.signIn(for: d)?["token"] == newToken)
+    }
+
+    @Test func kitRestoreReplacesASignInThatCannotBeWritten() async throws {
+        let rig = try Rig(prelude: Self.listing)
+        let d = confirmed(), v = VaultSecrets.generate()
+        try rig.secrets.saveSignIn(["client_id": "kit-id", "client_secret": "kit-secret", "token": "x\ny"], for: d)
+        try await rig.setup.restore(d, from: kit(v))
+        #expect(try rig.secrets.signIn(for: d)?["token"] == newToken)
+    }
+
+    @Test func kitRestoreReplacesADamagedVault() async throws {
+        let rig = try Rig(prelude: Self.listing)
+        let d = confirmed(), v = VaultSecrets.generate()
+        try rig.secrets.write("not json", key: SecretKeys.vault(d.id))
+        try await rig.setup.restore(d, from: kit(v))
+        #expect(try rig.secrets.vault(for: d) == v)
+    }
+
+    @Test func kitRestoreRereadsVaultBeforeSaving() async throws {
+        let rig = try Rig(prelude: Self.listing)
+        let d = confirmed(), other = VaultSecrets.generate()
+        let json = String(decoding: try JSONEncoder().encode(other), as: UTF8.self)
+        rig.secrets.appearsAfterFirstRead = (SecretKeys.vault(d.id), json)
+        await #expect(throws: RemoteSetupError.vaultAlreadyPresent) { try await rig.setup.restore(d, from: kit(.generate())) }
+        #expect(try rig.secrets.vault(for: d) == other)
+    }
+
+    private static let emptyCloud = obscure + """
+
+        if [ "$1" = lsf ]; then exit 0; fi
+        """
+    private static let missingCloud = obscure + """
+
+        if [ "$1" = lsf ]; then exit 3; fi
+        """
+
+    /// Under drive.file a wrong client or account sees nothing, so nothing there proves nothing.
+    @Test(arguments: [emptyCloud, missingCloud])
+    func freshSignInSeeingNothingIsUnproven(prelude: String) async throws {
+        let rig = try Rig(prelude: prelude)
+        var d = Destination(name: "Drive", kind: .googleDrive)
+        d.recoveryKitConfirmed = false
+        await #expect(throws: RemoteSetupError.kitUnproven) { try await rig.setup.restore(d, from: kit(.generate())) }
+        #expect(rig.secrets.isEmpty)
+    }
+
+    @Test(arguments: [emptyCloud, missingCloud])
+    func confirmedDestinationSeeingNothingIsUnproven(prelude: String) async throws {
+        let rig = try Rig(prelude: prelude)
+        let d = confirmed()
+        try rig.secrets.saveSignIn(["client_id": "kit-id", "client_secret": "kit-secret", "token": fakeToken], for: d)
+        await #expect(throws: RemoteSetupError.kitUnproven) { try await rig.setup.restore(d, from: kit(.generate())) }
+        #expect(try rig.secrets.vault(for: d) == nil)
+    }
+
+    @Test func survivingMatchedSignInMayRestoreOverNothing() async throws {
+        let rig = try Rig(prelude: Self.emptyCloud)
+        let d = Destination(name: "Drive", kind: .googleDrive), v = VaultSecrets.generate()
+        try rig.secrets.saveSignIn(["client_id": "kit-id", "client_secret": "kit-secret", "token": fakeToken], for: d)
+        try await rig.setup.restore(d, from: kit(v))
+        #expect(try rig.secrets.vault(for: d) == v)
+    }
+
+    @Test func ownerCanAcceptAnUnprovenKit() async throws {
+        let rig = try Rig(prelude: Self.emptyCloud)
+        let d = confirmed(), v = VaultSecrets.generate()
+        try await rig.setup.restore(d, from: kit(v), acceptUnproven: true)
+        #expect(try rig.secrets.vault(for: d) == v)
+        #expect(try rig.secrets.signIn(for: d)?["token"] == newToken)
+    }
+
+    /// Acceptance covers "nothing to see", never "the keys can't read what's there".
+    @Test func acceptingCannotOverrideAKitThatFails() async throws {
+        let rig = try Rig(prelude: Self.obscure + """
+
+            if [ "$1" = lsf ]; then
+              case "$2" in mirrorrestore*) ;; *) echo raw-name ;; esac
+              exit 0
+            fi
+            """)
+        await #expect(throws: RemoteSetupError.kitDoesNotOpenBackup) {
+            try await rig.setup.restore(confirmed(), from: kit(.generate()), acceptUnproven: true)
+        }
+    }
+
+    /// OneDrive rotates refresh tokens, so a refresh during the proof is kept whatever the verdict.
+    @Test(arguments: [true, false])
+    func tokenRefreshedDuringTheProofIsKept(opens: Bool) async throws {
+        let rig = try Rig(prelude: Self.obscure + """
+
+            if [ "$1" = lsf ]; then
+              printf 'token = %s\\n' '\(newToken)' >> "$6"
+              case "$2" in mirrorrestore*) \(opens ? "echo decrypted-name" : "") ;; *) echo raw-name ;; esac
+              exit 0
+            fi
+            """)
+        let d = confirmed()
+        try rig.secrets.saveSignIn(["client_id": "kit-id", "client_secret": "kit-secret", "token": fakeToken], for: d)
+        do { try await rig.setup.restore(d, from: kit(.generate())) } catch { #expect(!opens) }
+        #expect(try rig.secrets.signIn(for: d)?["token"] == newToken)
     }
 
     @Test func kitRestoreUsesExistingSignInWithoutABrowser() async throws {
@@ -772,12 +933,12 @@ private func cryptName(_ endpoint: String) -> String {
         let setup = RemoteSetup(binary: vendoredRclone, secrets: MemorySecrets())
         let v = VaultSecrets.generate()
 
-        #expect(try await setup.kitOpens(kit(.generate()), encryptedRoot: "base:Mac Backup", context: context))   // empty: nothing to strand
+        #expect(try await setup.kitOpens(kit(.generate()), encryptedRoot: "base:Mac Backup", context: context) == .nothingThere)
         let env = try RcloneCrypt.environment(remote: "up", over: cloud.path, passphrase: v.passphrase, salt: v.salt,
                                               filenameEncoding: "base32", binary: vendoredRclone)
         #expect(try realRclone(["copy", src.path, "up:Sets/s", "--config", "/dev/null"], env: env).code == 0)
-        #expect(try await setup.kitOpens(kit(v), encryptedRoot: "base:Mac Backup", context: context))
-        #expect(try await setup.kitOpens(kit(.generate()), encryptedRoot: "base:Mac Backup", context: context) == false)
+        #expect(try await setup.kitOpens(kit(v), encryptedRoot: "base:Mac Backup", context: context) == .opens)
+        #expect(try await setup.kitOpens(kit(.generate()), encryptedRoot: "base:Mac Backup", context: context) == .doesNotOpen)
     }
 
     @Test func clientValuesCannotInjectIntoConfig() async throws {
@@ -812,6 +973,7 @@ private func cryptName(_ endpoint: String) -> String {
     @Test func failedReconnectKeepsOldSignIn() async throws {
         let rig = try Rig(exit: 1)
         let d = Destination(name: "Drive", kind: .googleDrive)
+        try rig.secrets.saveVault(.generate(), for: d)
         try rig.secrets.saveSignIn(["client_id": "id", "token": fakeToken], for: d)
         await #expect(throws: RemoteSetupError.signInFailed(exitCode: 1)) { try await rig.setup.reconnect(d) }
         #expect(try rig.secrets.signIn(for: d)?["token"] == fakeToken)
