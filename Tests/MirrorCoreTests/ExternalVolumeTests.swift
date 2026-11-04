@@ -33,6 +33,7 @@ private func has(_ a: [String], _ f: String, _ v: String) -> Bool {
     @Test func aDriveGetsOneTryPerRunAndOthersKeepTheirRetries() {
         #expect(has(args(fs: "apfs"), "--retries", "1"))
         #expect(has(args(fs: "exfat"), "--retries", "1"))
+        #expect(!args(fs: "apfs").contains("--retries-sleep"))   // rclone sleeps after its last try too
         let u = URL(fileURLWithPath: "/tmp/x")
         let iCloud = SyncRequest(source: u, destination: "/d", backupDir: "/b", filterFile: u, logFile: u, mode: .copyOnly,
                                  profile: .profile(for: Destination(name: "i", kind: .iCloudFolder)),

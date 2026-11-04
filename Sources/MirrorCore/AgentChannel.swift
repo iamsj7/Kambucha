@@ -39,6 +39,8 @@ public enum AgentFailure: Error, Equatable, Codable, Sendable {
     case drill(RestoreDrillError), keychain(SecretStoreError), runner(RcloneRunnerError)
     case untrustedCaller, untrustedHelper, presenceRefused, configUnreadable, busy, lockFailed
     case invalidRequest, cancelled, other
+    case notFound, driveNotConnected, archive, restoreFailed
+    case restore(RestoreError)
 
     init(_ error: any Error) {
         switch error {
@@ -49,6 +51,10 @@ public enum AgentFailure: Error, Equatable, Codable, Sendable {
         case let e as RestoreDrillError: self = .drill(e)
         case let e as SecretStoreError: self = .keychain(e)
         case let e as RcloneRunnerError: self = .runner(e)
+        case let e as RestoreError: self = .restore(e)
+        case ArchiveError.authExpired: self = .session(.notSignedIn)
+        case is ArchiveError: self = .archive   // its text is rclone's, which can quote a token
+        case GuardFailure.wrongDrive, GuardFailure.internalDiskNotConfirmed: self = .driveNotConnected
         case is CancellationError: self = .cancelled
         default: self = .other   // arbitrary errors could describe anything, so they don't cross
         }
@@ -62,6 +68,7 @@ public enum AgentFailure: Error, Equatable, Codable, Sendable {
         case .drill(let e): e
         case .keychain(let e): e
         case .runner(let e): e
+        case .restore(let e): e
         case .cancelled: CancellationError()
         default: self
         }
@@ -124,18 +131,24 @@ public struct AgentService: Sendable {
     private let presence: any UserPresence
     private let support: URL
     private let workDir: URL
+    private let recovery: AgentRecovery
 
     public init(secrets: any SecretStoring, binary: URL, trust: any AgentTrust, presence: any UserPresence, support: URL) {
         self.init(secrets: secrets, binary: binary, trust: trust, presence: presence, support: support,
                   workDir: RcloneSession.interactiveWorkDir)
     }
-    init(secrets: any SecretStoring, binary: URL, trust: any AgentTrust, presence: any UserPresence, support: URL, workDir: URL) {
+    init(secrets: any SecretStoring, binary: URL, trust: any AgentTrust, presence: any UserPresence, support: URL, workDir: URL,
+         volumes: any VolumeLocating = SystemVolumes(), iCloudDrive: URL = MirrorPaths.iCloudDrive,
+         presets: @escaping @Sendable () throws -> [Preset] = { try PresetCatalog.all() }) {
+        recovery = AgentRecovery(store: ConfigStore(root: support), secrets: secrets, binary: binary, trust: trust, workDir: workDir,
+                                 volumes: volumes, iCloudDrive: iCloudDrive, presets: presets)
         self.secrets = secrets; self.binary = binary; self.trust = trust; self.presence = presence
         self.support = support; self.workDir = workDir
     }
 
     /// `input` is a closure so a refused caller's stdin is never even read.
     public func respond(subcommand: String, input: @Sendable () -> Data) async -> Data {
+        if AgentWire.subcommands.contains(subcommand) { return await respondToWire(subcommand, input: input) }
         var response: AgentResponse
         do {
             try trust.verifyCaller()
@@ -151,6 +164,25 @@ public struct AgentService: Sendable {
             response = AgentResponse(failure: AgentFailure(error))
         }
         return (try? JSONEncoder().encode(response)) ?? Data("{\"failure\":{\"other\":{}}}".utf8)
+    }
+
+    /// The same gates as the secret commands, in the same order. The answer's shape is `AgentWire`.
+    private func respondToWire(_ subcommand: String, input: @Sendable () -> Data) async -> Data {
+        var response: AgentWire.Response
+        do {
+            try trust.verifyCaller()
+            try trust.verifyHelper(at: binary)
+            let body = input()
+            response = try await SecretsLock.withLock(in: support) {
+                try? RcloneSession.wipeLeftovers(in: workDir, olderThan: Self.leftoverAge)
+                return try await recovery.answer(subcommand, body)
+            }
+        } catch {
+            response = AgentWire.Response(ok: false, failure: AgentFailure(error))
+        }
+        let encoder = JSONEncoder()
+        encoder.dateEncodingStrategy = .iso8601
+        return (try? encoder.encode(response)) ?? Data("{\"failure\":{\"other\":{}}}".utf8)
     }
 
     /// The stored copy wins, so a request can't lower confirmation or turn encryption off. The

@@ -31,7 +31,7 @@ public struct DeletionGate {
     /// How many of these count toward a hold.
     public static func countable(_ deletions: [String]) -> Int { deletions.count { !isUnderGit($0) } }
 
-    private static func isUnderGit(_ path: String) -> Bool {
+    static func isUnderGit(_ path: String) -> Bool {
         path.split(separator: "/", omittingEmptySubsequences: true).contains(".git")
     }
 }

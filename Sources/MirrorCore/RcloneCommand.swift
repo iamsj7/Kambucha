@@ -143,7 +143,9 @@ public enum RcloneCommand {
         if r.profile.excludeAppleDouble { a += ["--filter", "- ._*"] }
         a += ["--backup-dir", r.backupDir, "--filter-from", r.filterFile.path]
         a += ["--checkers", r.fullSpeed ? "8" : "2", "--transfers", r.fullSpeed ? "4" : "2"]
-        a += ["--retries", String(r.profile.retries), "--retries-sleep", "30s", "--low-level-retries", "10"]
+        a += ["--retries", String(r.profile.retries)]
+        if r.profile.retries > 1 { a += ["--retries-sleep", "30s"] }   // rclone sleeps after its last try too
+        a += ["--low-level-retries", "10"]
         a += r.profile.extraFlags
         if let d = r.profile.maxDuration { a += ["--max-duration", d, "--cutoff-mode", "soft"] }
         a += common(logFile: r.logFile, context: r.context)

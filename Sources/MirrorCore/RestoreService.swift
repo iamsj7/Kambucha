@@ -1,6 +1,6 @@
 import Foundation
 
-public enum RestoreError: Error, Equatable, Sendable {
+public enum RestoreError: Error, Equatable, Codable, Sendable {
     case overSource(String)
     case destinationNotEmpty(String)
 }
@@ -19,9 +19,10 @@ public struct RestoreService: Sendable {
     /// - `sources`: the source folders of the backup sets. A destination equal to, inside, or containing one is
     ///   refused unless `overwrite` is true. Required, so the guard cannot be forgotten.
     /// - A `to` folder that already holds anything is refused unless `overwrite` is true.
+    /// - `asFile`: `from` is one file and `to` names the file to create, which must not already exist.
     /// - `manifest`/`manifestSubpath`: links in the manifest that are missing from the restored files are
     ///   recreated; `manifestSubpath` is the set-relative folder that `to` holds.
-    public func restore(from: String, context: RcloneContext, to: URL, sources: [URL], overwrite: Bool = false,
+    public func restore(from: String, context: RcloneContext, to: URL, sources: [URL], overwrite: Bool = false, asFile: Bool = false,
                         manifest: SymlinkManifest? = nil, manifestSubpath: String = "") async throws -> RcloneResult {
         try ArchiveScope.validateRestore(from, backupRoot: backupRoot)
         if !overwrite {
@@ -35,11 +36,13 @@ public struct RestoreService: Sendable {
             if let items = try? FileManager.default.contentsOfDirectory(atPath: to.path), !items.isEmpty {
                 throw RestoreError.destinationNotEmpty(to.path)
             }
+            var st = stat()
+            if asFile, lstat(to.path, &st) == 0 { throw RestoreError.destinationNotEmpty(to.path) }
         }
-        try FileManager.default.createDirectory(at: to, withIntermediateDirectories: true)
+        try FileManager.default.createDirectory(at: asFile ? to.deletingLastPathComponent() : to, withIntermediateDirectories: true)
         let log = FileManager.default.temporaryDirectory.appendingPathComponent("mirror-restore-\(UUID().uuidString).log")
         defer { try? FileManager.default.removeItem(at: log) }
-        let args = ["copy", "--links", "--retries", "3", "--use-json-log", "-v",
+        let args = [asFile ? "copyto" : "copy", "--links", "--retries", "3", "--use-json-log", "-v",
                     "--log-file", log.path, "--stats", "0", "--config", context.configPath, "--", from, to.path]
         let result = try await rclone.execute(args, context: context, logFile: log)
         if result.outcome == .success, let manifest {
