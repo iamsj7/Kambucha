@@ -27,7 +27,7 @@ public struct PathGuard: Sendable {
         for other in existing where other.id != set.id {
             if other.name.caseInsensitiveCompare(set.name) == .orderedSame { throw GuardFailure.setNameTaken(other.name) }
             let theirs = Self.resolved(other.source)
-            if Self.isSameOrInside(mine, theirs) || Self.isSameOrInside(theirs, mine) {
+            if Self.denyContains(mine, theirs) || Self.denyContains(theirs, mine) {
                 throw GuardFailure.setsOverlap(other.name)
             }
         }
@@ -61,8 +61,8 @@ public struct PathGuard: Sendable {
 
     /// Throws unless `url` is strictly inside the backup root after resolving `..` and symlinks.
     public func assertInsideRoot(_ url: URL) throws {
-        let root = Self.resolved(backupRoot), target = Self.resolved(url)
-        guard target != root, Self.isSameOrInside(target, root) else { throw GuardFailure.destinationOutsideRoot }
+        // Allow decision: canonical on-disk spelling, one exact comparison for both "not equal" and "inside".
+        guard Self.strictlyInsideCanonical(url, backupRoot) else { throw GuardFailure.destinationOutsideRoot }
     }
 
     // MARK: - Private
@@ -74,8 +74,13 @@ public struct PathGuard: Sendable {
             throw GuardFailure.destinationOutsideRoot
         }
         let url = backupRoot.appendingPathComponent(MirrorPaths.mirrorPath(set), isDirectory: true)
-        let sets = Self.resolved(backupRoot.appendingPathComponent("Sets", isDirectory: true))
-        guard Self.resolved(url).deletingLastPathComponent().path.lowercased() == sets.path.lowercased() else {
+        // A Sets/<name> that is itself a symlink is never acceptable, wherever it points.
+        if let type = (try? FileManager.default.attributesOfItem(atPath: url.path))?[.type] as? FileAttributeType,
+           type == .typeSymbolicLink {
+            throw GuardFailure.destinationOutsideRoot
+        }
+        let sets = Self.canonical(backupRoot.appendingPathComponent("Sets", isDirectory: true))
+        guard Self.canonical(url).deletingLastPathComponent().pathComponents == sets.pathComponents else {
             throw GuardFailure.destinationOutsideRoot
         }
         return url
@@ -91,21 +96,83 @@ public struct PathGuard: Sendable {
               (try? fm.contentsOfDirectory(atPath: set.source.path)) != nil else {
             throw GuardFailure.sourceUnreadable
         }
-        if Self.isSameOrInside(Self.resolved(set.source), Self.resolved(iCloudDrive)) {
+        if Self.denyContains(Self.resolved(set.source), Self.resolved(iCloudDrive)) {
             throw GuardFailure.sourceInsideICloud
         }
         let src = Self.resolved(set.source)
-        if Self.isSameOrInside(Self.resolved(iCloudDrive), src) || Self.isSameOrInside(Self.resolved(backupRoot), src) {
+        if Self.denyContains(Self.resolved(iCloudDrive), src) || Self.denyContains(Self.resolved(backupRoot), src) {
             throw GuardFailure.sourceContainsBackupRoot
         }
     }
 
     static func resolved(_ url: URL) -> URL { url.standardizedFileURL.resolvingSymlinksInPath().standardizedFileURL }
 
-    /// True when `child` equals `parent` or lies beneath it, compared by whole path components.
+    /// DENY direction: true when `child` equals or lies beneath `parent` by path (case-insensitive,
+    /// `/System/Volumes/Data` prefix ignored) or by filesystem identity. Over-matching here only blocks more,
+    /// so it is safe for deny checks. It must NOT be used for allow decisions.
+    static func denyContains(_ child: URL, _ parent: URL) -> Bool {
+        isSameOrInside(stripDataPrefix(child), stripDataPrefix(parent)) || identityIsSameOrInside(child, parent)
+    }
+
+    /// Case-insensitive component containment. Deny checks only: on a case-sensitive volume it over-matches,
+    /// which is safe when the answer means "refuse" and unsafe when it means "allow".
     static func isSameOrInside(_ child: URL, _ parent: URL) -> Bool {
-        // Case-insensitive: default APFS is, and over-matching on a case-sensitive volume only errs safe.
         let c = child.pathComponents.map { $0.lowercased() }, p = parent.pathComponents.map { $0.lowercased() }
         return c.count >= p.count && Array(c.prefix(p.count)) == p
+    }
+
+    static func stripDataPrefix(_ url: URL) -> URL {
+        let c = url.pathComponents
+        if c.count >= 4, c[1] == "System", c[2] == "Volumes", c[3] == "Data" {
+            return URL(fileURLWithPath: "/" + c.dropFirst(4).joined(separator: "/"))
+        }
+        return url
+    }
+
+    private static func identity(_ url: URL) -> NSObject? {
+        guard let v = try? url.resourceValues(forKeys: [.fileResourceIdentifierKey, .volumeIdentifierKey]),
+              let f = v.fileResourceIdentifier as? NSObject else { return nil }
+        return f
+    }
+
+    /// True when both exist and are the same filesystem object (follows symlinks, firmlinks, case variants).
+    static func sameFileIdentity(_ a: URL, _ b: URL) -> Bool {
+        guard let x = identity(a.resolvingSymlinksInPath()), let y = identity(b.resolvingSymlinksInPath()) else { return false }
+        return x.isEqual(y)
+    }
+
+    /// True when `child` or any of its existing ancestors is the same filesystem object as `parent`.
+    static func identityIsSameOrInside(_ child: URL, _ parent: URL) -> Bool {
+        guard let p = identity(parent.resolvingSymlinksInPath()) else { return false }
+        var cur = child.standardizedFileURL.resolvingSymlinksInPath()
+        while true {
+            if let i = identity(cur), i.isEqual(p) { return true }
+            let up = cur.deletingLastPathComponent()
+            if up.path == cur.path || cur.path == "/" { return false }
+            cur = up
+        }
+    }
+
+    /// Canonical on-disk spelling: the deepest existing ancestor is resolved (symlinks, real case);
+    /// components that do not exist yet are kept exactly as given.
+    static func canonical(_ url: URL) -> URL {
+        let std = resolved(url)
+        var existing = std, tail: [String] = []
+        while !FileManager.default.fileExists(atPath: existing.path), existing.path != "/" {
+            tail.insert(existing.lastPathComponent, at: 0)
+            existing = existing.deletingLastPathComponent()
+        }
+        var base = existing
+        if let key = (try? existing.resourceValues(forKeys: [.canonicalPathKey]))?.canonicalPath {
+            base = URL(fileURLWithPath: key)
+        }
+        for t in tail { base.appendPathComponent(t) }
+        return base
+    }
+
+    /// ALLOW direction: `target` is strictly below `root`, both canonicalised, compared exactly.
+    static func strictlyInsideCanonical(_ target: URL, _ root: URL) -> Bool {
+        let t = canonical(target).pathComponents, r = canonical(root).pathComponents
+        return t.count > r.count && Array(t.prefix(r.count)) == r
     }
 }

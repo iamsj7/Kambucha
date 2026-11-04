@@ -177,4 +177,63 @@ struct PathGuardTests {
         let s = e.set("A", try e.dir("src"))
         fails(.destinationOutsideRoot) { try e.guardian.validateNewSet(s, existing: []) }
     }
+
+    @Test func caseVariantOfRootIsNotStrictlyInside() throws {
+        let e = try Env()
+        fails(.destinationOutsideRoot) {
+            try e.guardian.assertInsideRoot(e.icloud.appendingPathComponent("MAC BACKUP"))
+        }
+        fails(.destinationOutsideRoot) { try e.guardian.assertInsideRoot(e.root) }
+        // A not-yet-existing destination under the root must not crash and is allowed.
+        try e.guardian.assertInsideRoot(e.root.appendingPathComponent("Sets/NeverCreated/deep"))
+    }
+
+    @Test func symlinkedSetFolderRejected() throws {
+        let e = try Env()
+        let sets = try e.dir("iCloud/Mac Backup/Sets")
+        let other = try e.dir("iCloud/Mac Backup/Sets/Real")
+        try FileManager.default.createSymbolicLink(at: sets.appendingPathComponent("A"), withDestinationURL: other)
+        let s = e.set("A", try e.dir("src"))
+        fails(.destinationOutsideRoot) { try e.guardian.validateNewSet(s, existing: []) }
+        fails(.destinationOutsideRoot) {
+            try e.guardian.validateRun(s, destination: dest, marker: RootMarker(sets: [s.id: "A"]),
+                                       sampleFileCount: 1, state: SetState())
+        }
+    }
+
+    @Test func firmlinkAliasOfSourceRejected() throws {
+        let e = try Env()
+        // resolvingSymlinksInPath strips /private, so take the on-disk canonical path instead.
+        let real = URL(fileURLWithPath: (try? e.base.resourceValues(forKeys: [.canonicalPathKey]))?.canonicalPath ?? e.base.path)
+        let alias = URL(fileURLWithPath: "/System/Volumes/Data" + real.path)
+        guard FileManager.default.fileExists(atPath: alias.path),
+              PathGuard.sameFileIdentity(alias, real) else {
+            Issue.record("skipped: /System/Volumes/Data firmlink alias does not resolve to the temp folder on this Mac")
+            return
+        }
+        // Source is the firmlink alias of a folder that contains the backup root.
+        let s = e.set("A", alias)
+        fails(.sourceContainsBackupRoot) { try e.guardian.validateNewSet(s, existing: []) }
+        // Source inside iCloud, reached via the alias.
+        _ = try e.dir("iCloud/Docs")
+        let inside = e.set("B", alias.appendingPathComponent("iCloud/Docs"))
+        fails(.sourceInsideICloud) { try e.guardian.validateNewSet(inside, existing: []) }
+        // Overlap through the alias.
+        let a = e.set("P", try e.dir("src/proj"))
+        let b = e.set("C", alias.appendingPathComponent("src/proj/sub"))
+        _ = try e.dir("src/proj/sub")
+        fails(.setsOverlap("P")) { try e.guardian.validateNewSet(b, existing: [a]) }
+    }
+
+    @Test func sameFileIdentityDetectedThroughSymlink() throws {
+        let e = try Env()
+        let target = try e.dir("target")
+        let link = e.base.appendingPathComponent("link")
+        try FileManager.default.createSymbolicLink(at: link, withDestinationURL: target)
+        #expect(PathGuard.sameFileIdentity(link, target))
+        #expect(!PathGuard.sameFileIdentity(target, try e.dir("other")))
+        #expect(!PathGuard.sameFileIdentity(target, e.base.appendingPathComponent("missing")))
+        #expect(PathGuard.identityIsSameOrInside(target.appendingPathComponent("x/y"), link))
+        #expect(!PathGuard.identityIsSameOrInside(e.base, link))
+    }
 }
