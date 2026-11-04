@@ -26,6 +26,14 @@ struct SettingsModelTests {
         #expect(SettingsModel(store: SettingsStore(root: r), login: FakeLogin()).settings.fullSpeed)
     }
 
+    @Test func damagedSettingsFileIsSurfaced() throws {
+        let r = root()
+        try FileManager.default.createDirectory(at: r, withIntermediateDirectories: true)
+        try Data("garbage".utf8).write(to: r.appendingPathComponent("settings.json"))
+        let m = SettingsModel(store: SettingsStore(root: r), login: FakeLogin())
+        #expect(m.error != nil && m.settings == AppSettings())
+    }
+
     @Test func launchAtLoginFollowsTheSystemService() {
         let login = FakeLogin()
         let m = SettingsModel(store: SettingsStore(root: root()), login: login)

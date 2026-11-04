@@ -6,9 +6,10 @@ enum RestoreTarget {
     /// True when `target` is one of `sources` or below it. Compared by whole path components, so
     /// `/Projects-restored` isn't taken for being inside `/Projects`.
     static func isInside(_ target: URL, anyOf sources: [URL]) -> Bool {
-        let t = target.standardizedFileURL.resolvingSymlinksInPath().pathComponents
+        // Case-insensitive: the default macOS volume is, so `/users/me/projects` is the same folder.
+        let t = target.standardizedFileURL.resolvingSymlinksInPath().pathComponents.map { $0.lowercased() }
         return sources.contains { source in
-            let s = source.standardizedFileURL.resolvingSymlinksInPath().pathComponents
+            let s = source.standardizedFileURL.resolvingSymlinksInPath().pathComponents.map { $0.lowercased() }
             return t.count >= s.count && Array(t.prefix(s.count)) == s
         }
     }
@@ -149,7 +150,7 @@ struct ArchiveView: View {
             }
         }
         .task(id: model.selection) { model.loadConfig(); await model.reload() }
-        .sheet(isPresented: $showDrill, onDismiss: { model.loadConfig() }) {
+        .sheet(isPresented: $showDrill, onDismiss: { drill?.discard(); drill = nil; model.loadConfig() }) {
             if let drill { DrillSheet(model: drill) }
         }
     }

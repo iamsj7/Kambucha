@@ -91,6 +91,7 @@ struct ArchiveModelTests {
         let src = URL(fileURLWithPath: "/Users/me/Projects")
         #expect(RestoreTarget.isInside(URL(fileURLWithPath: "/Users/me/Projects/a.txt"), anyOf: [src]))
         #expect(RestoreTarget.isInside(src, anyOf: [src]))
+        #expect(RestoreTarget.isInside(URL(fileURLWithPath: "/users/ME/projects/a.txt"), anyOf: [src]))
         #expect(!RestoreTarget.isInside(URL(fileURLWithPath: "/Users/me/Projects-restored/a.txt"), anyOf: [src]))
     }
 

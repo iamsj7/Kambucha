@@ -13,8 +13,13 @@ final class SettingsModel {
     init(store: SettingsStore = SettingsStore(root: MirrorPaths.support),
          login: any LoginItemControlling = AgentRegistration.LoginItem()) {
         self.store = store; self.login = login
-        settings = (try? store.load()) ?? AppSettings()
         loginStatus = login.status
+        do { settings = try store.load() }
+        catch {
+            // A damaged file isn't silently replaced: show defaults and say so. Changing a setting saves a new file.
+            settings = AppSettings()
+            self.error = "Mirror couldn't read its saved settings, so defaults are shown. Changing a setting replaces the damaged file."
+        }
     }
 
     var launchAtLogin: Bool { loginStatus == .enabled || loginStatus == .requiresApproval }

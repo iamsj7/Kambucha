@@ -78,3 +78,49 @@ struct DrillModelTests {
         #expect(m.phase == .nothingToTest)
     }
 }
+
+@MainActor
+struct DrillPickerTests {
+    func folder(_ files: [String]) throws -> URL {
+        let d = FileManager.default.temporaryDirectory.appendingPathComponent("mirror-test-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: d, withIntermediateDirectories: true)
+        for f in files { try Data("hello".utf8).write(to: d.appendingPathComponent(f)) }
+        for f in files { try FileManager.default.setAttributes([.modificationDate: Date(timeIntervalSince1970: 1_000_000)], ofItemAtPath: d.appendingPathComponent(f).path) }
+        return d
+    }
+    let finished = Date(timeIntervalSince1970: 2_000_000)
+
+    @Test func skipsSecretsExcludesAndGitFiles() throws {
+        let d = try folder([".env", "a.pem", "id_rsa", "key.properties", ".DS_Store", ".gitignore", "build.log", "notes.txt"])
+        var set = BackupSet(name: "S", source: d)
+        set.rules = [UserRule(pattern: "*.log", action: .exclude)]
+        let c = DrillFilePicker.pick(in: set, finishedBefore: finished)
+        #expect(c?.original.lastPathComponent == "notes.txt")
+    }
+
+    @Test func prefersPlainTextOverOtherFiles() throws {
+        let d = try folder(["a.bin", "b.dat", "z.md"])
+        #expect(DrillFilePicker.pick(in: BackupSet(name: "S", source: d), finishedBefore: finished)?.original.lastPathComponent == "z.md")
+    }
+
+    @Test func nothingSuitableIsNil() throws {
+        let d = try folder([".env", "x.key"])
+        #expect(DrillFilePicker.pick(in: BackupSet(name: "S", source: d), finishedBefore: finished) == nil)
+    }
+
+    @Test func discardClearsTheKit() throws {
+        let store = ConfigStore(root: FileManager.default.temporaryDirectory.appendingPathComponent("mirror-test-\(UUID().uuidString)"))
+        let m = DrillModel(destinations: [Destination(name: "D", kind: .googleDrive)], store: store, candidate: { _ in nil }, run: { _, _, _, _ in true })
+        m.kitText = "secret"
+        m.discard()
+        #expect(m.kitText.isEmpty && m.phase == .idle)
+    }
+}
+
+struct AgentAccessProbeTests {
+    @Test func exitCodeDecidesTheAnswer() async {
+        #expect(await AgentAccessProbe(executable: URL(fileURLWithPath: "/usr/bin/true")).confirmed())
+        #expect(!(await AgentAccessProbe(executable: URL(fileURLWithPath: "/usr/bin/false")).confirmed()))
+        #expect(!(await AgentAccessProbe(executable: URL(fileURLWithPath: "/nonexistent/agent")).confirmed()))
+    }
+}

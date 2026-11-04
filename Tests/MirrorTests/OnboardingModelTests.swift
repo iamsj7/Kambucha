@@ -10,7 +10,7 @@ private final class FakeSystem: OnboardingSystem {
     var agent: SMAppService.Status = .notRegistered
     var notes: NotificationAccess = .notDetermined
     var enableError: (any Error)?
-    func fullDiskAccessGranted() -> Bool { fda }
+    func fullDiskAccessConfirmed() async -> Bool { fda }
     func agentStatus() -> SMAppService.Status { agent }
     func enableAgent() throws { if let enableError { throw enableError }; agent = .enabled }
     func notificationAccess() async -> NotificationAccess { notes }
@@ -28,7 +28,7 @@ struct OnboardingModelTests {
         let icloud = root.appendingPathComponent("iCloud")
         try? FileManager.default.createDirectory(at: icloud, withIntermediateDirectories: true)
         let guardrail = PathGuard(iCloudDrive: icloud, backupRoot: MirrorPaths.backupRoot(iCloudDrive: icloud))
-        return (OnboardingModel(system: system, store: ConfigStore(root: root), pathGuard: guardrail), root)
+        return (OnboardingModel(system: system, store: ConfigStore(root: root), settings: SettingsStore(root: root), pathGuard: guardrail), root)
     }
 
     @Test func staysUntilEveryStepIsDone() async throws {
@@ -95,5 +95,16 @@ struct OnboardingModelTests {
         let sets = try store.loadSets(), dests = try store.loadDestinations()
         #expect(sets.count == 1 && sets[0].name == "Docs")
         #expect(dests.count == 1 && dests[0].kind == .iCloudFolder && sets[0].destinationIDs == [dests[0].id])
+    }
+
+    @Test func firstSetUsesTheDefaultRetention() throws {
+        let sys = FakeSystem()
+        let (m, root) = make(sys)
+        var s = AppSettings(); s.defaultRetentionDays = 90
+        try SettingsStore(root: root).save(s)
+        let folder = root.appendingPathComponent("Docs")
+        try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+        m.addFirstSet(folder: folder)
+        #expect(try ConfigStore(root: root).loadSets().first?.archiveDays == 90)
     }
 }

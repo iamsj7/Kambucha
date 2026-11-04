@@ -9,7 +9,8 @@ enum NotificationAccess: Equatable { case notDetermined, allowed, denied }
 /// Everything onboarding reads from or asks of macOS, so the steps can be tested with a fake.
 @MainActor
 protocol OnboardingSystem {
-    func fullDiskAccessGranted() -> Bool
+    /// Asked of the agent, which is the process that reads your folders. False means not confirmed.
+    func fullDiskAccessConfirmed() async -> Bool
     func agentStatus() -> SMAppService.Status
     func enableAgent() throws
     func notificationAccess() async -> NotificationAccess
@@ -21,16 +22,9 @@ protocol OnboardingSystem {
 
 @MainActor
 struct LiveOnboardingSystem: OnboardingSystem {
-    /// There is no API for this grant. Opening the system TCC database fails with EPERM unless the app
-    /// has Full Disk Access, and the file exists on every Mac. Read-only; nothing is read from it.
-    func fullDiskAccessGranted() -> Bool {
-        let home = FileManager.default.homeDirectoryForCurrentUser.path
-        for path in ["/Library/Application Support/com.apple.TCC/TCC.db", "\(home)/Library/Application Support/com.apple.TCC/TCC.db"] {
-            let fd = Darwin.open(path, O_RDONLY)
-            if fd >= 0 { Darwin.close(fd); return true }
-            if errno == EPERM || errno == EACCES { return false }
-        }
-        return false
+    /// Full Disk Access belongs to the process that reads, so the bundled agent is asked, not this app.
+    func fullDiskAccessConfirmed() async -> Bool {
+        await AgentAccessProbe(executable: Bundle.main.bundleURL.appendingPathComponent("Contents/MacOS/MirrorAgent")).confirmed()
     }
     func agentStatus() -> SMAppService.Status { AgentRegistration.status() }
     func enableAgent() throws { try AgentRegistration.enable() }
@@ -53,6 +47,24 @@ struct LiveOnboardingSystem: OnboardingSystem {
     func openLoginItemsSettings() { AgentRegistration.openLoginItemsSettings() }
     func openNotificationSettings() { open("x-apple.systempreferences:com.apple.Notifications-Settings.extension") }
     private func open(_ s: String) { if let u = URL(string: s) { NSWorkspace.shared.open(u) } }
+}
+
+/// Runs `MirrorAgent --check-access`. Exit 0 is confirmed; any other result, including an agent that
+/// doesn't know the flag yet or can't be started, is "not confirmed".
+struct AgentAccessProbe: Sendable {
+    let executable: URL
+    func confirmed() async -> Bool {
+        let exe = executable
+        return await Task.detached {
+            let p = Process()
+            p.executableURL = exe
+            p.arguments = ["--check-access"]
+            p.standardInput = FileHandle.nullDevice; p.standardOutput = FileHandle.nullDevice; p.standardError = FileHandle.nullDevice
+            do { try p.run() } catch { return false }
+            p.waitUntilExit()
+            return p.terminationStatus == 0
+        }.value
+    }
 }
 
 enum OnboardingStep: Int, CaseIterable, Identifiable {
@@ -85,11 +97,13 @@ final class OnboardingModel {
 
     @ObservationIgnored private let system: any OnboardingSystem
     @ObservationIgnored private let store: ConfigStore
+    @ObservationIgnored private let settings: SettingsStore
     @ObservationIgnored private let pathGuard: PathGuard
 
     init(system: any OnboardingSystem = LiveOnboardingSystem(), store: ConfigStore = ConfigStore(root: MirrorPaths.support),
+         settings: SettingsStore = SettingsStore(root: MirrorPaths.support),
          pathGuard: PathGuard = PathGuard(iCloudDrive: MirrorPaths.iCloudDrive, backupRoot: MirrorPaths.backupRoot)) {
-        self.system = system; self.store = store; self.pathGuard = pathGuard
+        self.system = system; self.store = store; self.settings = settings; self.pathGuard = pathGuard
     }
 
     func isDone(_ s: OnboardingStep) -> Bool { done.contains(s) }
@@ -100,7 +114,7 @@ final class OnboardingModel {
     /// Re-reads every grant. A grant revoked later brings onboarding back.
     func refresh() async {
         var d: Set<OnboardingStep> = []
-        if system.fullDiskAccessGranted() { d.insert(.fullDiskAccess) }
+        if await system.fullDiskAccessConfirmed() { d.insert(.fullDiskAccess) }
         let status = system.agentStatus()
         agentNeedsApproval = status == .requiresApproval
         if status == .enabled { d.insert(.agent) }
@@ -135,7 +149,8 @@ final class OnboardingModel {
             var destinations = try store.loadDestinations()
             let icloud = destinations.first { $0.kind == .iCloudFolder } ?? Destination(name: "iCloud Drive", kind: .iCloudFolder)
             let name = PathGuard.sanitizedComponent(folder.lastPathComponent)
-            let set = BackupSet(name: name, source: folder, destinationIDs: [icloud.id])
+            var set = BackupSet(name: name, source: folder, destinationIDs: [icloud.id])
+            set.archiveDays = (try? settings.load().defaultRetentionDays) ?? AppSettings().defaultRetentionDays
             let existing = try store.loadSets()
             try pathGuard.validateNewSet(set, existing: existing)
             if !destinations.contains(where: { $0.id == icloud.id }) { destinations.append(icloud); try store.saveDestinations(destinations) }
@@ -227,7 +242,7 @@ private struct StepRow: View {
     private var explanation: String {
         switch step {
         case .fullDiskAccess:
-            "macOS protects folders like Documents and Desktop. Mirror needs Full Disk Access to back them up. Click the button, then switch on Mirror in the list."
+            "macOS protects folders like Documents and Desktop. Mirror needs Full Disk Access to back them up. Click the button, then switch on Mirror in the list. Not confirmed yet."
         case .agent:
             model.agentNeedsApproval
                 ? "macOS needs your approval. Switch on Mirror in Login Items, then come back."
