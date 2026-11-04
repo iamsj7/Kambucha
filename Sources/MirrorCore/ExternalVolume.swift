@@ -9,12 +9,16 @@ public struct VolumeInfo: Equatable, Sendable {
     public var freeBytes: Int64
     public var totalBytes: Int64
     /// Identifies this connection: device node plus filesystem ID. It changes when the drive is unplugged and
-    /// plugged back in. Empty when unknown, which never counts as "the same connection".
+    /// plugged back in. Empty when `statfs` failed, and then the 7 day interval decides.
     public var mountID: String
     /// True for the boot volume and the system volumes. Never a backup target.
     public var isSystem: Bool
+    /// Reports internal and non-ejectable. A USB or Thunderbolt SSD can look like this, so it is kept, and
+    /// Add Destination shows "This looks like an internal disk" for confirmation.
+    public var looksInternal: Bool
     public init(uuid: String, name: String, mountPoint: URL, fileSystem: String, freeBytes: Int64,
-                totalBytes: Int64 = 0, mountID: String = "", isSystem: Bool = false) {
+                totalBytes: Int64 = 0, mountID: String = "", isSystem: Bool = false, looksInternal: Bool = false) {
+        self.looksInternal = looksInternal
         self.uuid = uuid; self.name = name; self.mountPoint = mountPoint; self.fileSystem = fileSystem
         self.freeBytes = freeBytes; self.totalBytes = totalBytes; self.mountID = mountID; self.isSystem = isSystem
     }
@@ -22,7 +26,7 @@ public struct VolumeInfo: Equatable, Sendable {
 
 /// A mounted volume that looks like a drive but can't be used, so setup can say why.
 public struct UnsupportedVolume: Equatable, Sendable {
-    public enum Reason: Equatable, Sendable { case noVolumeUUID }
+    public enum Reason: Equatable, Sendable { case noVolumeUUID, timeMachine, readOnly, notLocal, unreadable }
     public var name: String
     public var mountPoint: URL
     public var reason: Reason
@@ -54,21 +58,33 @@ public struct VolumeTraits: Equatable, Sendable {
 /// Reads the real mounted volumes, offering only writable, local, external or ejectable ones. A locked drive
 /// doesn't mount, so it simply isn't listed.
 public struct SystemVolumes: VolumeLocating {
-    private let accepts: @Sendable (VolumeTraits) -> Bool
     private let includeHidden: Bool
 
-    /// `accepts` is injectable so tests can keep disk images usable; the default is `isBackupTarget`.
     /// `includeHidden` also lists `-nobrowse` mounts, which is how test disk images attach. Real drives are not hidden.
-    public init(includeHidden: Bool = false,
-                accepts: @escaping @Sendable (VolumeTraits) -> Bool = SystemVolumes.isBackupTarget) {
-        self.includeHidden = includeHidden; self.accepts = accepts
+    public init(includeHidden: Bool = false) { self.includeHidden = includeHidden }
+
+    public enum Classification: Equatable, Sendable {
+        case target(looksInternal: Bool)
+        case unsupported(UnsupportedVolume.Reason)
+        /// The boot volume, system volumes and anything outside `/Volumes`: refused without comment.
+        case ignore
     }
 
-    /// Not the boot or a system volume, local, writable, not Time Machine, and external or ejectable.
+    /// Any local, writable volume under `/Volumes` is a target, except the root, system volumes and Time Machine.
+    /// `traits` is nil when reading the volume's resource keys failed, which is reported rather than dropped.
+    public static func classify(path: String, traits: VolumeTraits?) -> Classification {
+        guard path != "/", !path.hasPrefix("/System/"), path.hasPrefix("/Volumes/") else { return .ignore }
+        guard let t = traits else { return .unsupported(.unreadable) }
+        if t.isRootFileSystem { return .ignore }
+        if t.isTimeMachine { return .unsupported(.timeMachine) }
+        if !t.isLocal { return .unsupported(.notLocal) }
+        if t.isReadOnly { return .unsupported(.readOnly) }
+        return .target(looksInternal: t.isInternal && !t.isEjectable)
+    }
+
     public static func isBackupTarget(_ t: VolumeTraits) -> Bool {
-        if t.isRootFileSystem || t.path == "/" || t.path.hasPrefix("/System/Volumes") { return false }
-        if !t.isLocal || t.isReadOnly || t.isTimeMachine { return false }
-        return !t.isInternal || t.isEjectable
+        if case .target = classify(path: t.path, traits: t) { return true }
+        return false
     }
 
     /// Splits candidates (name, traits, UUID) into usable indexes and unsupported ones.
@@ -92,42 +108,47 @@ public struct SystemVolumes: VolumeLocating {
         return d
     }
 
-    private struct Entry { var info: VolumeInfo?; var traits: VolumeTraits; var name: String; var url: URL; var hasUUID: Bool }
+    private enum Entry { case usable(VolumeInfo), unsupported(UnsupportedVolume) }
 
     private func entries() -> [Entry] {
         let keys: [URLResourceKey] = [.volumeUUIDStringKey, .volumeNameKey, .volumeLocalizedFormatDescriptionKey,
                                       .volumeAvailableCapacityKey, .volumeTotalCapacityKey, .volumeIsRootFileSystemKey,
                                       .volumeIsLocalKey, .volumeIsInternalKey, .volumeIsEjectableKey, .volumeIsReadOnlyKey]
-        let urls = FileManager.default.mountedVolumeURLs(includingResourceValuesForKeys: keys, options: includeHidden ? [] : [.skipHiddenVolumes]) ?? []
+        let urls = FileManager.default.mountedVolumeURLs(includingResourceValuesForKeys: keys,
+                                                         options: includeHidden ? [] : [.skipHiddenVolumes]) ?? []
         return urls.compactMap { url in
-            guard let v = try? url.resourceValues(forKeys: Set(keys)) else { return nil }
             let fm = FileManager.default
-            let tm = fm.fileExists(atPath: url.appendingPathComponent(".com.apple.timemachine.supported").path)
-                || fm.fileExists(atPath: url.appendingPathComponent("Backups.backupdb").path)
-            let traits = VolumeTraits(path: url.path, isRootFileSystem: v.volumeIsRootFileSystem ?? false,
-                                      isLocal: v.volumeIsLocal ?? false, isInternal: v.volumeIsInternal ?? true,
-                                      isEjectable: v.volumeIsEjectable ?? false, isReadOnly: v.volumeIsReadOnly ?? true,
-                                      isTimeMachine: tm)
-            let name = v.volumeName ?? url.lastPathComponent
-            guard accepts(traits) else { return nil }
-            guard let uuid = v.volumeUUIDString, !uuid.isEmpty else {
-                return Entry(info: nil, traits: traits, name: name, url: url, hasUUID: false)
+            let values = try? url.resourceValues(forKeys: Set(keys))
+            // A volume whose essential keys can't be read is reported as unreadable, never dropped.
+            var traits: VolumeTraits?
+            if let v = values, let local = v.volumeIsLocal, let readOnly = v.volumeIsReadOnly {
+                let tm = fm.fileExists(atPath: url.appendingPathComponent(".com.apple.timemachine.supported").path)
+                    || fm.fileExists(atPath: url.appendingPathComponent("Backups.backupdb").path)
+                traits = VolumeTraits(path: url.path, isRootFileSystem: v.volumeIsRootFileSystem ?? false, isLocal: local,
+                                      isInternal: v.volumeIsInternal ?? false, isEjectable: v.volumeIsEjectable ?? false,
+                                      isReadOnly: readOnly, isTimeMachine: tm)
             }
-            let (fsType, mountID) = Self.statfsInfo(url)
-            let info = VolumeInfo(uuid: uuid, name: name, mountPoint: url,
-                                  fileSystem: Self.normalizedFileSystem(statfsName: fsType,
-                                                                        description: v.volumeLocalizedFormatDescription ?? ""),
-                                  freeBytes: Int64(v.volumeAvailableCapacity ?? 0), totalBytes: Int64(v.volumeTotalCapacity ?? 0),
-                                  mountID: mountID, isSystem: traits.isRootFileSystem)
-            return Entry(info: info, traits: traits, name: name, url: url, hasUUID: true)
+            let name = values?.volumeName ?? url.lastPathComponent
+            switch Self.classify(path: url.path, traits: traits) {
+            case .ignore: return nil
+            case .unsupported(let reason): return .unsupported(UnsupportedVolume(name: name, mountPoint: url, reason: reason))
+            case .target(let looksInternal):
+                guard let v = values, let uuid = v.volumeUUIDString, !uuid.isEmpty else {
+                    return .unsupported(UnsupportedVolume(name: name, mountPoint: url, reason: .noVolumeUUID))
+                }
+                let (fsType, mountID) = Self.statfsInfo(url)
+                return .usable(VolumeInfo(
+                    uuid: uuid, name: name, mountPoint: url,
+                    fileSystem: Self.normalizedFileSystem(statfsName: fsType, description: v.volumeLocalizedFormatDescription ?? ""),
+                    freeBytes: Int64(v.volumeAvailableCapacity ?? 0), totalBytes: Int64(v.volumeTotalCapacity ?? 0),
+                    mountID: mountID, isSystem: false, looksInternal: looksInternal))
+            }
         }
     }
 
-    public func mounted() -> [VolumeInfo] { entries().compactMap(\.info) }
+    public func mounted() -> [VolumeInfo] { entries().compactMap { if case .usable(let i) = $0 { i } else { nil } } }
 
-    public func unsupported() -> [UnsupportedVolume] {
-        entries().filter { !$0.hasUUID }.map { UnsupportedVolume(name: $0.name, mountPoint: $0.url, reason: .noVolumeUUID) }
-    }
+    public func unsupported() -> [UnsupportedVolume] { entries().compactMap { if case .unsupported(let u) = $0 { u } else { nil } } }
 
     /// The `statfs` type name (such as "apfs", "hfs", "exfat") and a per-connection mount ID.
     static func statfsInfo(_ url: URL) -> (type: String?, mountID: String) {
@@ -164,9 +185,14 @@ public enum ExternalVolume {
     /// mount ID can repeat. Otherwise the 30 minute wake-ups are ordinary runs on the change feed.
     public static func needsFullPass(lastSeenMountID: String?, volume: VolumeInfo, lastFullPass: Date?, now: Date,
                                      backstop: TimeInterval = 7 * 86_400) -> Bool {
-        guard let last = lastSeenMountID, !last.isEmpty, !volume.mountID.isEmpty, last == volume.mountID else { return true }
-        guard let pass = lastFullPass else { return true }
-        return now.timeIntervalSince(pass) >= backstop
+        func stale() -> Bool {
+            guard let pass = lastFullPass else { return true }
+            return now.timeIntervalSince(pass) >= backstop
+        }
+        // statfs failed: no connection identity, so fall back to the interval rather than a pass every wake-up.
+        if volume.mountID.isEmpty { return stale() }
+        guard let last = lastSeenMountID, !last.isEmpty, last == volume.mountID else { return true }
+        return stale()
     }
 
     public static func supportsSymlinks(_ volume: VolumeInfo) -> Bool { supportsSymlinks(fileSystem: volume.fileSystem) }

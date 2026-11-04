@@ -187,6 +187,7 @@ private func has(_ a: [String], _ f: String, _ v: String) -> Bool {
         let found = SystemVolumes().mounted()
         #expect(!found.contains { $0.mountPoint.path == "/" })
         #expect(!found.contains { $0.mountPoint.path.hasPrefix("/System/Volumes") })
+        #expect(!SystemVolumes().unsupported().contains { $0.mountPoint.path == "/" })
         #expect(found.allSatisfy { !$0.uuid.isEmpty && !$0.isSystem })
     }
 
@@ -209,6 +210,7 @@ private func has(_ a: [String], _ f: String, _ v: String) -> Bool {
         let volumes = SystemVolumes(includeHidden: true).mounted()
         let img = volumes.first { $0.name == "MirrorEV" }
         #expect(img != nil)
+        #expect(img?.looksInternal == false)
         #expect(img?.fileSystem == "apfs" && img?.totalBytes ?? 0 > 0 && img?.mountID.isEmpty == false)
         #expect(!volumes.contains { $0.mountPoint.path == "/" || $0.mountPoint.path.hasPrefix("/System/Volumes") })
         #expect(SystemVolumes().mounted().allSatisfy { $0.name != "MirrorEV" })   // hidden mounts are skipped by default
@@ -226,17 +228,27 @@ private func has(_ a: [String], _ f: String, _ v: String) -> Bool {
                      isReadOnly: readOnly, isTimeMachine: tm)
     }
 
-    @Test func classificationOffersOnlyWritableLocalExternalVolumes() {
-        #expect(SystemVolumes.isBackupTarget(traits()))
-        #expect(SystemVolumes.isBackupTarget(traits(builtIn: false, ejectable: false)))   // fixed external
-        #expect(SystemVolumes.isBackupTarget(traits(builtIn: true, ejectable: true)))     // ejectable internal slot
-        #expect(!SystemVolumes.isBackupTarget(traits("/", root: true, builtIn: true, ejectable: false)))
-        #expect(!SystemVolumes.isBackupTarget(traits("/System/Volumes/Data", builtIn: true, ejectable: false)))
-        #expect(!SystemVolumes.isBackupTarget(traits("/System/Volumes/VM")))
-        #expect(!SystemVolumes.isBackupTarget(traits(builtIn: true, ejectable: false)))   // internal disk
-        #expect(!SystemVolumes.isBackupTarget(traits(local: false)))                       // network share
-        #expect(!SystemVolumes.isBackupTarget(traits(readOnly: true)))                     // installer, DMG
-        #expect(!SystemVolumes.isBackupTarget(traits(tm: true)))                           // Time Machine
+    @Test func classificationKeepsAnyWritableLocalVolumeUnderVolumes() {
+        func c(_ t: VolumeTraits?, path: String? = nil) -> SystemVolumes.Classification {
+            SystemVolumes.classify(path: path ?? t?.path ?? "/Volumes/SSD", traits: t)
+        }
+        #expect(c(traits()) == .target(looksInternal: false))
+        #expect(c(traits(builtIn: false, ejectable: false)) == .target(looksInternal: false))   // fixed external
+        #expect(c(traits(builtIn: true, ejectable: true)) == .target(looksInternal: false))     // ejectable internal slot
+        // A USB or Thunderbolt SSD that reports internal and non-ejectable is kept, flagged for confirmation.
+        #expect(c(traits(builtIn: true, ejectable: false)) == .target(looksInternal: true))
+        // Root and system volumes stay refused, and say nothing.
+        #expect(c(traits("/", root: true, builtIn: true, ejectable: false)) == .ignore)
+        #expect(c(traits("/System/Volumes/Data", builtIn: true, ejectable: false)) == .ignore)
+        #expect(c(traits("/System/Volumes/VM")) == .ignore)
+        #expect(c(traits("/Volumes/Macintosh HD", root: true)) == .ignore)
+        #expect(c(traits("/private/var/folders/x/mnt")) == .ignore)                       // not under /Volumes
+        // Everything else under /Volumes is listed with a reason.
+        #expect(c(traits(tm: true)) == .unsupported(.timeMachine))
+        #expect(c(traits(readOnly: true)) == .unsupported(.readOnly))
+        #expect(c(traits(local: false)) == .unsupported(.notLocal))
+        #expect(c(nil, path: "/Volumes/Broken") == .unsupported(.unreadable))             // failed resource read
+        #expect(c(nil, path: "/System/Volumes/Hardware") == .ignore)
     }
 
     @Test func driveWithoutUUIDIsReportedUnsupported() {
@@ -278,9 +290,12 @@ private func has(_ a: [String], _ f: String, _ v: String) -> Bool {
         #expect(ExternalVolume.needsFullPass(lastSeenMountID: "/dev/disk5s1@1", volume: again, lastFullPass: now.addingTimeInterval(-1800), now: now))
         // Same mount for over a week: weekly backstop, since a mount ID can repeat.
         #expect(ExternalVolume.needsFullPass(lastSeenMountID: "/dev/disk5s1@1", volume: v, lastFullPass: now.addingTimeInterval(-8 * 86_400), now: now))
-        // Unknown mount ID never claims "same connection".
+        // Unknown mount ID (statfs failed) falls back to the 7 day interval, not every wake-up.
         var unknown = v; unknown.mountID = ""
-        #expect(ExternalVolume.needsFullPass(lastSeenMountID: "", volume: unknown, lastFullPass: now.addingTimeInterval(-60), now: now))
+        #expect(!ExternalVolume.needsFullPass(lastSeenMountID: "", volume: unknown, lastFullPass: now.addingTimeInterval(-60), now: now))
+        #expect(!ExternalVolume.needsFullPass(lastSeenMountID: nil, volume: unknown, lastFullPass: now.addingTimeInterval(-60), now: now))
+        #expect(ExternalVolume.needsFullPass(lastSeenMountID: "", volume: unknown, lastFullPass: now.addingTimeInterval(-8 * 86_400), now: now))
+        #expect(ExternalVolume.needsFullPass(lastSeenMountID: "", volume: unknown, lastFullPass: nil, now: now))
         #expect(DestinationProfile.profile(for: Destination(name: "x", kind: .externalDrive), fileSystem: "apfs").fullPassInterval == 7 * 86_400)
         var s = SetState(); #expect(s.lastSeenMountID == nil); s.lastSeenMountID = "x"
         #expect(try JSONDecoder().decode(SetState.self, from: JSONEncoder().encode(s)).lastSeenMountID == "x")
