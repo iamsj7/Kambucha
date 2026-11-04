@@ -6,6 +6,7 @@
 	<key>BundleProgram</key><string>Contents/MacOS/MirrorAgent</string>
 	<key>StartInterval</key><integer>1800</integer>
 	<key>RunAtLoad</key><true/>
+	<key>StartOnMount</key><true/>
 	<key>ProcessType</key><string>Background</string>
 	<key>LowPriorityIO</key><true/>
 	<key>Nice</key><integer>10</integer>

@@ -50,6 +50,9 @@ public final class RcloneSession {
         case .iCloudFolder:
             guard !destination.encrypted else { throw RcloneSessionError.encryptionNotSupported }
             return (MirrorPaths.backupRoot.path, RcloneContext(configPath: "/dev/null", environment: [:]))
+        case .externalDrive:
+            // Needs the mounted volume, which the caller resolves. Not wired yet (Task 21 "Wiring for later").
+            throw RcloneSessionError.encryptionNotSupported
         case .googleDrive, .oneDrive:
             break
         }
@@ -136,7 +139,7 @@ enum RcloneBackend {
     /// Nil for kinds with no remote. Exhaustive, so a new kind has to decide here.
     static func type(for kind: DestinationKind) -> String? {
         switch kind {
-        case .iCloudFolder: nil
+        case .iCloudFolder, .externalDrive: nil
         case .googleDrive: "drive"
         case .oneDrive: "onedrive"
         }
@@ -198,7 +201,7 @@ enum RcloneCrypt {
     /// Nil for kinds that are never encrypted. Spec section 8a.
     static func filenameEncoding(for kind: DestinationKind) -> String? {
         switch kind {
-        case .iCloudFolder: nil
+        case .iCloudFolder, .externalDrive: nil
         case .googleDrive: "base32"
         case .oneDrive: "base32768"   // OneDrive limits paths to 400 characters
         }

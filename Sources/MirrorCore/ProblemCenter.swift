@@ -3,6 +3,7 @@ import Foundation
 public enum Problem: String, Codable, CaseIterable, Sendable {
     case verificationFailed, deletionsHeld, destinationMissing, permissionLost, iCloudUnavailable
     case repeatedFailures, uploadStalled, fileRefused, signInExpired, drillFailed, drillDue
+    case driveOverdue, driveFull
 
     /// Plain, specific lead-in. Never includes file contents or secrets.
     public var headline: String {
@@ -18,6 +19,8 @@ public enum Problem: String, Codable, CaseIterable, Sendable {
         case .signInExpired: "Sign-in expired"
         case .drillFailed: "Restore test failed"
         case .drillDue: "Restore test is due"
+        case .driveOverdue: "Backup drive not connected"
+        case .driveFull: "Backup drive is full"
         }
     }
 }

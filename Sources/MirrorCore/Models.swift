@@ -38,7 +38,7 @@ public struct BackupSet: Codable, Equatable, Identifiable, Sendable {
     }
 }
 
-public enum DestinationKind: String, Codable, Sendable { case iCloudFolder, googleDrive, oneDrive }
+public enum DestinationKind: String, Codable, Sendable { case iCloudFolder, googleDrive, oneDrive, externalDrive }
 
 public struct Destination: Codable, Equatable, Identifiable, Sendable {
     public var id: UUID
@@ -46,10 +46,14 @@ public struct Destination: Codable, Equatable, Identifiable, Sendable {
     public var kind: DestinationKind
     public var encrypted: Bool
     public var recoveryKitConfirmed = false
-    /// Encryption defaults to on for cloud kinds and off for the iCloud folder.
-    public init(id: UUID = UUID(), name: String, kind: DestinationKind, encrypted: Bool? = nil) {
-        self.id = id; self.name = name; self.kind = kind
-        self.encrypted = encrypted ?? (kind != .iCloudFolder)
+    /// The drive's volume UUID. Only for `.externalDrive`. Identity is by UUID, never by name or path.
+    public var volumeUUID: String?
+    /// Encryption defaults to on for Google Drive and OneDrive only. The iCloud folder relies on Advanced
+    /// Data Protection and an external drive on its own password protection.
+    public init(id: UUID = UUID(), name: String, kind: DestinationKind, encrypted: Bool? = nil,
+                volumeUUID: String? = nil) {
+        self.id = id; self.name = name; self.kind = kind; self.volumeUUID = volumeUUID
+        self.encrypted = encrypted ?? (kind == .googleDrive || kind == .oneDrive)
     }
 }
 
