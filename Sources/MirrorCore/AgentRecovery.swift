@@ -28,6 +28,9 @@ struct AgentRecovery: Sendable {
         case AgentWire.dryRunDeletions:
             guard let r = try? decoder.decode(AgentWire.PairRequest.self, from: input) else { throw AgentFailure.invalidRequest }
             return try await dryRun(r)
+        case AgentWire.setList:
+            guard let r = try? decoder.decode(AgentWire.BrowseRequest.self, from: input) else { throw AgentFailure.invalidRequest }
+            return try await browse(r)
         case AgentWire.setNames:
             guard let r = try? decoder.decode(AgentWire.NamesRequest.self, from: input) else { throw AgentFailure.invalidRequest }
             return try await names(r)
@@ -96,6 +99,27 @@ struct AgentRecovery: Sendable {
         return AgentWire.Response(ok: true, entries: entries.map {
             AgentWire.Entry(id: $0.id, setName: $0.setName, stamp: $0.stamp, path: $0.path, size: $0.size)
         })
+    }
+
+    /// One level, so a set of 120,000 files is a folder listing and not a walk.
+    private func browse(_ r: AgentWire.BrowseRequest) async throws -> AgentWire.Response {
+        let (set, destination) = try resolve(set: r.set, destination: r.destination)
+        try ArchiveScope.checkName(set.name)
+        guard Self.isInside(set, r.path), r.path.hasPrefix("Sets/") else { throw AgentFailure.invalidRequest }
+        let items: [BackupItem] = try await withAccess(destination) { access in
+            let out = try await rclone.capture(["lsjson", "--links", "--use-json-log", "--config", access.context.configPath, "--",
+                                                ArchiveScope.join(access.endpoint, r.path)], context: access.context)
+            if RcloneLogParser.outcome(exitCode: out.exitCode, log: Data(out.stderr.utf8)) == .authExpired { throw RcloneSessionError.notSignedIn }
+            if out.exitCode == 3 { throw AgentFailure.notFound }
+            guard out.exitCode == 0, let list = (try? JSONSerialization.jsonObject(with: Data(out.stdout.utf8))) as? [[String: Any]] else {
+                throw AgentFailure.archive
+            }
+            return list.compactMap { item in
+                guard let name = item["Name"] as? String, let isFolder = item["IsDir"] as? Bool else { return nil }
+                return BackupItem(name: name, isFolder: isFolder, size: isFolder ? 0 : (item["Size"] as? NSNumber)?.int64Value ?? 0)
+            }
+        }
+        return AgentWire.Response(ok: true, items: items.sorted { ($0.isFolder ? 0 : 1, $0.name) < ($1.isFolder ? 0 : 1, $1.name) })
     }
 
     private func names(_ r: AgentWire.NamesRequest) async throws -> AgentWire.Response {

@@ -8,7 +8,8 @@ public enum AgentWire {
     public static let archiveRestore = "archive-restore"
     public static let dryRunDeletions = "dry-run-deletions"
     public static let setNames = "set-names"
-    public static let subcommands: Set<String> = [archiveList, archiveRestore, dryRunDeletions, setNames]
+    public static let setList = "set-list"
+    public static let subcommands: Set<String> = [archiveList, archiveRestore, dryRunDeletions, setNames, setList]
 
     /// `archive-list` and `dry-run-deletions`.
     public struct PairRequest: Codable, Equatable, Sendable {
@@ -36,6 +37,14 @@ public enum AgentWire {
         public init(destination: UUID?) { self.destination = destination }
     }
 
+    /// `set-list`. `path` is `Sets/<set>[/sub]`, one level of it answered in `items`.
+    public struct BrowseRequest: Codable, Equatable, Sendable {
+        public var set: UUID
+        public var destination: UUID
+        public var path: String
+        public init(set: UUID, destination: UUID, path: String) { self.set = set; self.destination = destination; self.path = path }
+    }
+
     public struct Entry: Codable, Equatable, Sendable {
         public var id: String
         public var setName: String
@@ -56,8 +65,11 @@ public enum AgentWire {
         public var files: [String]?
         /// `dry-run-deletions`: what it would also delete inside `.git` folders, which `files` leaves out.
         public var gitFiles: Int?
-        public init(ok: Bool? = nil, failure: AgentFailure? = nil, entries: [Entry]? = nil, files: [String]? = nil, gitFiles: Int? = nil) {
+        public var items: [BackupItem]?
+        public init(ok: Bool? = nil, failure: AgentFailure? = nil, entries: [Entry]? = nil, files: [String]? = nil, gitFiles: Int? = nil,
+                    items: [BackupItem]? = nil) {
             self.ok = ok; self.failure = failure; self.entries = entries; self.files = files; self.gitFiles = gitFiles
+            self.items = items
         }
     }
 

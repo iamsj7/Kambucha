@@ -175,6 +175,18 @@ private struct ServiceRig {
         #expect(try ProblemCenter(root: rig.support, notifier: rig.notifier).active().isEmpty)
     }
 
+    /// A new Mac: nothing stored, and the destination not saved until the Kit has opened the backup.
+    @Test func aKitOpensADestinationThisMacHasNeverSeen() async throws {
+        let old = try ServiceRig()
+        try await old.connected()
+        let kitText = try #require(try await old.send(.recoveryKit(destination: old.drive)).kitText)
+        let fresh = try ServiceRig()
+        let d = Destination(name: "Drive", kind: .googleDrive)
+        let r = try await fresh.send(.restoreFromKit(destination: d, kitText: kitText, acceptUnproven: false))
+        #expect(r.failure == nil)
+        #expect(try fresh.secrets.vault(for: d) != nil)
+    }
+
     @Test func restoreFromKitGoesThroughTheAgent() async throws {
         let rig = try ServiceRig()
         try await rig.connected()

@@ -36,8 +36,18 @@ public protocol PreviewProviding: Sendable {
     func rule(for group: PreviewGroup, included: Bool) -> UserRule
 }
 
+/// One thing in a folder of the latest backup.
+public struct BackupItem: Codable, Identifiable, Equatable, Sendable {
+    public var name: String; public var isFolder: Bool; public var size: Int64
+    public var id: String { name }
+    public init(name: String, isFolder: Bool, size: Int64) { self.name = name; self.isFolder = isFolder; self.size = size }
+}
+
 /// Archive and restore for one destination. Cloud access goes through the agent, as only it touches the Keychain.
 public protocol ArchiveProviding: Sendable {
     func list(set: BackupSet, destination: Destination) async throws -> [ArchiveEntry]
+    /// One folder of the latest backup. `path` is below the backup root: `Sets/<set>[/sub]`.
+    func browse(path: String, set: BackupSet, destination: Destination) async throws -> [BackupItem]
+    /// `entry.path` can be a file or a folder, under `Archive/` or `Sets/`.
     func restore(entry: ArchiveEntry, set: BackupSet, destination: Destination, to: URL) async throws
 }

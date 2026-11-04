@@ -95,6 +95,11 @@ struct AddDestinationFlow: View {
             .formStyle(.grouped)
 
             HStack {
+                if let kind, DestinationRules.encryptionOffered(kind), encrypted {
+                    Button("I Have a Recovery Kit…") { useRecoveryKit(kind) }
+                        .disabled(working)
+                        .accessibilityHint("Opens a backup you already have, instead of making new keys")
+                }
                 Spacer()
                 Button("Cancel", role: .cancel) { task?.cancel(); dismiss() }.keyboardShortcut(.cancelAction)
                 Button(choice == .iCloud || choice == .externalDrive ? "Add" : "Sign In…") { start() }
@@ -194,6 +199,20 @@ struct AddDestinationFlow: View {
     }
 
     // MARK: Actions
+
+    /// A new Mac with a backup already out there. Signing in here would make new keys, so nothing is saved until
+    /// the Kit has opened the backup.
+    private func useRecoveryKit(_ kind: DestinationKind) {
+        let trimmed = name.trimmingCharacters(in: .whitespaces)
+        let finalName = trimmed.isEmpty ? defaultName : trimmed
+        guard !model.destinations.contains(where: { $0.name.caseInsensitiveCompare(finalName) == .orderedSame }) else {
+            error = "A destination called \"\(finalName)\" already exists."
+            return
+        }
+        error = nil
+        pending = Destination(name: finalName, kind: kind, encrypted: true)
+        pasting = true
+    }
 
     private func start() {
         error = nil

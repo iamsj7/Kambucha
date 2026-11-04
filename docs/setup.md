@@ -28,19 +28,18 @@ Mirror is built from source.
 
    It should finish with `OK`.
 
-6. Drag `dist/Mirror.app` into `/Applications` and open it. A cloud icon appears in the menu bar. There is no Dock icon.
+6. Drag `dist/Mirror.app` into `/Applications` and open it. A cloud icon appears in the menu bar and the Mirror window opens at its first-run screen. If it does not, choose Open Mirror from the menu bar. The Dock icon shows only while the window is open.
 
-## 2. Allow Full Disk Access
+## 2. The first-run screen
 
-Mirror cannot read some folders, such as `~/Documents`, until you allow this.
+Mirror's first-run screen has four steps, in this order, and stays until each is done. The next step's button appears when the one before is finished.
 
-1. Open System Settings, then Privacy & Security, then Full Disk Access.
-2. Click the plus button and choose `Mirror.app` from `/Applications`.
-3. Switch it on. macOS may ask you to quit and reopen Mirror.
+1. **Turn On Background Backups.** Choose Turn On. macOS may ask for your approval. If it does, choose Open Login Items Settings and switch on Mirror under "Allow in the Background".
+2. **Allow Full Disk Access.** This comes second because the background helper is what needs it, and Mirror checks through the helper. Choose Open Full Disk Access Settings. Click the plus button if Mirror is not listed, choose `Mirror.app` from `/Applications`, and switch it on. Come back and choose Check Again. This starts the helper, so it can take a few seconds.
+3. **Allow Notifications.** Mirror tells you about problems this way.
+4. **Add Your First Set.** See section 3.
 
 The background helper is inside the app, so this one permission covers both. Mirror checks it by having the helper, started by macOS, read a file that only Full Disk Access can open. Reading Documents and iCloud Drive is not enough, because macOS can allow those on their own.
-
-Then allow it to run in the background. Open System Settings, then General, then Login Items & Extensions, and switch on Mirror under "Allow in the Background". Mirror's first-run screen walks through both steps.
 
 If Full Disk Access is ever lost, Mirror sends a notification and shows "Needs Attention", and the main window shows a warning with a button to open the setting. Switch it back on in the same place. A long upload never counts as losing it.
 
@@ -74,6 +73,9 @@ Status always shows words and a symbol, never colour alone.
 | Backed Up | Everything your rules include has been copied, checked and has reached the destination. The line under it shows the file count and the time. | Nothing. |
 | Backing Up | A run is happening now. | Wait. |
 | Uploading N files | The copy is made and the destination is still taking the files. For iCloud, macOS does the upload and may take a while. | Wait. It becomes Backed Up when done. |
+| Files Didn't Match | A check found files that differ from the backup, and iCloud has freed them from this Mac. Mirror is asking iCloud to bring them back so it can check them again. | Wait, with enough free disk. If they can't be checked within 7 days, Mirror alerts you. |
+| N files iCloud hasn't accepted yet | iCloud has not taken these files, which happens with names such as `*.tmp` and `*.nosync`. | Wait. If they are still there after a day, Mirror names them under Items to Review, and you can choose Keep Excluded. |
+| Backup Not Finished | The last run stopped short, for example at the 25 minute limit for cloud uploads. No run is going right now. | Nothing. It picks up at the next run. |
 | N deletions held | Files you removed on the Mac would have been removed from the backup too, and there were a lot of them. Mirror paused only the deletions. New and changed files still back up. | Choose Review Deletions. See "Undoing a mass deletion" in the [recovery guide](recovery.md). |
 | Needs Attention | Something stopped a backup, such as a failed check, lost Full Disk Access, an expired sign-in or a missing destination marker. The line under it says why. | Read the reason and fix it. Mirror also sends one notification per problem. |
 | Paused | You turned backups off. | Choose Resume when ready. |
@@ -81,7 +83,7 @@ Status always shows words and a symbol, never colour alone.
 | Not connected, last backed up N days ago | An external drive is not plugged in. This is not a failure, and it does not stop your other destinations reading Backed Up. | Plug it in when convenient. After 7 days Mirror gives one quiet reminder. |
 | Not connected yet | An external drive has never finished a backup and is not plugged in. | Plug it in to start its first backup. |
 
-"Backed Up" also shows a count of items to review. These are files your rules skip that you may want, such as a new `.env` file inside a build folder. They never block a backup.
+The Overview also lists Items to Review. These are files your rules skip that you may want, such as a new `.env` file inside a build folder. They never block a backup.
 
 ## 5. Connect an external drive
 
@@ -102,7 +104,7 @@ Mirror does not encrypt external drives. If you set a password on the drive, a l
 
 1. Plug the drive in.
 2. In Mirror, choose Add Destination, then External Drive, and pick the drive from the list of connected drives.
-3. Choose which sets use it.
+3. Open each set that should back up to it, and switch the drive on under Destinations.
 
 Mirror remembers the drive by its internal ID and not its name. A different drive with the same name will never be written to.
 
@@ -112,7 +114,7 @@ Mirror remembers the drive by its internal ID and not its name. A different driv
 - Every time you connect it, Mirror compares the whole set, so a week away does not matter.
 - The drive holds real copies, so it needs real space. Mirror checks that the changes will fit and stops with a clear message if they will not.
 - If you unplug it in the middle of a run, nothing is marked complete and the next connection carries on.
-- When it finishes, you get a notification saying it is safe to eject, with an Eject button.
+- When it finishes, you get a notification saying it is safe to eject. To eject from Mirror, open the drive under Destinations and choose Eject.
 
 ## 6. Connect Google Drive
 
@@ -181,7 +183,7 @@ Things to know, from rclone's guide at <https://rclone.org/onedrive/>:
 
 ## 8. Settings worth knowing
 
-- **Schedule:** every 30 minutes by default.
+- **Schedule:** every 30 minutes, and after you log in. This can't be changed.
 - **Archive:** old versions and deleted files are kept 30 days by default.
 - **Deletion limit:** deletions are held if a run would remove at least 100 files and more than 5% of the set, or more than 2,000 files at any size. Files inside `.git` do not count.
 - **Secrets and Git history:** both are backed up by default, per set. Turning off Secrets means `.env` files and keys are not backed up.
@@ -191,4 +193,4 @@ Things to know, from rclone's guide at <https://rclone.org/onedrive/>:
 
 Open the Activity view for the log of each run. Raw logs are in `~/Library/Logs/Mirror/`, kept 30 days. They list file paths and counts, never file contents.
 
-To get files back, see the [recovery guide](recovery.md).
+To get files back, open Archive in the sidebar, or see the [recovery guide](recovery.md).

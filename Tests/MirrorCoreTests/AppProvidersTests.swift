@@ -45,6 +45,15 @@ private func utcStamp(_ s: String) -> Date { ISO8601DateFormatter().date(from: s
     #expect(bodyText(t).contains("/Users/me/Restored/a.txt"))
 }
 
+@Test func browsingAsksForThePathAndReturnsTheItems() async throws {
+    let t = FakeTransport()
+    t.response = json(#"{"ok":true,"items":[{"name":"p","isFolder":true,"size":0}]}"#)
+    let items = try await AgentArchiveClient(transport: t).setList(set: UUID(), destination: UUID(), path: "Sets/Docs")
+    #expect(t.calls[0].subcommand == "set-list")
+    #expect(bodyText(t).contains("Sets/Docs"))
+    #expect(items == [BackupItem(name: "p", isFolder: true, size: 0)])
+}
+
 @Test func dryRunReturnsTheFiles() async throws {
     let t = FakeTransport()
     t.response = json(#"{"ok":true,"files":["a","b/c"],"gitFiles":7}"#)
@@ -147,6 +156,7 @@ private final class FakeDryRunClient: ArchiveAgentCalling, @unchecked Sendable {
     init(files: [UUID: [String]]) { self.files = files }
     func archiveList(set: UUID, destination: UUID) async throws -> [ArchiveEntry] { [] }
     func archiveRestore(set: UUID, destination: UUID, path: String, to: URL) async throws {}
+    func setList(set: UUID, destination: UUID, path: String) async throws -> [BackupItem] { [] }
     func dryRunDeletions(set: UUID, destination: UUID) async throws -> HeldFiles {
         asked.append(destination); return HeldFiles(files: files[destination] ?? [], gitCount: 0)
     }

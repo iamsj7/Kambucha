@@ -27,7 +27,7 @@ private func roundTrip<T: Codable & Equatable>(_ value: T) throws -> T {
     #expect(AgentWire.archiveList == "archive-list")
     #expect(AgentWire.archiveRestore == "archive-restore")
     #expect(AgentWire.dryRunDeletions == "dry-run-deletions")
-    #expect(AgentWire.subcommands == ["archive-list", "archive-restore", "dry-run-deletions", "set-names"])
+    #expect(AgentWire.subcommands == ["archive-list", "archive-restore", "dry-run-deletions", "set-names", "set-list"])
 }
 
 @Test func theNonGitCountIgnoresGitFolders() {

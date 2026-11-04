@@ -17,6 +17,10 @@ enum DebugViewSnapshots {
                     e("4", "assets/logo.png", 3.5, 220_000), e("5", "README.md", 3.5, 2_900)]
         }
         func restore(entry: ArchiveEntry, set: BackupSet, destination: Destination, to: URL) async throws {}
+        func browse(path: String, set: BackupSet, destination: Destination) async throws -> [BackupItem] {
+            [BackupItem(name: "client-site", isFolder: true, size: 0), BackupItem(name: "mobile-app", isFolder: true, size: 0),
+             BackupItem(name: "notes.md", isFolder: false, size: 4_100), BackupItem(name: "README.md", isFolder: false, size: 2_900)]
+        }
     }
 
     @MainActor private final class FakeSystem: OnboardingSystem {
@@ -65,6 +69,14 @@ enum DebugViewSnapshots {
         settle(0.5)
         write(ArchiveView(model: archive, agent: AgentClient(executable: URL(fileURLWithPath: "/dev/null"))),
               size: CGSize(width: 720, height: 460), name: "archive", to: dir)
+
+        // The latest backup, inside a folder
+        let latest = ArchiveModel(provider: FakeArchive(), store: store)
+        latest.loadConfig()
+        latest.mode = .latest
+        Task { await latest.open("client-site") }
+        settle(0.5)
+        write(ArchiveView(model: latest, agent: nil), size: CGSize(width: 720, height: 460), name: "archive-latest", to: dir)
 
         // Archive, empty and failed states
         let empty = ArchiveModel(provider: EmptyArchive(), store: store); empty.loadConfig()
@@ -124,6 +136,7 @@ enum DebugViewSnapshots {
     private struct EmptyArchive: ArchiveProviding {
         func list(set: BackupSet, destination: Destination) async throws -> [ArchiveEntry] { [] }
         func restore(entry: ArchiveEntry, set: BackupSet, destination: Destination, to: URL) async throws {}
+        func browse(path: String, set: BackupSet, destination: Destination) async throws -> [BackupItem] { [] }
     }
 }
 

@@ -38,6 +38,7 @@ public protocol ArchiveAgentCalling: Sendable {
     /// `path` is the entry's path below the backup root (`Archive/<set>/<stamp>/...`). The agent pins the backup root
     /// itself, or the crypt endpoint for an encrypted destination.
     func archiveRestore(set: UUID, destination: UUID, path: String, to: URL) async throws
+    func setList(set: UUID, destination: UUID, path: String) async throws -> [BackupItem]
     func dryRunDeletions(set: UUID, destination: UUID) async throws -> HeldFiles
 }
 
@@ -73,6 +74,12 @@ public struct AgentArchiveClient: ArchiveAgentCalling {
         _ = try await ask(AgentWire.archiveRestore, AgentWire.RestoreRequest(set: set, destination: destination, path: path, to: to.path))
     }
 
+    public func setList(set: UUID, destination: UUID, path: String) async throws -> [BackupItem] {
+        let answer = try await ask(AgentWire.setList, AgentWire.BrowseRequest(set: set, destination: destination, path: path))
+        guard let items = answer.items else { throw AgentClientError.noResponse(exitCode: 0) }
+        return items
+    }
+
     public func dryRunDeletions(set: UUID, destination: UUID) async throws -> HeldFiles {
         let answer = try await ask(AgentWire.dryRunDeletions, AgentWire.PairRequest(set: set, destination: destination))
         guard let files = answer.files else { throw AgentClientError.noResponse(exitCode: 0) }
@@ -94,6 +101,10 @@ public struct AgentArchiveProvider: ArchiveProviding {
 
     public func list(set: BackupSet, destination: Destination) async throws -> [ArchiveEntry] {
         try await client.archiveList(set: set.id, destination: destination.id)
+    }
+
+    public func browse(path: String, set: BackupSet, destination: Destination) async throws -> [BackupItem] {
+        try await client.setList(set: set.id, destination: destination.id, path: path)
     }
 
     public func restore(entry: ArchiveEntry, set: BackupSet, destination: Destination, to: URL) async throws {
