@@ -27,11 +27,12 @@ public protocol RemoteFileAccessing: Sendable {
 public struct RcloneRemoteFiles: RemoteFileAccessing {
     private static let directoryNotFound: Int32 = 3, fileNotFound: Int32 = 4
     private let binary: URL
-    public init(binary: URL) { self.binary = binary }
+    private let helper: any HelperValidating
+    public init(binary: URL, helper: any HelperValidating) { self.binary = binary; self.helper = helper }
 
     public func read(_ path: String, context: RcloneContext) async throws -> Data? {
         let (code, output) = try await RcloneTool.execute(["cat", path, "--config", context.configPath],
-                                                          binary: binary, context: context, capture: true)
+                                                          binary: binary, helper: helper, context: context, capture: true)
         if code == Self.directoryNotFound || code == Self.fileNotFound { return nil }
         guard code == 0 else { throw RemoteFileError.failed(exitCode: code) }
         return output
@@ -40,13 +41,13 @@ public struct RcloneRemoteFiles: RemoteFileAccessing {
     public func write(_ data: Data, to path: String, context: RcloneContext) async throws {
         guard data.count < RcloneTool.maxStdin else { throw RemoteFileError.tooLarge }
         let (code, _) = try await RcloneTool.execute(["rcat", path, "--config", context.configPath],
-                                                     binary: binary, context: context, stdin: data, capture: false)
+                                                     binary: binary, helper: helper, context: context, stdin: data, capture: false)
         guard code == 0 else { throw RemoteFileError.failed(exitCode: code) }
     }
 
     public func list(_ path: String, context: RcloneContext) async throws -> [String]? {
         let (code, output) = try await RcloneTool.execute(["lsf", path, "--max-depth", "1", "--config", context.configPath],
-                                                          binary: binary, context: context, capture: true)
+                                                          binary: binary, helper: helper, context: context, capture: true)
         if code == Self.directoryNotFound { return nil }
         guard code == 0 else { throw RemoteFileError.failed(exitCode: code) }
         return String(decoding: output, as: UTF8.self).split(whereSeparator: \.isNewline).map(String.init)

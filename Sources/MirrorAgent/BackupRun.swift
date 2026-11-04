@@ -1,5 +1,6 @@
 import Foundation
 import MirrorCore
+import MirrorSecrets
 import os
 
 /// Builds the real graph and hands over to `RunCoordinator`. All run logic lives there, so the engine
@@ -17,7 +18,8 @@ enum BackupRun {
         }
         // Never derive the executable path from argv: resolve it from the enclosing bundle.
         let binary = Bundle.main.bundleURL.appendingPathComponent("Contents/Helpers/rclone")
-        let rclone = RcloneRunner(binary: binary)
+        let trust = SignedCodeTrust()
+        let rclone = RcloneRunner(binary: binary, helper: trust)
         let secrets = KeychainStore()
         let work = RcloneSession.defaultWorkDir
         let coordinator = RunCoordinator(
@@ -26,8 +28,8 @@ enum BackupRun {
             feed: FSEventsFeed(), verifier: Verifier(rclone: rclone, auditor: ICloudAuditor()),
             guard: PathGuard(iCloudDrive: places.iCloudDrive, backupRoot: places.backupRoot),
             detector: StackDetector(presets: presets), filters: FilterBuilder(presets: presets), clock: { Date() },
-            sessions: { RcloneSession(destination: $0, secrets: secrets, binary: binary, workDir: work) },
-            remote: RcloneRemoteFiles(binary: binary),
+            sessions: { RcloneSession(destination: $0, secrets: secrets, binary: binary, helper: trust, workDir: work) },
+            remote: RcloneRemoteFiles(binary: binary, helper: trust),
             paths: RunPaths(support: places.support, logs: places.logs, work: work))
 
         if command.fullSpeed { AgentPriority.raiseToNormal() }

@@ -70,7 +70,7 @@ private func shell(_ line: String, home: URL, conf: URL) throws -> Int32 {
         // Back up the way Mirror does: env-defined crypt.
         try "hello restore".write(to: src.appendingPathComponent("note.txt"), atomically: true, encoding: .utf8)
         let env = try RcloneCrypt.environment(remote: "mirrorup", over: cloud.appendingPathComponent("Mac Backup").path, passphrase: k.passphrase, salt: k.salt,
-                                              filenameEncoding: k.filenameEncoding, binary: vendoredRclone)
+                                              filenameEncoding: k.filenameEncoding, binary: vendoredRclone, helper: AnyHelper())
         #expect(try realRclone(["copy", src.path, "mirrorup:Sets/s", "--config", "/dev/null"], env: env).code == 0)
 
         // Restore by the document: the cloud sign-in step is the only one that can't run here,

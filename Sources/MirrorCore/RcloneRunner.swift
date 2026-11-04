@@ -30,6 +30,17 @@ public extension RcloneRunning {
     }
 }
 
+/// Proves `url` is our signed rclone. Run immediately before any spawn that receives secrets, so a
+/// swapped binary is caught as late as possible. The instant between check and exec stays open.
+public protocol HelperValidating: Sendable {
+    func verifyHelper(at url: URL) throws
+}
+
+public enum RcloneRunnerError: Error, Equatable {
+    /// The context holds secrets and this runner has nothing to check the binary with.
+    case helperNotChecked
+}
+
 /// Runs the bundled rclone. `binary` is an absolute path chosen by the caller (the app derives it
 /// from `Bundle.main.bundleURL`); nothing here reads it from argv or PATH.
 public struct RcloneRunner: RcloneRunning {
@@ -38,11 +49,15 @@ public struct RcloneRunner: RcloneRunning {
     let killGrace: TimeInterval
     /// Called with each live stats record while rclone runs (about every 2 seconds). Off the main thread.
     let onStats: (@Sendable (RcloneStats) -> Void)?
-    public init(binary: URL, onStats: (@Sendable (RcloneStats) -> Void)? = nil) {
-        self.init(binary: binary, killGrace: 5, onStats: onStats)
+    private let helper: (any HelperValidating)?
+    /// `helper` may be nil only for runs with nothing secret, which is any iCloud run. A context with
+    /// a config or environment is refused without one.
+    public init(binary: URL, helper: (any HelperValidating)? = nil, onStats: (@Sendable (RcloneStats) -> Void)? = nil) {
+        self.init(binary: binary, killGrace: 5, helper: helper, onStats: onStats)
     }
-    init(binary: URL, killGrace: TimeInterval, onStats: (@Sendable (RcloneStats) -> Void)? = nil) {
-        self.binary = binary; self.killGrace = killGrace; self.onStats = onStats
+    init(binary: URL, killGrace: TimeInterval, helper: (any HelperValidating)? = nil,
+         onStats: (@Sendable (RcloneStats) -> Void)? = nil) {
+        self.binary = binary; self.killGrace = killGrace; self.helper = helper; self.onStats = onStats
     }
 
     public func sync(_ r: SyncRequest) async throws -> RcloneResult {
@@ -110,6 +125,9 @@ public struct RcloneRunner: RcloneRunning {
     }
 
     private func run(_ args: [String], context: RcloneContext, logFile: URL, isCheck: Bool) async throws -> RcloneResult {
+        if let helper { try helper.verifyHelper(at: binary) }
+        else if !context.environment.isEmpty || context.configPath != "/dev/null" { throw RcloneRunnerError.helperNotChecked }
+
         // The log file is per run; a leftover would be parsed as this run's output.
         try? FileManager.default.removeItem(at: logFile)
 

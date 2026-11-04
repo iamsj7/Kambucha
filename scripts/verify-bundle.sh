@@ -17,6 +17,16 @@ done < <(find "$app/Contents" -type f)
 info="$(codesign -dvv "$app" 2>&1)"
 grep -q '^Authority=Apple Development: Shaik Jaleel' <<<"$info" || fail "signing authority"
 
+# The requirements the agent pins (SignedCodeTrust). Team ID is the certificate's OU, not the code in its name.
+pin='anchor apple generic and certificate leaf[subject.OU] = "ABCDE12345"'
+codesign --verify --strict -R="identifier \"com.shaikjaleel.mirror\" and $pin" "$app" || fail "app doesn't meet the caller requirement"
+codesign --verify --strict -R="identifier \"com.shaikjaleel.mirror.rclone\" and $pin" "$app/Contents/Helpers/rclone" || fail "rclone doesn't meet the helper requirement"
+
+# Keychain rule: only MirrorAgent may touch it.
+symbols="$(nm -u "$app/Contents/MacOS/Mirror")" || fail "nm failed on Mirror"
+[[ -n "$symbols" ]] || fail "nm found no symbols in Mirror"
+if grep -qE '_SecItem|_SecKeychain' <<<"$symbols"; then fail "Mirror references the Keychain"; fi
+
 # Privileged binaries must not ship proof modes. Opt out only for a --proofs build.
 if (( ! proofs )); then
   for b in MirrorAgent Mirror; do

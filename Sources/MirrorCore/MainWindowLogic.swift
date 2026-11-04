@@ -205,6 +205,7 @@ public enum SetupFailureText {
         case .kitDoesNotMatchDestination: "That Recovery Kit is for a different destination."
         case .kitDoesNotOpenBackup: "That Recovery Kit does not open this backup."
         case .couldNotVerifyKit: "Mirror could not check that Recovery Kit against the backup. Check the connection and try again."
+        case .kitUnproven: "There is nothing in this backup yet to prove that Recovery Kit against."
         case .signInFailed(let code): "Sign-in failed (code \(code))."
         }
     }

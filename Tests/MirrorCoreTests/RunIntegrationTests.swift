@@ -34,7 +34,7 @@ private struct NoSession: RunSession {
 }
 
 @Suite struct RemoteFilesIntegrationTests {
-    private let files = RcloneRemoteFiles(binary: binary)
+    private let files = RcloneRemoteFiles(binary: binary, helper: AnyHelper())
 
     @Test func readWriteAndListThroughRclone() async throws {
         let dir = try tempDir("files"); defer { try? FileManager.default.removeItem(at: dir) }
@@ -61,7 +61,7 @@ private struct NoSession: RunSession {
     @Test func encryptedMarkerNeverAppearsAsAPlainFile() async throws {
         let dir = try tempDir("crypt"); defer { try? FileManager.default.removeItem(at: dir) }
         let env = try RcloneCrypt.environment(remote: "mirrorcrypttest", over: dir.path, passphrase: "correct horse",
-                                              salt: "battery staple", filenameEncoding: "base32", binary: binary)
+                                              salt: "battery staple", filenameEncoding: "base32", binary: binary, helper: AnyHelper())
         let context = RcloneContext(configPath: "/dev/null", environment: env)
         try await files.write(Data("{\"sets\":{}}".utf8), to: "mirrorcrypttest:.mirror-root", context: context)
         #expect(try await files.read("mirrorcrypttest:.mirror-root", context: context) == Data("{\"sets\":{}}".utf8))
@@ -113,7 +113,7 @@ private struct NoSession: RunSession {
                                    verifier: Verifier(rclone: rclone, auditor: AllUploaded()),
                                    guard: PathGuard(iCloudDrive: backupRoot.deletingLastPathComponent(), backupRoot: backupRoot),
                                    detector: StackDetector(presets: []), filters: FilterBuilder(presets: []), clock: { Date() },
-                                   sessions: { _ in NoSession() }, remote: RcloneRemoteFiles(binary: binary),
+                                   sessions: { _ in NoSession() }, remote: RcloneRemoteFiles(binary: binary, helper: AnyHelper()),
                                    paths: RunPaths(support: support, logs: root.appendingPathComponent("logs"),
                                                    work: root.appendingPathComponent("work")))
             let before = Set(try records.recent(limit: 1000).map(\.id))

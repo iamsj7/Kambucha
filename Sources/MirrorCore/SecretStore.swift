@@ -1,11 +1,11 @@
 import Foundation
-import LocalAuthentication
 import Security
 
 /// Only the `MirrorAgent` executable ever touches a real store. The Keychain item's creator and
-/// reader are then the same signed binary, so no access list or prompt is involved. Mirror.app never
-/// calls this: it goes through `AgentClient`, which passes secrets over the agent's stdin and stdout.
-/// Gate 7 proves this, including after a rebuild with the same signing identity.
+/// reader are then the same signed binary, so no access list or prompt is involved. `KeychainStore`
+/// lives in `MirrorSecrets`, which only the agent links. Mirror.app goes through `AgentClient`, which
+/// passes secrets over the agent's stdin and stdout, and `verify-bundle.sh` checks its binary has no
+/// `SecItem` references. Gate 7 proves this, including after a rebuild with the same signing identity.
 public protocol SecretStoring: Sendable {
     func read(_ key: String) throws -> String?
     func write(_ value: String, key: String) throws
@@ -16,64 +16,6 @@ public protocol SecretStoring: Sendable {
 public enum SecretStoreError: Error, Equatable, Codable, Sendable {
     case keychain(status: Int32)
     case notText
-}
-
-/// The login Keychain, used from `MirrorAgent` only. Items are never synchronizable, so they stay on
-/// this Mac.
-///
-/// `kSecUseKeychain` isn't set: it needs a `SecKeychainRef`, and the SDK no longer declares any way
-/// to get one. Staying off the data-protection Keychain sends items to the default file Keychain,
-/// which is the login Keychain, and a test confirms that.
-public struct KeychainStore: SecretStoring {
-    private let service: String
-    public init(service: String = "com.shaikjaleel.mirror") { self.service = service }
-
-    /// Asks for no interaction: the agent has nobody to answer a dialog, and a secret must never fall
-    /// back to anywhere else. This is a backstop, unproven on the file Keychain until Gate 7. What
-    /// keeps prompts away is that the agent is the only reader.
-    static func baseQuery(service: String, key: String) -> [String: Any] {
-        let noInteraction = LAContext()
-        noInteraction.interactionNotAllowed = true
-        return [kSecClass as String: kSecClassGenericPassword,
-                kSecAttrService as String: service,
-                kSecAttrAccount as String: key,
-                kSecAttrSynchronizable as String: false,
-                kSecUseDataProtectionKeychain as String: false,
-                kSecUseAuthenticationContext as String: noInteraction]
-    }
-
-    public func read(_ key: String) throws -> String? {
-        var query = Self.baseQuery(service: service, key: key)
-        query[kSecReturnData as String] = true
-        query[kSecMatchLimit as String] = kSecMatchLimitOne
-        var result: CFTypeRef?
-        let status = SecItemCopyMatching(query as CFDictionary, &result)
-        if status == errSecItemNotFound { return nil }
-        guard status == errSecSuccess else { throw SecretStoreError.keychain(status: status) }
-        guard let data = result as? Data, let text = String(data: data, encoding: .utf8) else {
-            throw SecretStoreError.notText
-        }
-        return text
-    }
-
-    public func write(_ value: String, key: String) throws {
-        let query = Self.baseQuery(service: service, key: key)
-        let data = Data(value.utf8)
-        let updated = SecItemUpdate(query as CFDictionary, [kSecValueData as String: data] as CFDictionary)
-        if updated == errSecSuccess { return }
-        guard updated == errSecItemNotFound else { throw SecretStoreError.keychain(status: updated) }
-        var add = query
-        add[kSecValueData as String] = data
-        let added = SecItemAdd(add as CFDictionary, nil)
-        guard added == errSecSuccess else { throw SecretStoreError.keychain(status: added) }
-    }
-
-    public func delete(_ key: String) throws {
-        let status = SecItemDelete(Self.baseQuery(service: service, key: key) as CFDictionary)
-        guard status == errSecSuccess || status == errSecItemNotFound else {
-            throw SecretStoreError.keychain(status: status)
-        }
-    }
 }
 
 /// The two crypt keys of one destination. Losing them loses the backup, so they are created once.
@@ -106,6 +48,13 @@ public struct VaultSecrets: Codable, Equatable, Sendable, CustomStringConvertibl
 public enum SecretKeys {
     public static func vault(_ destination: UUID) -> String { "vault.\(destination.uuidString)" }
     public static func signIn(_ destination: UUID) -> String { "signin.\(destination.uuidString)" }
+    /// A sign-in kept from a restore that couldn't prove its kit, until the owner answers. Apart from
+    /// `signIn` on purpose: there it would pass as a sign-in that survived.
+    public static func heldSignIn(_ destination: UUID) -> String { "heldsignin.\(destination.uuidString)" }
+    /// Waives the owner check for the one reveal at creation. Written with a new vault and spent by
+    /// that reveal. Its absence means ask, so losing it can only ever cost a prompt.
+    public static func firstReveal(_ destination: UUID) -> String { "firstreveal.\(destination.uuidString)" }
+    public static let firstRevealPending = "pending"
 }
 
 extension SecretStoring {
@@ -136,5 +85,15 @@ extension SecretStoring {
 
     func saveSignIn(_ options: [String: String], for destination: Destination) throws {
         try write(String(decoding: try JSONEncoder().encode(options), as: UTF8.self), key: SecretKeys.signIn(destination.id))
+    }
+
+    /// Nil also for an item that won't decode: it's only a convenience, and signing in again replaces it.
+    func heldSignIn(for destination: Destination) throws -> [String: String]? {
+        guard let json = try read(SecretKeys.heldSignIn(destination.id)) else { return nil }
+        return try? JSONDecoder().decode([String: String].self, from: Data(json.utf8))
+    }
+
+    func saveHeldSignIn(_ options: [String: String], for destination: Destination) throws {
+        try write(String(decoding: try JSONEncoder().encode(options), as: UTF8.self), key: SecretKeys.heldSignIn(destination.id))
     }
 }
