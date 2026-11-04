@@ -2,8 +2,10 @@ import Testing
 import Foundation
 @testable import MirrorCore
 
+private let testPassphrase = String(repeating: "ab", count: 32), testSalt = String(repeating: "cd", count: 32)
+
 private func kit(_ kind: DestinationKind = .googleDrive, client: Bool = true) -> RecoveryKit {
-    RecoveryKit(kind: kind, rootPath: "Mac Backup", passphrase: "test-passphrase-not-real", salt: "test-salt-not-real",
+    RecoveryKit(kind: kind, rootPath: "Mac Backup", passphrase: testPassphrase, salt: testSalt,
                 filenameEncoding: kind == .oneDrive ? "base32768" : "base32", rcloneVersion: "v1.75.2",
                 clientID: client ? "id-not-real.apps.example" : nil, clientSecret: client ? "secret-not-real" : nil)
 }
@@ -43,7 +45,7 @@ private func shell(_ line: String, home: URL, conf: URL) throws -> Int32 {
 
     @Test func kitHasEverythingRecoveryNeeds() {
         let t = kit().text()
-        for needed in ["googleDrive", "Mac Backup", "test-passphrase-not-real", "test-salt-not-real",
+        for needed in ["googleDrive", "Mac Backup", testPassphrase, testSalt,
                        "standard", "base32", "v1.75.2", "id-not-real.apps.example", "secret-not-real",
                        "filename_encryption=standard", "directory_name_encryption=true", "filename_encoding=base32",
                        "--obscure", "scope=drive.file", "rclone copy"] {
@@ -69,7 +71,7 @@ private func shell(_ line: String, home: URL, conf: URL) throws -> Int32 {
         try "hello restore".write(to: src.appendingPathComponent("note.txt"), atomically: true, encoding: .utf8)
         let env = try RcloneCrypt.environment(remote: "mirrorup", over: cloud.appendingPathComponent("Mac Backup").path, passphrase: k.passphrase, salt: k.salt,
                                               filenameEncoding: k.filenameEncoding, binary: vendoredRclone)
-        #expect(try realRclone(["copy", src.path, "mirrorup:Mac Backup/Sets/s", "--config", "/dev/null"], env: env).code == 0)
+        #expect(try realRclone(["copy", src.path, "mirrorup:Sets/s", "--config", "/dev/null"], env: env).code == 0)
 
         // Restore by the document: the cloud sign-in step is the only one that can't run here,
         // so a local alias stands in under the same remote name.
@@ -91,11 +93,11 @@ private func shell(_ line: String, home: URL, conf: URL) throws -> Int32 {
         let cases: [(String, RecoveryKitError)] = [
             ("nothing here", .notARecoveryKit),
             ("", .notARecoveryKit),
-            (good.replacingOccurrences(of: "Passphrase: test-passphrase-not-real\n", with: ""), .missingField("Passphrase")),
-            (good.replacingOccurrences(of: "Salt: test-salt-not-real", with: "Salt:   "), .missingField("Salt")),
-            (good.replacingOccurrences(of: "Destination kind: googleDrive", with: "Destination kind: test-passphrase-not-real"), .unknownKind),
-            (good.replacingOccurrences(of: "Salt: test-salt-not-real", with: "Salt: a\nSalt: b"), .duplicateField("Salt")),
-            (good.replacingOccurrences(of: "Filename encoding: base32", with: "Filename encoding: test-salt-not-real"), .unsupportedEncryption),
+            (good.replacingOccurrences(of: "Passphrase: \(testPassphrase)\n", with: ""), .missingField("Passphrase")),
+            (good.replacingOccurrences(of: "Salt: \(testSalt)", with: "Salt:   "), .missingField("Salt")),
+            (good.replacingOccurrences(of: "Destination kind: googleDrive", with: "Destination kind: \(testPassphrase)"), .unknownKind),
+            (good.replacingOccurrences(of: "Salt: \(testSalt)", with: "Salt: \(testSalt)\nSalt: \(testSalt)"), .duplicateField("Salt")),
+            (good.replacingOccurrences(of: "Filename encoding: base32", with: "Filename encoding: \(testSalt)"), .unsupportedEncryption),
             (good.replacingOccurrences(of: "Filename encryption: standard", with: "Filename encryption: off"), .unsupportedEncryption),
             (good.replacingOccurrences(of: "Directory name encryption: true", with: "Directory name encryption: false"), .unsupportedEncryption),
         ]
@@ -103,15 +105,64 @@ private func shell(_ line: String, home: URL, conf: URL) throws -> Int32 {
             do { _ = try RecoveryKit(parsing: text); Issue.record("should refuse") }
             catch {
                 #expect(error as? RecoveryKitError == expected)
-                #expect(!"\(error)".contains("not-real"))
+                #expect(!"\(error)".contains(testPassphrase) && !"\(error)".contains(testSalt))
             }
         }
+    }
+
+    /// A mail client wrapping the line must not leave a shorter passphrase that parses.
+    @Test func wrappedSecretCannotSilentlyShorten() {
+        let good = kit().text()
+        let cut = testPassphrase.index(testPassphrase.startIndex, offsetBy: 40)
+        let wrapped = good.replacingOccurrences(of: testPassphrase, with: testPassphrase[..<cut] + "\n" + testPassphrase[cut...])
+        // The first occurrence is the field; the same text in the restore steps sits outside the markers.
+        #expect(throws: RecoveryKitError.malformedLine) { try RecoveryKit(parsing: wrapped) }
+
+        let wrappedClient = good.replacingOccurrences(of: "Client secret: secret-not-real", with: "Client secret: secret-\nnot-real")
+        #expect(throws: RecoveryKitError.malformedLine) { try RecoveryKit(parsing: wrappedClient) }
+    }
+
+    @Test func unknownFieldsAreRefused() {
+        let text = kit().text().replacingOccurrences(of: "Root path: Mac Backup", with: "Root path: Mac Backup\nnot-real: value")
+        #expect(throws: RecoveryKitError.malformedLine) { try RecoveryKit(parsing: text) }
+    }
+
+    @Test func secretsMustBeTheGeneratedFormat() {
+        let good = kit().text()
+        for bad in [String(testPassphrase.dropLast(2)), testPassphrase + "ab", testPassphrase.uppercased(),
+                    "zz" + testPassphrase.dropFirst(2)] {
+            let shortPass = good.replacingOccurrences(of: "Passphrase: \(testPassphrase)", with: "Passphrase: \(bad)")
+            #expect(throws: RecoveryKitError.malformedField("Passphrase")) { try RecoveryKit(parsing: shortPass) }
+            let shortSalt = good.replacingOccurrences(of: "Salt: \(testSalt)", with: "Salt: \(bad)")
+            #expect(throws: RecoveryKitError.malformedField("Salt")) { try RecoveryKit(parsing: shortSalt) }
+        }
+    }
+
+    @Test func googleKitNeedsClientDetails() {
+        let good = kit().text()
+        #expect(throws: RecoveryKitError.missingField("Client ID")) {
+            try RecoveryKit(parsing: good.replacingOccurrences(of: "Client ID: id-not-real.apps.example\n", with: ""))
+        }
+        #expect(throws: RecoveryKitError.missingField("Client secret")) {
+            try RecoveryKit(parsing: good.replacingOccurrences(of: "Client secret: secret-not-real\n", with: ""))
+        }
+    }
+
+    @Test func googleKitIsNotMadeWithoutClientDetails() throws {
+        let secrets = MemorySecrets()
+        let d = Destination(name: "G", kind: .googleDrive)
+        try secrets.saveVault(.generate(), for: d)
+        #expect(throws: RecoveryKitError.missingField("Client ID")) { try RecoveryKit.make(for: d, secrets: secrets, binary: vendoredRclone) }
+        try secrets.saveSignIn(["client_id": "id", "token": "{}"], for: d)
+        #expect(throws: RecoveryKitError.missingField("Client secret")) { try RecoveryKit.make(for: d, secrets: secrets, binary: vendoredRclone) }
+        try secrets.saveSignIn(["client_id": "id", "client_secret": "s", "token": "{}"], for: d)
+        #expect(try RecoveryKit.make(for: d, secrets: secrets, binary: vendoredRclone).clientSecret == "s")
     }
 
     @Test func descriptionHidesSecrets() {
         let k = kit()
         for text in [String(describing: k), String(reflecting: k), "\(k)"] {
-            #expect(!text.contains("test-passphrase") && !text.contains("test-salt") && !text.contains("secret-not-real"))
+            #expect(!text.contains(testPassphrase) && !text.contains(testSalt) && !text.contains("secret-not-real"))
         }
     }
 

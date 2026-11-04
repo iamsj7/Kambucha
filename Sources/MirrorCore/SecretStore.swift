@@ -1,6 +1,11 @@
 import Foundation
+import LocalAuthentication
 import Security
 
+/// Only the `MirrorAgent` executable ever touches a real store. The Keychain item's creator and
+/// reader are then the same signed binary, so no access list or prompt is involved. Mirror.app never
+/// calls this: it goes through `AgentClient`, which passes secrets over the agent's stdin and stdout.
+/// Gate 7 proves this, including after a rebuild with the same signing identity.
 public protocol SecretStoring: Sendable {
     func read(_ key: String) throws -> String?
     func write(_ value: String, key: String) throws
@@ -8,24 +13,33 @@ public protocol SecretStoring: Sendable {
 }
 
 /// Errors carry a status code only, never a key's value.
-public enum SecretStoreError: Error, Equatable {
+public enum SecretStoreError: Error, Equatable, Codable, Sendable {
     case keychain(status: Int32)
     case notText
 }
 
-/// The login Keychain. Items are never synchronizable, so they stay on this Mac.
+/// The login Keychain, used from `MirrorAgent` only. Items are never synchronizable, so they stay on
+/// this Mac.
+///
+/// `kSecUseKeychain` isn't set: it needs a `SecKeychainRef`, and the SDK no longer declares any way
+/// to get one. Staying off the data-protection Keychain sends items to the default file Keychain,
+/// which is the login Keychain, and a test confirms that.
 public struct KeychainStore: SecretStoring {
     private let service: String
     public init(service: String = "com.shaikjaleel.mirror") { self.service = service }
 
-    /// A locked or prompting Keychain fails rather than blocks: the agent has nobody to answer a
-    /// dialog, and a secret must never fall back to anywhere else.
+    /// Asks for no interaction: the agent has nobody to answer a dialog, and a secret must never fall
+    /// back to anywhere else. This is a backstop, unproven on the file Keychain until Gate 7. What
+    /// keeps prompts away is that the agent is the only reader.
     static func baseQuery(service: String, key: String) -> [String: Any] {
-        [kSecClass as String: kSecClassGenericPassword,
-         kSecAttrService as String: service,
-         kSecAttrAccount as String: key,
-         kSecAttrSynchronizable as String: false,
-         kSecUseAuthenticationUI as String: kSecUseAuthenticationUIFail]
+        let noInteraction = LAContext()
+        noInteraction.interactionNotAllowed = true
+        return [kSecClass as String: kSecClassGenericPassword,
+                kSecAttrService as String: service,
+                kSecAttrAccount as String: key,
+                kSecAttrSynchronizable as String: false,
+                kSecUseDataProtectionKeychain as String: false,
+                kSecUseAuthenticationContext as String: noInteraction]
     }
 
     public func read(_ key: String) throws -> String? {

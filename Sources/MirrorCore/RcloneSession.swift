@@ -1,8 +1,9 @@
 import Foundation
 
 /// Errors never carry a secret, a token or rclone's output, which can echo either.
-public enum RcloneSessionError: Error, Equatable {
+public enum RcloneSessionError: Error, Equatable, Codable, Sendable {
     case notSignedIn, invalidSignIn, encryptionKeysMissing, encryptionNotSupported, alreadyOpen
+    case plaintextIntoEncryptedRoot
     case invalidSecret, versionUnavailable
     case obscureFailed(exitCode: Int32)
 }
@@ -10,9 +11,15 @@ public enum RcloneSessionError: Error, Equatable {
 /// One run's access to a destination. Cloud kinds get a private config holding only the sign-in
 /// section, and crypt exists only in the returned environment. Call `close()` whatever happens.
 public final class RcloneSession {
-    /// Where per-run folders live unless a caller chooses otherwise.
+    /// Where backup runs keep their per-run folders. The agent wipes this between runs.
     public static var defaultWorkDir: URL {
         FileManager.default.temporaryDirectory.appendingPathComponent("Mirror", isDirectory: true)
+    }
+
+    /// Where in-app operations work: sign-in and the drill. Separate, because they can run while the
+    /// agent is wiping `defaultWorkDir`.
+    public static var interactiveWorkDir: URL {
+        FileManager.default.temporaryDirectory.appendingPathComponent("Mirror-Interactive", isDirectory: true)
     }
 
     private let destination: Destination
@@ -35,6 +42,8 @@ public final class RcloneSession {
     }
 
     /// Refuses, rather than runs without encryption, when an encrypted destination's keys are missing.
+    /// An encrypted destination's endpoint is the crypt root, whose `REMOTE` is the cloud's
+    /// `Mac Backup`, so paths join as `<endpoint>Sets/<name>`. An unencrypted one is `<remote>:Mac Backup`.
     public func open() throws -> (endpoint: String, context: RcloneContext) {
         guard runDir == nil else { throw RcloneSessionError.alreadyOpen }
         switch destination.kind {
@@ -44,23 +53,34 @@ public final class RcloneSession {
         case .googleDrive, .oneDrive:
             break
         }
-        guard let options = try secrets.signIn(for: destination) else { throw RcloneSessionError.notSignedIn }
-        let base = RcloneBackend.remoteName(destination)
-        let section = try RcloneBackend.section(for: destination, options: options)
-
         var environment: [String: String] = [:]
-        var outer = base
+        var endpoint = "\(RcloneBackend.remoteName(destination)):\(MirrorPaths.rootFolderName)"
         if destination.encrypted {
             guard let root = encryptedRoot, let encoding = RcloneCrypt.filenameEncoding(for: destination.kind) else {
                 throw RcloneSessionError.encryptionNotSupported
             }
             guard let vault = try secrets.vault(for: destination) else { throw RcloneSessionError.encryptionKeysMissing }
-            outer = RcloneBackend.cryptName(destination)
-            environment = try RcloneCrypt.environment(remote: outer, over: root, passphrase: vault.passphrase,
+            let crypt = RcloneBackend.cryptName(destination)
+            environment = try RcloneCrypt.environment(remote: crypt, over: root, passphrase: vault.passphrase,
                                                       salt: vault.salt, filenameEncoding: encoding, binary: binary)
+            endpoint = "\(crypt):"
+        } else if try secrets.vault(for: destination) != nil {
+            // Keys exist, so this root holds ciphertext. Plain files must not land beside it.
+            throw RcloneSessionError.plaintextIntoEncryptedRoot
         }
+        return (endpoint, RcloneContext(configPath: try writeConfig().path, environment: environment))
+    }
 
-        // Written last, so nothing above can fail with a config on disk.
+    /// The sign-in alone, with no crypt, for a drill that must rely on the kit's keys and nothing else.
+    func openSignInOnly() throws -> RcloneContext {
+        guard runDir == nil else { throw RcloneSessionError.alreadyOpen }
+        return RcloneContext(configPath: try writeConfig().path, environment: [:])
+    }
+
+    /// Runs last in `open`, so nothing there can fail with a config on disk.
+    private func writeConfig() throws -> URL {
+        guard let options = try secrets.signIn(for: destination) else { throw RcloneSessionError.notSignedIn }
+        let section = try RcloneBackend.section(for: destination, options: options)
         let dir = try RcloneTool.makePrivateDirectory(in: workDir)
         let config = dir.appendingPathComponent("rclone.conf")
         do { try RcloneTool.writePrivateFile(section, to: config) } catch {
@@ -69,7 +89,7 @@ public final class RcloneSession {
         }
         runDir = dir
         openedWith = options
-        return ("\(outer):\(MirrorPaths.rootFolderName)", RcloneContext(configPath: config.path, environment: environment))
+        return config
     }
 
     /// Saves any token rclone refreshed, then deletes the config. The file goes even if saving fails.
@@ -87,19 +107,25 @@ public final class RcloneSession {
     }
 
     /// Clears per-run folders left by a crash. Run it before a run starts, never during one.
-    public static func wipeLeftovers(in workDir: URL) throws {
+    /// `olderThan` spares recent folders, for `interactiveWorkDir`, where one may be in use.
+    public static func wipeLeftovers(in workDir: URL, olderThan age: TimeInterval = 0) throws {
         let fm = FileManager.default
         guard fm.fileExists(atPath: workDir.path) else { return }
         for name in try fm.contentsOfDirectory(atPath: workDir.path) where name.hasPrefix(RcloneTool.runPrefix) {
-            try fm.removeItem(at: workDir.appendingPathComponent(name))
+            let folder = workDir.appendingPathComponent(name)
+            if age > 0, let changed = try fm.attributesOfItem(atPath: folder.path)[.modificationDate] as? Date,
+               Date().timeIntervalSince(changed) < age { continue }
+            try fm.removeItem(at: folder)
         }
     }
 
-    /// A damaged or missing file changes nothing: the Keychain's token is better than none.
+    /// A damaged or missing file changes nothing: the Keychain's token is better than none. Neither
+    /// does a stored value that moved on since `open`: a reconnect during the run is newer than this.
     private func saveRefreshedSignIn(from config: URL) throws {
         guard let text = try? String(contentsOf: config, encoding: .utf8),
               let found = RcloneBackend.parse(text, remote: RcloneBackend.remoteName(destination)),
-              RcloneBackend.hasUsableToken(found), found != openedWith else { return }
+              RcloneBackend.hasUsableToken(found), found != openedWith,
+              try secrets.signIn(for: destination) == openedWith else { return }
         try secrets.saveSignIn(found, for: destination)
     }
 }
@@ -195,7 +221,7 @@ enum RcloneCrypt {
 enum RcloneTool {
     static let runPrefix = "mirror-run-"
     /// Pipes hold at least this much, so input can be written before the child exists.
-    private static let maxStdin = 8192
+    static let maxStdin = 8192
 
     /// Through stdin, so the value is never in argv. `rclone obscure -` reads one line and turns
     /// empty input into a literal hyphen, so anything but one non-empty line is refused rather than
@@ -228,43 +254,60 @@ enum RcloneTool {
         let out = Pipe()
         process.standardOutput = out
         process.standardError = FileHandle.nullDevice
-        if let stdin {
-            // Filled before launch: a child that exits early can't raise SIGPIPE here.
-            let input = Pipe()
-            try input.fileHandleForWriting.write(contentsOf: stdin)
-            try input.fileHandleForWriting.close()
-            process.standardInput = input
-        } else {
-            process.standardInput = FileHandle.nullDevice
-        }
+        process.standardInput = try input(stdin)
         try process.run()
         let data = (try? out.fileHandleForReading.readToEnd()) ?? Data()
         process.waitUntilExit()
         return (process.terminationStatus, data)
     }
 
+    /// Filled before launch: a child that exits early can't raise SIGPIPE here.
+    private static func input(_ data: Data?) throws -> Any {
+        guard let data else { return FileHandle.nullDevice }
+        let pipe = Pipe()
+        try pipe.fileHandleForWriting.write(contentsOf: data)
+        try pipe.fileHandleForWriting.close()
+        return pipe
+    }
+
     /// Runs rclone with all output discarded, so nothing it prints can reach a log or an error.
-    /// Cancelling the task stops the child.
     static func run(_ args: [String], binary: URL, context: RcloneContext) async throws -> Int32 {
+        try await execute(args, binary: binary, context: context, capture: false).code
+    }
+
+    /// Runs a child with the minimal environment, and stderr discarded. Input must fit `maxStdin`.
+    /// Cancelling the task stops the child.
+    static func execute(_ args: [String], binary: URL, context: RcloneContext, stdin: Data? = nil,
+                        capture: Bool) async throws -> (code: Int32, output: Data) {
         let process = Process()
         process.executableURL = binary
         process.arguments = args
         process.environment = RcloneRunner.childEnvironment(context)
-        process.standardInput = FileHandle.nullDevice
-        process.standardOutput = FileHandle.nullDevice
+        process.standardInput = try input(stdin)
         process.standardError = FileHandle.nullDevice
+        let out = capture ? Pipe() : nil
+        process.standardOutput = out ?? FileHandle.nullDevice
+        let reader = Task.detached { () -> Data in (try? out?.fileHandleForReading.readToEnd()) ?? Data() }
         let child = CancellableChild(process)
-        let code = try await withTaskCancellationHandler {
-            try await withCheckedThrowingContinuation { (cont: CheckedContinuation<Int32, any Error>) in
-                process.terminationHandler = { cont.resume(returning: $0.terminationStatus) }
-                do { try child.start() } catch {
-                    process.terminationHandler = nil
-                    cont.resume(throwing: error)
+        let code: Int32
+        do {
+            code = try await withTaskCancellationHandler {
+                try await withCheckedThrowingContinuation { (cont: CheckedContinuation<Int32, any Error>) in
+                    process.terminationHandler = { cont.resume(returning: $0.terminationStatus) }
+                    do { try child.start() } catch {
+                        process.terminationHandler = nil
+                        try? out?.fileHandleForWriting.close()   // lets the reader finish
+                        cont.resume(throwing: error)
+                    }
                 }
-            }
-        } onCancel: { child.cancel() }
+            } onCancel: { child.cancel() }
+        } catch {
+            _ = await reader.value
+            throw error
+        }
+        let output = await reader.value
         if child.wasCancelled { throw CancellationError() }
-        return code
+        return (code, output)
     }
 
     /// A new 0700 folder inside `parent`, which is created private if it doesn't exist.

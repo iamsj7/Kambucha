@@ -1,9 +1,9 @@
 import Foundation
 
 /// Failures name a field at most. Pasted text is never repeated, because it holds the keys.
-public enum RecoveryKitError: Error, Equatable {
-    case notARecoveryKit, unknownKind, unsupportedEncryption
-    case missingField(String), duplicateField(String)
+public enum RecoveryKitError: Error, Equatable, Codable, Sendable {
+    case notARecoveryKit, unknownKind, unsupportedEncryption, malformedLine
+    case missingField(String), duplicateField(String), malformedField(String)
 }
 
 /// Everything needed to open an encrypted destination without Mirror. It is meant to leave the Mac
@@ -33,6 +33,10 @@ public struct RecoveryKit: Codable, Equatable, Sendable, CustomStringConvertible
         }
         guard let vault = try secrets.vault(for: destination) else { throw RcloneSessionError.encryptionKeysMissing }
         let signIn = try secrets.signIn(for: destination)
+        if destination.kind == .googleDrive {
+            guard signIn?["client_id"] != nil else { throw RecoveryKitError.missingField(Field.client) }
+            guard signIn?["client_secret"] != nil else { throw RecoveryKitError.missingField(Field.secret) }
+        }
         return RecoveryKit(kind: destination.kind, rootPath: MirrorPaths.rootFolderName, passphrase: vault.passphrase,
                            salt: vault.salt, filenameEncoding: encoding, rcloneVersion: try RcloneTool.version(binary: binary),
                            clientID: signIn?["client_id"], clientSecret: signIn?["client_secret"])
@@ -43,6 +47,7 @@ public struct RecoveryKit: Codable, Equatable, Sendable, CustomStringConvertible
         static let filenames = "Filename encryption", directories = "Directory name encryption"
         static let encoding = "Filename encoding", client = "Client ID", secret = "Client secret"
         static let version = "rclone version"
+        static let all: Set = [kind, root, passphrase, salt, filenames, directories, encoding, client, secret, version]
     }
     private static let begin = "----- BEGIN MIRROR RECOVERY KIT -----"
     private static let end = "----- END MIRROR RECOVERY KIT -----"
@@ -75,7 +80,7 @@ public struct RecoveryKit: Codable, Equatable, Sendable, CustomStringConvertible
     private func restoreSteps() -> String {
         let cloud = "mirror-cloud", restore = "mirror-restore"
         let target = Self.quoted("\(cloud):\(rootPath)")
-        let root = Self.quoted("\(restore):\(rootPath)/Sets")
+        let root = Self.quoted("\(restore):Sets")   // the crypt root is the cloud's root folder
         return """
             1. Install rclone from https://rclone.org/downloads/. This kit was made with \(rcloneVersion).
 
@@ -129,9 +134,12 @@ public struct RecoveryKit: Codable, Equatable, Sendable, CustomStringConvertible
         guard let first = lines.firstIndex(of: Self.begin),
               let last = lines[first...].firstIndex(of: Self.end) else { throw RecoveryKitError.notARecoveryKit }
 
+        // Strict on purpose: a wrapped line must fail here, not leave a shorter secret that parses.
         var fields: [String: String] = [:]
-        for line in lines[(first + 1)..<last] {
-            guard let colon = line.firstIndex(of: ":") else { continue }
+        for line in lines[(first + 1)..<last] where !line.isEmpty {
+            guard let colon = line.firstIndex(of: ":"), Field.all.contains(String(line[..<colon])) else {
+                throw RecoveryKitError.malformedLine
+            }
             let label = String(line[..<colon])
             let value = line[line.index(after: colon)...].trimmingCharacters(in: .whitespaces)
             if value.isEmpty { continue }
@@ -142,14 +150,25 @@ public struct RecoveryKit: Codable, Equatable, Sendable, CustomStringConvertible
             guard let value = fields[label] else { throw RecoveryKitError.missingField(label) }
             return value
         }
+        func key(_ label: String) throws -> String {
+            let value = try required(label)
+            guard value.utf8.count == 64, value.allSatisfy({ "0123456789abcdef".contains($0) }) else {
+                throw RecoveryKitError.malformedField(label)
+            }
+            return value
+        }
 
         guard let kind = DestinationKind(rawValue: try required(Field.kind)) else { throw RecoveryKitError.unknownKind }
         let encoding = try required(Field.encoding)
         guard try required(Field.filenames) == RcloneCrypt.filenameEncryption,
               try required(Field.directories) == RcloneCrypt.directoryNameEncryption,
               ["base32", "base32768"].contains(encoding) else { throw RecoveryKitError.unsupportedEncryption }
-        self.init(kind: kind, rootPath: try required(Field.root), passphrase: try required(Field.passphrase),
-                  salt: try required(Field.salt), filenameEncoding: encoding, rcloneVersion: try required(Field.version),
+        if kind == .googleDrive {   // drive.file: only this client can see the backup
+            _ = try required(Field.client)
+            _ = try required(Field.secret)
+        }
+        self.init(kind: kind, rootPath: try required(Field.root), passphrase: try key(Field.passphrase),
+                  salt: try key(Field.salt), filenameEncoding: encoding, rcloneVersion: try required(Field.version),
                   clientID: fields[Field.client], clientSecret: fields[Field.secret])
     }
 

@@ -44,6 +44,32 @@ import Security
         #expect(try b.read("k") == nil)
     }
 
+    /// `kSecUseKeychain` needs a `SecKeychainRef`, which the SDK no longer lets us get, so this proves
+    /// where the item really lands. `security` reads attributes only, of a throwaway item.
+    @Test func keychainItemLandsInTheLoginKeychain() throws {
+        let service = "com.shaikjaleel.mirror.test.\(UUID().uuidString)"
+        let store = KeychainStore(service: service)
+        defer { try? store.delete("k") }
+        try store.write("v", key: "k")
+        let p = Process()
+        p.executableURL = URL(fileURLWithPath: "/usr/bin/security")
+        p.arguments = ["find-generic-password", "-s", service, "-a", "k"]
+        let out = Pipe()
+        p.standardOutput = out
+        p.standardError = FileHandle.nullDevice
+        try p.run()
+        let text = String(decoding: out.fileHandleForReading.readDataToEndOfFile(), as: UTF8.self)
+        p.waitUntilExit()
+        #expect(p.terminationStatus == 0)
+        #expect(text.contains("login.keychain"))
+    }
+
+    @Test func keychainQueryStaysOffTheDataProtectionKeychain() {
+        let q = KeychainStore.baseQuery(service: "s", key: "k")
+        #expect(q[kSecUseDataProtectionKeychain as String] as? Bool == false)
+        #expect(q[kSecUseAuthenticationContext as String] != nil)
+    }
+
     @Test func keychainItemIsNotSynchronizable() throws {
         let service = "com.shaikjaleel.mirror.test.\(UUID().uuidString)"
         let store = KeychainStore(service: service)
@@ -53,6 +79,7 @@ import Security
         // Asking for a synchronizable item must find nothing.
         var q = KeychainStore.baseQuery(service: service, key: "k")
         q[kSecAttrSynchronizable as String] = true
+        q[kSecUseDataProtectionKeychain as String] = nil   // synchronizable items live only there
         #expect(SecItemCopyMatching(q as CFDictionary, nil) == errSecItemNotFound)
     }
 }

@@ -16,40 +16,59 @@ private struct StubRunner: RcloneRunning {
 
 private struct Rig {
     let tmp: TempDir
-    let cloud: URL
+    let storage: URL
     let source: URL
     let scratch: URL
     let kit: RecoveryKit
     let relative = "Sets/Docs/sub/note.txt"
+    let encryptedRoot = "base:Mac Backup"
     var original: URL { source.appendingPathComponent("sub/note.txt") }
-    let context = RcloneContext(configPath: "/dev/null", environment: [:])
+    let context: RcloneContext
+    var conf: URL { URL(fileURLWithPath: context.configPath) }
 
     init(kind: DestinationKind = .googleDrive) async throws {
         tmp = try TempDir()
-        cloud = try tmp.sub("cloud"); source = try tmp.sub("source"); scratch = try tmp.sub("scratch")
+        storage = try tmp.sub("storage"); source = try tmp.sub("source"); scratch = try tmp.sub("scratch")
+        let root = try tmp.sub("storage/Mac Backup")
         let v = VaultSecrets.generate()
         kit = RecoveryKit(kind: kind, rootPath: "Mac Backup", passphrase: v.passphrase, salt: v.salt,
                           filenameEncoding: kind == .oneDrive ? "base32768" : "base32", rcloneVersion: "v1.75.2",
-                          clientID: nil, clientSecret: nil)
+                          clientID: "client-id-not-real", clientSecret: "client-secret-not-real")
         let sub = try tmp.sub("source/sub")
         try "the original words".write(to: sub.appendingPathComponent("note.txt"), atomically: true, encoding: .utf8)
+
+        // A sign-in section as a session writes it, with a folder in place of the cloud.
+        let file = tmp.url.appendingPathComponent("rclone.conf")
+        try """
+            [base]
+            type = alias
+            remote = \(storage.path)
+            client_id = client-id-not-real
+            client_secret = client-secret-not-real
+
+            """.write(to: file, atomically: true, encoding: .utf8)
+        context = RcloneContext(configPath: file.path, environment: [:])
 
         // Written independently of the drill's own code: plain env keys and `rclone obscure`.
         let up = "RCLONE_CONFIG_UP_"
         let p = try realRclone(["obscure", "-"], stdin: v.passphrase).out.trimmingCharacters(in: .newlines)
         let s = try realRclone(["obscure", "-"], stdin: v.salt).out.trimmingCharacters(in: .newlines)
-        let env = [up + "TYPE": "crypt", up + "REMOTE": cloud.path, up + "FILENAME_ENCRYPTION": "standard",
+        let env = [up + "TYPE": "crypt", up + "REMOTE": root.path, up + "FILENAME_ENCRYPTION": "standard",
                    up + "DIRECTORY_NAME_ENCRYPTION": "true", up + "FILENAME_ENCODING": kit.filenameEncoding,
                    up + "PASSWORD": p, up + "PASSWORD2": s]
-        #expect(try realRclone(["copy", source.path, "up:Mac Backup/Sets/Docs", "--config", "/dev/null"], env: env).code == 0)
+        #expect(try realRclone(["copy", source.path, "up:Sets/Docs", "--config", "/dev/null"], env: env).code == 0)
     }
 
     func drill(_ runner: any RcloneRunning = RcloneRunner(binary: vendoredRclone), binary: URL = vendoredRclone) -> RestoreDrill {
         RestoreDrill(rclone: runner, binary: binary, workDir: scratch)
     }
-    func run(_ k: RecoveryKit? = nil, relative r: String? = nil) async throws -> Bool {
-        try await drill().run(kit: k ?? kit, encryptedRoot: cloud.path, context: context,
+    func run(_ k: RecoveryKit? = nil, relative r: String? = nil, root: String? = nil) async throws -> Bool {
+        try await drill().run(kit: k ?? kit, encryptedRoot: root ?? encryptedRoot, context: context,
                               relativePath: r ?? relative, original: original)
+    }
+    func run(with runner: any RcloneRunning, binary: URL = vendoredRclone) async throws -> Bool {
+        try await drill(runner, binary: binary).run(kit: kit, encryptedRoot: encryptedRoot, context: context,
+                                                    relativePath: relative, original: original)
     }
     var scratchIsEmpty: Bool { ((try? FileManager.default.contentsOfDirectory(atPath: scratch.path)) ?? ["?"]).isEmpty }
 }
@@ -98,8 +117,8 @@ private struct Rig {
 
     @Test func drillFailsWhenFileIsMissingFromBackup() async throws {
         let rig = try await Rig()
-        try FileManager.default.removeItem(at: rig.cloud)
-        try FileManager.default.createDirectory(at: rig.cloud, withIntermediateDirectories: true)
+        try FileManager.default.removeItem(at: rig.storage)
+        try FileManager.default.createDirectory(at: rig.storage, withIntermediateDirectories: true)
         #expect(try await rig.run() == false)
     }
 
@@ -107,15 +126,13 @@ private struct Rig {
     @Test func downloadComparisonStandsOnItsOwn() async throws {
         let rig = try await Rig()
         try "tampered".write(to: rig.original, atomically: true, encoding: .utf8)
-        let result = try await rig.drill(StubRunner()).run(kit: rig.kit, encryptedRoot: rig.cloud.path, context: rig.context,
-                                                           relativePath: rig.relative, original: rig.original)
+        let result = try await rig.run(with: StubRunner())
         #expect(result == false)
     }
 
     @Test func checkDifferencesFailTheDrill() async throws {
         let rig = try await Rig()
-        let result = try await rig.drill(StubRunner(differences: 1)).run(kit: rig.kit, encryptedRoot: rig.cloud.path, context: rig.context,
-                                                                         relativePath: rig.relative, original: rig.original)
+        let result = try await rig.run(with: StubRunner(differences: 1))
         #expect(result == false)
     }
 
@@ -125,8 +142,7 @@ private struct Rig {
         for (outcome, expected) in [(RcloneResult.Outcome.transient, RestoreDrillError.couldNotRun),
                                     (.authExpired, RestoreDrillError.signInExpired)] {
             await #expect(throws: expected) {
-                try await rig.drill(StubRunner(outcome: outcome)).run(kit: rig.kit, encryptedRoot: rig.cloud.path, context: rig.context,
-                                                                      relativePath: rig.relative, original: rig.original)
+                try await rig.run(with: StubRunner(outcome: outcome))
             }
         }
         #expect(rig.scratchIsEmpty)
@@ -142,14 +158,88 @@ private struct Rig {
             echo obscured-stand-in
             exit 0
             """)
-        _ = try await rig.drill(StubRunner(), binary: fake).run(kit: rig.kit, encryptedRoot: rig.cloud.path, context: rig.context,
-                                                                relativePath: rig.relative, original: rig.original)
+        _ = try await rig.run(with: StubRunner(), binary: fake)
         let args = try String(contentsOf: record, encoding: .utf8)
         #expect(!args.contains(rig.kit.passphrase) && !args.contains(rig.kit.salt))
-        #expect(args.contains("copyto\n") && args.contains("Mac Backup/" + rig.relative))
+        #expect(args.contains("copyto\n") && args.contains("mirrordrill:" + rig.relative + "\n"))
         let env = try String(contentsOfFile: record.path + ".env", encoding: .utf8)
         #expect(!env.contains(rig.kit.passphrase) && !env.contains(rig.kit.salt))   // obscured only
         #expect(env.contains("_TYPE=crypt"))
+    }
+
+    // MARK: - The kit's client details
+
+    private func withClient(_ rig: Rig, id: String?, secret: String?) -> RecoveryKit {
+        var k = rig.kit; k.clientID = id; k.clientSecret = secret
+        return k
+    }
+
+    /// The kit decrypts, but its client couldn't sign in: on another Mac it wouldn't open the backup.
+    @Test func drillFailsWithWrongClientDetails() async throws {
+        let rig = try await Rig()
+        #expect(try await rig.run(withClient(rig, id: "another-id", secret: rig.kit.clientSecret)) == false)
+        #expect(try await rig.run(withClient(rig, id: rig.kit.clientID, secret: "another-secret")) == false)
+    }
+
+    @Test func drillFailsWithMissingClientDetails() async throws {
+        let rig = try await Rig()
+        #expect(try await rig.run(withClient(rig, id: nil, secret: rig.kit.clientSecret)) == false)
+        #expect(try await rig.run(withClient(rig, id: rig.kit.clientID, secret: nil)) == false)
+    }
+
+    @Test func drillFailsWithoutASignInSectionToCompare() async throws {
+        let rig = try await Rig()
+        #expect(try await rig.run(root: "other:Mac Backup") == false)
+    }
+
+    @Test func drillFailsWhenKitRootIsNotTheEncryptedRoot() async throws {
+        let rig = try await Rig()
+        var k = rig.kit; k.rootPath = "Other Backup"
+        #expect(try await rig.run(k) == false)
+    }
+
+    // MARK: - Network and sign-in failures
+
+    private func fakeCloud(_ rig: Rig, lsf: String) throws -> URL {
+        try fakeRclone(in: rig.tmp.url, body: """
+            if [ "$1" = obscure ]; then cat >/dev/null; echo obscured-stand-in; exit 0; fi
+            if [ "$1" = lsf ]; then
+              while [ $# -gt 0 ]; do [ "$1" = --log-file ] && log="$2"; shift; done
+              \(lsf)
+            fi
+            exit 1
+            """)
+    }
+
+    /// Generic exit 1 is what most network failures give. It says nothing about the kit.
+    @Test func unreachableCloudThrows() async throws {
+        let rig = try await Rig()
+        let fake = try fakeCloud(rig, lsf: "exit 1")
+        await #expect(throws: RestoreDrillError.couldNotRun) { try await rig.run(with: StubRunner(), binary: fake) }
+        #expect(rig.scratchIsEmpty)
+    }
+
+    @Test func expiredSignInThrows() async throws {
+        let rig = try await Rig()
+        let fake = try fakeCloud(rig, lsf: #"echo '{"level":"error","msg":"oauth2: invalid_grant"}' > "$log"; exit 1"#)
+        await #expect(throws: RestoreDrillError.signInExpired) { try await rig.run(with: StubRunner(), binary: fake) }
+    }
+
+    /// The cloud drops out after the first look: the later failure must not read as a bad kit.
+    @Test func cloudLostMidDrillThrows() async throws {
+        let rig = try await Rig()
+        let count = rig.tmp.url.appendingPathComponent("count")
+        let fake = try fakeCloud(rig, lsf: "[ -f '\(count.path)' ] && exit 1; touch '\(count.path)'; exit 0")
+        await #expect(throws: RestoreDrillError.couldNotRun) {
+            try await rig.run(with: StubRunner(outcome: .permanent), binary: fake)
+        }
+    }
+
+    /// Cloud reachable, permanent failure: now it really is the kit or the backup.
+    @Test func reachableCloudWithPermanentFailureFails() async throws {
+        let rig = try await Rig()
+        let fake = try fakeCloud(rig, lsf: "exit 0")
+        #expect(try await rig.run(with: StubRunner(outcome: .permanent), binary: fake) == false)
     }
 
     @Test func pathsThatEscapeTheRootAreRefused() async throws {

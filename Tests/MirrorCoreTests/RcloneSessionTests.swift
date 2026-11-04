@@ -109,7 +109,7 @@ private func cryptName(_ endpoint: String) -> String {
         defer { try? s.close() }
         let (endpoint, context) = try s.open()
         let p = "RCLONE_CONFIG_\(cryptName(endpoint))_"
-        #expect(endpoint.hasSuffix(":Mac Backup"))
+        #expect(endpoint.hasSuffix(":") && !endpoint.contains("Mac Backup"))   // the crypt root
         #expect(context.environment[p + "TYPE"] == "crypt")
         #expect(context.environment[p + "FILENAME_ENCRYPTION"] == "standard")
         #expect(context.environment[p + "DIRECTORY_NAME_ENCRYPTION"] == "true")
@@ -148,6 +148,14 @@ private func cryptName(_ endpoint: String) -> String {
         #expect(s.encryptedRoot == nil)
         let config = try String(contentsOfFile: context.configPath, encoding: .utf8)
         #expect(config.contains("type = onedrive"))
+    }
+
+    /// Keys exist, so this root holds ciphertext. A flag flipped to false must not put plaintext there.
+    @Test func unencryptedOpenRefusedWhenVaultExists() throws {
+        let f = try Fixture()
+        let (s, _) = try f.session(.oneDrive, encrypted: false, vaulted: true)
+        #expect(throws: RcloneSessionError.plaintextIntoEncryptedRoot) { try s.open() }
+        #expect(f.runDirs.isEmpty)
     }
 
     @Test func iCloudNeedsNoConfigAtAll() throws {
@@ -316,6 +324,20 @@ private func cryptName(_ endpoint: String) -> String {
         }
     }
 
+    /// A reconnect during the run stored a newer sign-in. The run's older refresh must not replace it.
+    @Test func closeDoesNotOverwriteANewerReconnect() throws {
+        let f = try Fixture()
+        let (s, d) = try f.session(.googleDrive)
+        let (_, context) = try s.open()
+        let config = try String(contentsOfFile: context.configPath, encoding: .utf8)
+        try config.replacingOccurrences(of: fakeToken, with: newToken).write(toFile: context.configPath, atomically: true, encoding: .utf8)
+        let reconnected = ["client_id": "client-id-not-real", "token": #"{"access_token":"from-reconnect"}"#]
+        try f.secrets.saveSignIn(reconnected, for: d)
+        try s.close()
+        #expect(try f.secrets.signIn(for: d) == reconnected)
+        #expect(f.runDirs.isEmpty)
+    }
+
     @Test func closeSurvivesConfigAlreadyWiped() throws {
         let f = try Fixture()
         let (s, d) = try f.session(.googleDrive)
@@ -356,6 +378,22 @@ private func cryptName(_ endpoint: String) -> String {
         #expect(!FileManager.default.fileExists(atPath: leftover.path))
         #expect(FileManager.default.fileExists(atPath: unrelated.path))
         try RcloneSession.wipeLeftovers(in: f.work.appendingPathComponent("does-not-exist"))
+    }
+
+    @Test func wipeCanSpareRecentFolders() throws {
+        let f = try Fixture()
+        let old = f.work.appendingPathComponent("mirror-run-old"), recent = f.work.appendingPathComponent("mirror-run-recent")
+        for u in [old, recent] { try FileManager.default.createDirectory(at: u, withIntermediateDirectories: true) }
+        try FileManager.default.setAttributes([.modificationDate: Date(timeIntervalSinceNow: -7200)], ofItemAtPath: old.path)
+        try RcloneSession.wipeLeftovers(in: f.work, olderThan: 3600)
+        #expect(!FileManager.default.fileExists(atPath: old.path))
+        #expect(FileManager.default.fileExists(atPath: recent.path))
+    }
+
+    /// The agent wipes the run folder between backups, so anything interactive must live elsewhere.
+    @Test func interactiveWorkIsOutOfTheAgentWipesReach() {
+        let run = RcloneSession.defaultWorkDir.standardizedFileURL, app = RcloneSession.interactiveWorkDir.standardizedFileURL
+        #expect(!PathGuard.isSameOrInside(app, run) && !PathGuard.isSameOrInside(run, app))
     }
 
     // MARK: - Obscure
@@ -429,7 +467,7 @@ private func cryptName(_ endpoint: String) -> String {
 
         let name = cryptName(endpoint)
         let env = context.environment
-        let request = SyncRequest(source: src, destination: endpoint + "/Sets/t", backupDir: endpoint + "/Archive/t/1",
+        let request = SyncRequest(source: src, destination: endpoint + "Sets/t", backupDir: endpoint + "Archive/t/1",
                                   filterFile: filter, logFile: f.tmp.url.appendingPathComponent("up.log"), mode: .copyOnly,
                                   profile: .profile(for: Destination(name: "t", kind: .iCloudFolder)), context: context)
         let result = try await RcloneRunner(binary: vendoredRclone).sync(request)
@@ -452,21 +490,21 @@ private func cryptName(_ endpoint: String) -> String {
                 #expect(bytes.range(of: Data(content.utf8)) == nil)
             }
         }
-        #expect(names.count >= 4)
+        #expect(names.count == 4)   // Sets, t, Secret Folder, the file: no nested encrypted root
         for n in names {
             #expect(!n.contains("Secret") && !n.contains("private") && !n.contains("Sets"))
             #expect(onDisk(n))
         }
 
         // Decrypts with the right keys.
-        let copied = try realRclone(["copy", endpoint + "/Sets/t", back.path, "--config", context.configPath], env: env)
+        let copied = try realRclone(["copy", endpoint + "Sets/t", back.path, "--config", context.configPath], env: env)
         #expect(copied.code == 0)
         #expect(try String(contentsOf: back.appendingPathComponent("Secret Folder/private-name.txt"), encoding: .utf8) == content)
 
         // A wrong passphrase sees nothing it can decrypt.
         var wrong = env
         wrong["RCLONE_CONFIG_\(name)_PASSWORD"] = try RcloneTool.obscure("wrong-passphrase", binary: vendoredRclone)
-        let failed = try realRclone(["copy", endpoint + "/Sets/t", try f.tmp.sub("nope").path, "--config", context.configPath], env: wrong)
+        let failed = try realRclone(["copy", endpoint + "Sets/t", try f.tmp.sub("nope").path, "--config", context.configPath], env: wrong)
         #expect(failed.code != 0)
         #expect(try FileManager.default.contentsOfDirectory(atPath: f.tmp.url.appendingPathComponent("nope").path).isEmpty)
     }
@@ -486,11 +524,12 @@ private func cryptName(_ endpoint: String) -> String {
         let secrets = MemorySecrets()
         let record: URL
         let binary: URL
-        init(exit code: Int = 0, writeToken: Bool = true, extra: String = "") throws {
+        init(exit code: Int = 0, writeToken: Bool = true, extra: String = "", prelude: String = "") throws {
             tmp = try TempDir()
             record = try tmp.sub("record")
             let r = record.path
             binary = try fakeRclone(in: tmp.url, body: """
+                \(prelude)
                 printf '%s\\n' "$@" > '\(r)/args'
                 /usr/bin/env > '\(r)/env'
                 prev=''
@@ -581,6 +620,164 @@ private func cryptName(_ endpoint: String) -> String {
         let d = Destination(name: "Drive", kind: .googleDrive)
         await #expect(throws: RemoteSetupError.clientIDRequired) { try await rig.setup.connect(d, clientID: "  ", clientSecret: nil) }
         await #expect(throws: RemoteSetupError.clientIDRequired) { try await rig.setup.connect(d, clientID: nil, clientSecret: "s") }
+    }
+
+    /// Without the secret the kit couldn't sign in on another Mac, so it's required up front.
+    @Test func googleRequiresClientSecret() async throws {
+        let rig = try Rig()
+        let d = Destination(name: "Drive", kind: .googleDrive)
+        await #expect(throws: RemoteSetupError.clientSecretRequired) { try await rig.setup.connect(d, clientID: "id", clientSecret: " ") }
+        await #expect(throws: RemoteSetupError.clientSecretRequired) { try await rig.setup.connect(d, clientID: "id", clientSecret: nil) }
+    }
+
+    /// The saved Kit holds the old keys. New ones would mean backups no saved Kit can open.
+    @Test func confirmedKitWithLostVaultRefusesNewKeys() async throws {
+        let rig = try Rig()
+        var d = Destination(name: "Drive", kind: .googleDrive)
+        d.recoveryKitConfirmed = true
+        try rig.secrets.saveSignIn(["client_id": "id", "client_secret": "s", "token": fakeToken], for: d)
+        await #expect(throws: RemoteSetupError.vaultLostNeedsRecoveryKit) { try await rig.setup.connect(d, clientID: "id", clientSecret: "s") }
+        #expect(try rig.secrets.vault(for: d) == nil)
+        #expect(!FileManager.default.fileExists(atPath: rig.record.appendingPathComponent("args").path))   // no browser opened
+    }
+
+    @Test func confirmedKitWithEverythingLostAlsoNeedsTheKit() async throws {
+        let rig = try Rig()
+        var d = Destination(name: "Drive", kind: .googleDrive)
+        d.recoveryKitConfirmed = true
+        await #expect(throws: RemoteSetupError.vaultLostNeedsRecoveryKit) { try await rig.setup.connect(d, clientID: "id", clientSecret: "s") }
+        #expect(rig.secrets.isEmpty)
+    }
+
+    /// The vault survived but the client is unknown, and the Kit is the only record of the right one.
+    @Test func confirmedKitWithLostSignInNeedsTheKit() async throws {
+        let rig = try Rig()
+        var d = Destination(name: "Drive", kind: .googleDrive)
+        d.recoveryKitConfirmed = true
+        try rig.secrets.saveVault(.generate(), for: d)
+        await #expect(throws: RemoteSetupError.signInLostNeedsRecoveryKit) { try await rig.setup.connect(d, clientID: "id", clientSecret: "s") }
+    }
+
+    @Test func clientChangeOnExistingDestinationIsRefused() async throws {
+        let rig = try Rig()
+        let d = Destination(name: "Drive", kind: .googleDrive)
+        try await rig.setup.connect(d, clientID: "id", clientSecret: "s")
+        let before = try rig.secrets.signIn(for: d)
+        await #expect(throws: RemoteSetupError.clientChangeRefused) { try await rig.setup.connect(d, clientID: "other", clientSecret: "s") }
+        await #expect(throws: RemoteSetupError.clientChangeRefused) { try await rig.setup.connect(d, clientID: "id", clientSecret: "other") }
+        #expect(try rig.secrets.signIn(for: d) == before)
+
+        let o = Destination(name: "One", kind: .oneDrive)
+        try await rig.setup.connect(o, clientID: "own-client", clientSecret: nil)
+        await #expect(throws: RemoteSetupError.clientChangeRefused) { try await rig.setup.connect(o, clientID: nil, clientSecret: nil) }
+    }
+
+    // MARK: - Restoring keys from a Kit
+
+    private static let obscure = #"if [ "$1" = obscure ]; then cat >/dev/null; echo obscured-stand-in; exit 0; fi"#
+    private static let listing = obscure + """
+
+        if [ "$1" = lsf ]; then
+          case "$2" in mirrorrestore*) echo decrypted-name ;; *) echo raw-name ;; esac
+          exit 0
+        fi
+        """
+
+    private func confirmed() -> Destination {
+        var d = Destination(name: "Drive", kind: .googleDrive)
+        d.recoveryKitConfirmed = true
+        return d
+    }
+
+    private func kit(_ v: VaultSecrets) -> RecoveryKit {
+        RecoveryKit(kind: .googleDrive, rootPath: "Mac Backup", passphrase: v.passphrase, salt: v.salt, filenameEncoding: "base32",
+                    rcloneVersion: "v1.75.2", clientID: "kit-id", clientSecret: "kit-secret")
+    }
+
+    @Test func kitRestoresLostVaultAndSignIn() async throws {
+        let rig = try Rig(prelude: Self.listing)
+        let d = confirmed(), v = VaultSecrets.generate()
+        try await rig.setup.restore(d, from: kit(v))
+        #expect(try rig.secrets.vault(for: d) == v)
+        let saved = try #require(try rig.secrets.signIn(for: d))
+        #expect(saved["client_id"] == "kit-id" && saved["client_secret"] == "kit-secret" && saved["token"] == newToken)
+    }
+
+    @Test func kitRestoreUsesExistingSignInWithoutABrowser() async throws {
+        let rig = try Rig(prelude: Self.listing)
+        let d = confirmed(), v = VaultSecrets.generate()
+        try rig.secrets.saveSignIn(["client_id": "kit-id", "client_secret": "kit-secret", "token": fakeToken], for: d)
+        try await rig.setup.restore(d, from: kit(v))
+        #expect(try rig.secrets.vault(for: d) == v)
+        #expect(try rig.secrets.signIn(for: d)?["token"] == fakeToken)
+        #expect(!FileManager.default.fileExists(atPath: rig.record.appendingPathComponent("args").path))
+    }
+
+    /// Pasting the wrong Kit must not resume backups under keys that can't read what's there.
+    @Test func kitThatCannotOpenTheBackupIsNotStored() async throws {
+        let rig = try Rig(prelude: Self.obscure + """
+
+            if [ "$1" = lsf ]; then
+              case "$2" in mirrorrestore*) ;; *) echo raw-name ;; esac
+              exit 0
+            fi
+            """)
+        let d = confirmed()
+        try rig.secrets.saveSignIn(["client_id": "kit-id", "client_secret": "kit-secret", "token": fakeToken], for: d)
+        await #expect(throws: RemoteSetupError.kitDoesNotOpenBackup) { try await rig.setup.restore(d, from: kit(.generate())) }
+        #expect(try rig.secrets.vault(for: d) == nil)
+    }
+
+    @Test func unreachableCloudLeavesKitUnproven() async throws {
+        let rig = try Rig(prelude: #"if [ "$1" = lsf ]; then exit 1; fi"#)
+        let d = confirmed()
+        try rig.secrets.saveSignIn(["client_id": "kit-id", "client_secret": "kit-secret", "token": fakeToken], for: d)
+        await #expect(throws: RemoteSetupError.couldNotVerifyKit) { try await rig.setup.restore(d, from: kit(.generate())) }
+        #expect(try rig.secrets.vault(for: d) == nil)
+    }
+
+    @Test func kitRestoreNeverReplacesDifferentKeys() async throws {
+        let rig = try Rig(prelude: Self.listing)
+        let d = confirmed(), present = VaultSecrets.generate()
+        try rig.secrets.saveVault(present, for: d)
+        await #expect(throws: RemoteSetupError.vaultAlreadyPresent) { try await rig.setup.restore(d, from: kit(.generate())) }
+        #expect(try rig.secrets.vault(for: d) == present)
+    }
+
+    @Test func kitForAnotherDestinationIsRefused() async throws {
+        let rig = try Rig(prelude: Self.listing)
+        var k = kit(.generate())
+        k.kind = .oneDrive; k.filenameEncoding = "base32768"
+        await #expect(throws: RemoteSetupError.kitDoesNotMatchDestination) { try await rig.setup.restore(confirmed(), from: k) }
+        var other = kit(.generate())
+        other.filenameEncoding = "base32768"
+        await #expect(throws: RemoteSetupError.kitDoesNotMatchDestination) { try await rig.setup.restore(confirmed(), from: other) }
+    }
+
+    @Test func kitRestoreRefusesADifferentStoredClient() async throws {
+        let rig = try Rig(prelude: Self.listing)
+        let d = confirmed()
+        try rig.secrets.saveSignIn(["client_id": "stored", "client_secret": "s", "token": fakeToken], for: d)
+        await #expect(throws: RemoteSetupError.clientChangeRefused) { try await rig.setup.restore(d, from: kit(.generate())) }
+    }
+
+    /// The real proof against real rclone: the right keys list the backup, wrong keys see nothing.
+    @Test func kitProofAgainstRealRclone() async throws {
+        let tmp = try TempDir()
+        let cloud = try tmp.sub("cloud/Mac Backup"), src = try tmp.sub("src")
+        try "x".write(to: src.appendingPathComponent("f.txt"), atomically: true, encoding: .utf8)
+        let conf = tmp.url.appendingPathComponent("c.conf")
+        try "[base]\ntype = alias\nremote = \(tmp.url.appendingPathComponent("cloud").path)\n".write(to: conf, atomically: true, encoding: .utf8)
+        let context = RcloneContext(configPath: conf.path, environment: [:])
+        let setup = RemoteSetup(binary: vendoredRclone, secrets: MemorySecrets())
+        let v = VaultSecrets.generate()
+
+        #expect(try await setup.kitOpens(kit(.generate()), encryptedRoot: "base:Mac Backup", context: context))   // empty: nothing to strand
+        let env = try RcloneCrypt.environment(remote: "up", over: cloud.path, passphrase: v.passphrase, salt: v.salt,
+                                              filenameEncoding: "base32", binary: vendoredRclone)
+        #expect(try realRclone(["copy", src.path, "up:Sets/s", "--config", "/dev/null"], env: env).code == 0)
+        #expect(try await setup.kitOpens(kit(v), encryptedRoot: "base:Mac Backup", context: context))
+        #expect(try await setup.kitOpens(kit(.generate()), encryptedRoot: "base:Mac Backup", context: context) == false)
     }
 
     @Test func clientValuesCannotInjectIntoConfig() async throws {
