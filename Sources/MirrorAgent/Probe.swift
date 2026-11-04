@@ -1,3 +1,5 @@
+// Proof-only code. Compiled only with -DMIRROR_PROBES (scripts/build-app.sh --proofs).
+#if MIRROR_PROBES
 import CoreServices
 import Foundation
 import UserNotifications
@@ -29,13 +31,12 @@ enum Probe {
     }
 
     static func rcloneList() -> String {
-        // Contents/MacOS/MirrorAgent -> Contents/Helpers/rclone
-        let exe = URL(fileURLWithPath: CommandLine.arguments[0]).resolvingSymlinksInPath()
-        let rclone = exe.deletingLastPathComponent().deletingLastPathComponent()
-            .appendingPathComponent("Helpers/rclone").path
+        // Never derive the executable path from argv: resolve it from the enclosing bundle.
+        let rclone = Bundle.main.bundleURL.appendingPathComponent("Contents/Helpers/rclone").path
         let p = Process()
         p.executableURL = URL(fileURLWithPath: rclone)
         p.arguments = ["lsd", iCloud, "--max-depth", "1"]
+        p.environment = ["PATH": "/usr/bin:/bin", "HOME": NSHomeDirectory()]
         let out = Pipe(), err = Pipe()
         p.standardOutput = out; p.standardError = err
         do { try p.run() } catch { return "FAIL (spawn: \(error.localizedDescription))" }
@@ -65,7 +66,7 @@ enum Probe {
     }
 
     static func run() async {
-        log("probe start pid=\(getpid()) bundleID=\(Bundle.main.bundleIdentifier ?? "none") exe=\(CommandLine.arguments[0])")
+        log("probe start pid=\(getpid()) bundleID=\(Bundle.main.bundleIdentifier ?? "none") bundle=\(Bundle.main.bundleURL.path)")
         log("list iCloud Drive: \(canList(iCloud))")
         log("list ~/Documents: \(canList(documents))")
         log("rclone lsd iCloud: \(rcloneList())")
@@ -136,4 +137,38 @@ enum Probe {
             Thread.sleep(forTimeInterval: 5)
         }
     }
+
+    /// `--probe-blocks <file>`: physical device offsets at several file offsets (F_LOG2PHYS_EXT).
+    /// Identical offsets in two files mean shared blocks.
+    static func blocks(path: String) -> Int32 {
+        let fd = open(path, O_RDONLY)
+        guard fd >= 0 else { print("\(path): open failed errno=\(errno)"); return 1 }
+        defer { close(fd) }
+        var st = stat(); fstat(fd, &st)
+        let size = Int64(st.st_size)
+        let step: Int64 = 16 * 1024 * 1024
+        var out: [String] = []
+        var off: Int64 = 0
+        while off < size {
+            var l = log2phys(l2p_flags: 0, l2p_contigbytes: 0, l2p_devoffset: off)
+            if fcntl(fd, F_LOG2PHYS_EXT, &l) == -1 { out.append("\(off):err\(errno)") }
+            else { out.append("\(off):\(l.l2p_devoffset)") }
+            off += step
+        }
+        print(out.joined(separator: " "))
+        return 0
+    }
+
+    /// `--probe-ubiq <path>...`: ubiquity keys read on the item itself (no symlink following).
+    static func ubiq(paths: [String]) {
+        let keys: [URLResourceKey] = [.isSymbolicLinkKey, .isUbiquitousItemKey, .ubiquitousItemIsUploadedKey,
+                                      .ubiquitousItemIsUploadingKey, .ubiquitousItemUploadingErrorKey,
+                                      .ubiquitousItemDownloadingStatusKey]
+        for p in paths {
+            let u = URL(fileURLWithPath: p)
+            guard let v = try? u.resourceValues(forKeys: Set(keys)) else { print("\(p): resourceValues failed"); continue }
+            print("\(p): symlink=\(v.isSymbolicLink.map(String.init) ?? "nil") isUbiquitous=\(v.isUbiquitousItem.map(String.init) ?? "nil") uploaded=\(v.ubiquitousItemIsUploaded.map(String.init) ?? "nil") uploading=\(v.ubiquitousItemIsUploading.map(String.init) ?? "nil") err=\(v.ubiquitousItemUploadingError.map { "\($0)" } ?? "nil") dl=\(v.ubiquitousItemDownloadingStatus?.rawValue ?? "nil")")
+        }
+    }
 }
+#endif

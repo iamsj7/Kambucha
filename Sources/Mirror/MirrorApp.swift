@@ -5,6 +5,7 @@ import MirrorCore
 @main
 struct MirrorApp: App {
     init() {
+        #if MIRROR_PROBES
         // Command-line helpers for the permission proofs; the app has no UI for these yet.
         let args = CommandLine.arguments
         if args.contains("--register-agent") {
@@ -19,6 +20,7 @@ struct MirrorApp: App {
             print("agent status: \(svc.status.rawValue)")
             exit(0)
         }
+        #endif
     }
 
     var body: some Scene {

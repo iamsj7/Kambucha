@@ -4,7 +4,10 @@ cd "${0:A:h}/.."
 IDENTITY="${MIRROR_SIGN_IDENTITY:-Apple Development: Shaik Jaleel}"
 [[ -x vendor/rclone/rclone ]] || { echo "run scripts/fetch-rclone.sh first" >&2; exit 1; }
 
-swift build -c release --arch arm64
+# Default build has no proof code. --proofs compiles the --probe* modes and --register-agent (Gate 1 only).
+flags=()
+[[ "${1:-}" == "--proofs" ]] && flags=(-Xswiftc -DMIRROR_PROBES)
+swift build -c release --arch arm64 "${flags[@]}"
 bin="$(swift build -c release --arch arm64 --show-bin-path)"
 app="${PWD}/dist/Mirror.app"
 rm -rf "$app"
