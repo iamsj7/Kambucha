@@ -15,6 +15,10 @@ struct MirrorApp: App {
             DebugFixtures.snapshotAll(to: URL(fileURLWithPath: dbg[i + 1]))
             exit(0)
         }
+        if let i = dbg.firstIndex(of: "--snapshot-views"), i + 1 < dbg.count {
+            DebugViewSnapshots.snapshotAll(to: URL(fileURLWithPath: dbg[i + 1]))
+            exit(0)
+        }
         if let i = dbg.firstIndex(of: "--fixture"), i + 1 < dbg.count, let f = DebugFixtures.Name(rawValue: dbg[i + 1]) {
             _model = State(initialValue: AppModel(support: DebugFixtures.make(f)))
         } else {
