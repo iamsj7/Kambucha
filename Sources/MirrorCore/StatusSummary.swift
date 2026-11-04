@@ -3,6 +3,8 @@ import Foundation
 public enum OverallStatus: Equatable, Sendable {
     case backedUp(last: Date, files: Int)
     case uploading(Int)
+    /// Evicted files a past run couldn't verify, waiting for iCloud to bring them back.
+    case waitingForDownload(Int)
     case running
     case held(Int)
     case attention(String)
@@ -13,7 +15,7 @@ public enum OverallStatus: Equatable, Sendable {
 /// Folds the on-disk state into the one status the menu bar shows (spec sections 8a and 12).
 public enum StatusSummary {
     /// "Backed Up" means every destination of every active set passed. Review items and a due restore
-    /// drill never block it. Priority: attention, held, running, uploading, backed up.
+    /// drill never block it. Priority: attention, held, running, uploading, waiting for iCloud, backed up.
     public static func overall(sets: [BackupSet], destinations: [Destination], states: [PairID: SetState],
                                records: [RunRecord], problems: [ActiveProblem], running: Bool) -> OverallStatus {
         // Before anything that reads the sets: a run that couldn't start may be why they look empty.
@@ -68,7 +70,11 @@ public enum StatusSummary {
             return .uploading(max(pending, fromRecords))
         }
 
-        // 4. Backed up only when every pair has finished at least once.
+        // 4. Files that can't be verified until iCloud brings them back.
+        let waiting = pairs.reduce(0) { $0 + (states[$1]?.waitingForDownload ?? 0) }
+        if waiting > 0 { return .waitingForDownload(waiting) }
+
+        // 5. Backed up only when every pair has finished at least once.
         if !setsWithNoDestination.isEmpty { return .attention("No destination chosen") }
         if active.contains(where: { $0.destinationIDs.contains { known[$0] == nil } }) {
             return .attention("A destination was removed")

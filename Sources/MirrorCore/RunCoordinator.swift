@@ -28,6 +28,8 @@ public final class RunCoordinator: Sendable {
     static let maxOwed = 5_000
     /// Evicted owed files survive an overflow, so they have a bound of their own.
     static let maxFreed = 5_000
+    /// Each is a real download, so a long list is worked through over several wake-ups.
+    static let maxDownloadsPerRun = 200
     /// Finder's droppings don't make a source any less empty.
     private static let noise: Set<String> = [".DS_Store", ".localized"]
 
@@ -259,6 +261,9 @@ public final class RunCoordinator: Sendable {
         }
         tally.pending = state.pendingUploads
         tally.refused = state.refusedSince.count
+        if state.waitingForDownload > 0, tally.status != .verificationFailed {
+            tally.verification = "Waiting for iCloud to download \(state.waitingForDownload) files to verify"
+        }
         // Saved ahead of the record, so a kill between them can't leave a stop no one was told of.
         for notice in tally.notices { keep(notice.problem, notice.pair, set, detail: notice.detail) }
         record()
@@ -557,7 +562,7 @@ public final class RunCoordinator: Sendable {
         state.freedSince = state.freedSince.filter { owed.contains($0.key) }
     }
 
-    /// One flag read per evicted file, no walk. One that came back is hashed by the next run.
+    /// One flag read per evicted file, no walk. One that came back is hashed by this or the next run.
     private func refreshFreed(_ job: Job, set: BackupSet, state: inout SetState) {
         guard job.isLocal else { return }
         let mirror = mirrorRoot(set)
@@ -565,6 +570,19 @@ public final class RunCoordinator: Sendable {
             state.freedSince[path] = nil
         }
         state.reviewItems.removeAll { $0.kind == .unprovenFreed && state.freedSince[$0.path] == nil }
+        requestDownloads(mirror: mirror, state: state)
+    }
+
+    /// Owed files only, never the mirror at large: eviction is what keeps it from using disk. Asking
+    /// again is harmless, so a refusal is left for the next wake-up. A file that arrives is hashed by
+    /// the run after, and clears only if that hash passes.
+    private func requestDownloads(mirror: URL, state: SetState) {
+        let oldest = state.freedSince.sorted { ($0.value, $0.key) < ($1.value, $1.key) }.prefix(Self.maxDownloadsPerRun)
+        for path in oldest.map(\.key) {
+            do { try downloader.requestDownload(of: mirror.appendingPathComponent(path)) } catch {
+                Self.log.error("iCloud refused a download request")
+            }
+        }
     }
 
     /// Whatever a deep check couldn't prove has outlasted it, so the owner hears about it.

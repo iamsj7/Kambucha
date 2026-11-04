@@ -1662,6 +1662,106 @@ private final class Harness: @unchecked Sendable {
     }
 }
 
+/// Fix round 3: an evicted owed file's way out is iCloud bringing it back, then a passing hash.
+@Suite struct FreedDownloadTests {
+    private func owedFreed(_ h: Harness, _ names: [String] = ["a.txt"]) throws {
+        try h.prime()
+        var s = try h.state
+        for (i, name) in names.enumerated() {
+            try Data().write(to: h.source.appendingPathComponent("flowapp/\(name)"))
+            s.verifyOwed.append("flowapp/\(name)")
+            s.freedSince["flowapp/\(name)"] = h.now.addingTimeInterval(Double(i))
+        }
+        s.verifyOwed.sort()
+        try h.store.save(s, for: h.pair)
+        h.freed = Set(names)
+    }
+
+    @Test func owedEvictedFilesAreRequestedAtTheirMirrorPath() async throws {
+        let h = try Harness(); try owedFreed(h)
+        await h.run()
+        #expect(h.downloader.requested.map(\.path) == [h.mirror + "/flowapp/a.txt"])
+    }
+
+    @Test func requestsStopAtTheLimitOldestFirst() async throws {
+        let h = try Harness()
+        try owedFreed(h, (0...RunCoordinator.maxDownloadsPerRun).map { String(format: "f%04d", $0) })
+        await h.run()
+        #expect(h.downloader.requested.count == RunCoordinator.maxDownloadsPerRun)
+        #expect(h.downloader.requested.first?.lastPathComponent == "f0000")
+        #expect(!h.downloader.requested.contains { $0.lastPathComponent == String(format: "f%04d", RunCoordinator.maxDownloadsPerRun) })
+    }
+
+    @Test func onlyOwedFilesAreEverRequested() async throws {
+        let h = try Harness(); try h.prime()
+        let m = h.backupRoot.appendingPathComponent("Sets/x/flowapp")
+        try FileManager.default.createDirectory(at: m, withIntermediateDirectories: true)
+        try Data().write(to: m.appendingPathComponent("other.txt"))
+        var s = try h.state; s.lastFullPass = h.now.addingTimeInterval(-25 * hour); try h.store.save(s, for: h.pair)
+        h.freed = ["other.txt"]   // evicted, but nothing is owed on it
+        await h.run()
+        #expect(h.downloader.requested.isEmpty)
+    }
+
+    @Test func aFileBackOnDiskIsHashedAndOnlyThenCleared() async throws {
+        let h = try Harness(); try owedFreed(h)
+        await h.run()
+        #expect(try h.state.verifyOwed == ["flowapp/a.txt"])   // asked for, not yet proven
+        h.freed = []
+        await h.run()
+        #expect(h.rclone.hashed.last == ["a.txt"])
+        #expect(try h.state.verifyOwed.isEmpty)
+        #expect(try h.state.isBackedUp)
+    }
+
+    @Test func aDownloadedFileThatMismatchesStaysOwed() async throws {
+        let h = try Harness(); try owedFreed(h)
+        await h.run()
+        h.freed = []
+        h.rclone.script(hashDifferences: 1, differing: ["a.txt"])
+        await h.run()
+        #expect(try h.state.verifyOwed == ["flowapp/a.txt"])
+        #expect(try h.state.mismatched == ["flowapp/a.txt"])
+        #expect(try h.active == [.verificationFailed])
+    }
+
+    @Test func aRefusedRequestIsRetriedAndFailsNothing() async throws {
+        let h = try Harness(); try owedFreed(h)
+        h.downloader.fail(CocoaError(.fileReadUnknown))
+        await h.run()
+        h.downloader.fail(nil)
+        await h.run()
+        #expect(h.downloader.requested.count == 2)
+        #expect(try h.state.consecutiveFailures == 0)
+    }
+
+    @Test func nothingIsRequestedWhileICloudIsStopped() async throws {
+        let h = try Harness(); try owedFreed(h)
+        h.auditor.set(refused: [RootMarker.fileName])
+        await h.run()
+        #expect(h.downloader.requested.isEmpty)
+    }
+
+    @Test func theWaitIsStatedInTheRecordAndState() async throws {
+        let h = try Harness(); try owedFreed(h, ["a.txt", "b.txt"])
+        await h.run()
+        #expect(try h.state.waitingForDownload == 2)
+        #expect(try h.latest()?.verification == "Waiting for iCloud to download 2 files to verify")
+    }
+
+    @Test func theWaitReachesTheOverallStatus() throws {
+        let set = { () -> BackupSet in
+            var s = BackupSet(name: "x", source: URL(fileURLWithPath: "/x")); s.destinationIDs = [UUID()]; return s
+        }()
+        let d = Destination(id: set.destinationIDs[0], name: "i", kind: .iCloudFolder)
+        var state = SetState()
+        state.lastFinished = Date(); state.verifyOwed = ["a"]; state.freedSince = ["a": Date()]
+        let status = StatusSummary.overall(sets: [set], destinations: [d], states: [PairID(set: set.id, destination: d.id): state],
+                                           records: [], problems: [], running: false)
+        #expect(status == .waitingForDownload(1))
+    }
+}
+
 /// Fix round 3: past the bound the flag takes over, and nothing but a whole-set check ends it.
 @Suite struct OverflowTests {
     private func many() -> [String] { (0...RunCoordinator.maxOwed).map { "f\($0)" } }
