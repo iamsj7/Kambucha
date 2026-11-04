@@ -100,6 +100,13 @@ private struct NoSession: RunSession {
     }
 }
 
+private final class Written: @unchecked Sendable {
+    private let lock = NSLock()
+    private var items: [TransferProgress] = []
+    var all: [TransferProgress] { lock.withLock { items } }
+    func add(_ p: TransferProgress) { lock.withLock { items.append(p) } }
+}
+
 @Suite struct RunIntegrationTests {
     private final class Rig: @unchecked Sendable {
         let root: URL, source: URL, backupRoot: URL, support: URL
@@ -134,7 +141,9 @@ private struct NoSession: RunSession {
         }
 
         /// A full run: the stored ID is reset so the feed asks for a rescan.
-        func run(_ command: RunCommand = RunCommand()) async throws -> RunRecord {
+        func run(_ command: RunCommand = RunCommand(), rclone custom: RcloneRunner? = nil,
+                 progress: RunProgress? = nil) async throws -> RunRecord {
+            let rclone = custom ?? self.rclone
             var s = try store.state(for: pair); s.lastEventID = nil; try store.save(s, for: pair)
             let c = RunCoordinator(store: store, records: records, problems: problems, rclone: rclone, feed: RescanFeed(),
                                    verifier: Verifier(rclone: rclone, auditor: AllUploaded()),
@@ -142,7 +151,7 @@ private struct NoSession: RunSession {
                                    detector: StackDetector(presets: []), filters: FilterBuilder(presets: []), clock: { Date() },
                                    sessions: { _ in NoSession() }, remote: RcloneRemoteFiles(binary: binary, helper: AnyHelper()),
                                    paths: RunPaths(support: support, logs: root.appendingPathComponent("logs"),
-                                                   work: root.appendingPathComponent("work")))
+                                                   work: root.appendingPathComponent("work")), progress: progress)
             let before = Set(try records.recent(limit: 1000).map(\.id))
             await c.runAll(command: command)
             // Stored times are whole seconds, so runs this quick can only be told apart by ID.
@@ -233,6 +242,18 @@ private struct NoSession: RunSession {
         _ = try await r.run()
         let manifest = try SymlinkManifest.read(set: "x", backupRoot: r.backupRoot)
         #expect(manifest.entries == [.init(path: "p/link", target: "f.txt", isAbsolute: false, isBroken: false)])
+    }
+
+    @Test func realRcloneStatsReachTheProgressFolder() async throws {
+        let r = try Rig()
+        try r.write("p/f.txt")
+        let log = Written()
+        let progress = RunProgress(store: ProgressStore(root: r.support), clock: { Date() }, observer: { log.add($0) })
+        let runner = RcloneRunner.localOnly(binary: binary, onStats: { progress.stats($0) })
+        let record = try await r.run(rclone: runner, progress: progress)
+        #expect(record.status == .success)
+        #expect(log.all.contains { $0.phase == .transferring && $0.filesDone == 1 })
+        #expect(try ProgressStore(root: r.support).all(now: Date()).isEmpty)
     }
 
     @Test func emptiedSourceLeavesTheMirrorAlone() async throws {

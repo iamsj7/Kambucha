@@ -96,6 +96,13 @@ public struct ReviewItem: Codable, Equatable, Identifiable, Sendable {
     public var rulePattern: String { "/" + FilterBuilder.escape(path) }
 }
 
+/// How far an upload batch had got, and when. Two of these make a rate across wake-ups.
+public struct UploadSample: Codable, Equatable, Sendable {
+    public var done: Int
+    public var at: Date
+    public init(done: Int, at: Date) { self.done = done; self.at = at }
+}
+
 public struct SetState: Codable, Equatable, Sendable {
     public var lastEventID: UInt64?
     public var lastFullPass: Date?
@@ -114,6 +121,9 @@ public struct SetState: Codable, Equatable, Sendable {
     public var uploadingPaths: [String] = []
     /// When uploads last made progress. Nil with nothing pending.
     public var uploadingSince: Date?
+    /// Files in the current upload batch, finished ones included. Zero with nothing pending.
+    public var uploadTotal = 0
+    public var uploadSample: UploadSample?
     /// A whole-set run started and hasn't passed. FSEvents may not replay why it was needed.
     public var wholeSetOwed = false
     /// `--max-duration` or Google's daily upload limit stopped the last run. It resumes at the next wake-up.
@@ -152,6 +162,8 @@ public struct SetState: Codable, Equatable, Sendable {
         reviewItems = try c.decodeIfPresent([ReviewItem].self, forKey: .reviewItems) ?? []
         uploadingPaths = try c.decodeIfPresent([String].self, forKey: .uploadingPaths) ?? []
         uploadingSince = try c.decodeIfPresent(Date.self, forKey: .uploadingSince)
+        uploadTotal = try c.decodeIfPresent(Int.self, forKey: .uploadTotal) ?? 0
+        uploadSample = try c.decodeIfPresent(UploadSample.self, forKey: .uploadSample)
         wholeSetOwed = try c.decodeIfPresent(Bool.self, forKey: .wholeSetOwed) ?? false
         syncIncomplete = try c.decodeIfPresent(Bool.self, forKey: .syncIncomplete) ?? false
         knownProjects = try c.decodeIfPresent([String].self, forKey: .knownProjects)

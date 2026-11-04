@@ -39,25 +39,17 @@ public final class RunCoordinator: Sendable {
     private let helperCheck: @Sendable () throws -> Void
     private let archives: @Sendable (String, RcloneContext, DestinationKind) -> ArchiveManager
     private let reviewer: ReviewScanner
+    private let progress: RunProgress
 
-    public convenience init(store: ConfigStore, records: RunRecordStore, problems: ProblemCenter, rclone: any RcloneRunning,
-                            feed: any ChangeFeeding, verifier: Verifier, guard pathGuard: PathGuard, detector: StackDetector,
-                            filters: FilterBuilder, clock: @escaping @Sendable () -> Date,
-                            sessions: @escaping @Sendable (Destination) -> any RunSession, remote: any RemoteFileAccessing,
-                            paths: RunPaths, helperCheck: @escaping @Sendable () throws -> Void = {}) {
-        self.init(store: store, records: records, problems: problems, rclone: rclone, feed: feed, verifier: verifier,
-                  guard: pathGuard, detector: detector, filters: filters, clock: clock, sessions: sessions, remote: remote,
-                  paths: paths, helperCheck: helperCheck,
-                  archives: { ArchiveManager(rclone: rclone, endpoint: $0, context: $1, kind: $2) })
-    }
-
-    init(store: ConfigStore, records: RunRecordStore, problems: ProblemCenter, rclone: any RcloneRunning,
+    public init(store: ConfigStore, records: RunRecordStore, problems: ProblemCenter, rclone: any RcloneRunning,
                 feed: any ChangeFeeding, verifier: Verifier, guard pathGuard: PathGuard, detector: StackDetector,
                 filters: FilterBuilder, clock: @escaping @Sendable () -> Date,
                 sessions: @escaping @Sendable (Destination) -> any RunSession, remote: any RemoteFileAccessing,
-                paths: RunPaths, helperCheck: @escaping @Sendable () throws -> Void,
-                archives: @escaping @Sendable (String, RcloneContext, DestinationKind) -> ArchiveManager) {
-        self.archives = archives
+                paths: RunPaths, helperCheck: @escaping @Sendable () throws -> Void = {},
+                archives: (@Sendable (String, RcloneContext, DestinationKind) -> ArchiveManager)? = nil,
+                progress: RunProgress? = nil) {
+        self.archives = archives ?? { ArchiveManager(rclone: rclone, endpoint: $0, context: $1, kind: $2) }
+        self.progress = progress ?? RunProgress(root: paths.support, clock: clock)
         reviewer = ReviewScanner(filters: filters)
         self.store = store; self.records = records; self.problems = problems; self.rclone = rclone
         self.feed = feed; self.verifier = verifier; self.pathGuard = pathGuard; self.detector = detector
@@ -222,6 +214,7 @@ public final class RunCoordinator: Sendable {
             return .carryOn
         }
         defer { lock.release() }
+        defer { progress.end() }
 
         let loaded: SetState
         do { loaded = try store.state(for: pair) } catch {
@@ -407,6 +400,8 @@ public final class RunCoordinator: Sendable {
                         profile: job.profile, context: context, dryRun: dryRun, fullSpeed: command.fullSpeed)
         }
 
+        progress.enter(.scanning, pair: pair)
+
         // Mass-deletion check. -1 is rclone's "no limit": the dry run must see them all to count them.
         var deletions: [String] = []
         var planned: [String] = []
@@ -444,6 +439,7 @@ public final class RunCoordinator: Sendable {
         owe(planned, state: &state)
         try persist(state, pair)
 
+        progress.enter(.transferring, pair: pair)
         var perSlice: [LogSummary] = []
         for slice in slices {
             let result = try await rclone.sync(request(slice, mode: mode, dryRun: false))
@@ -471,6 +467,7 @@ public final class RunCoordinator: Sendable {
             }
         }
 
+        progress.enter(.verifying, pair: pair)
         // Verify. Held files are extras in the mirror on purpose, so the check runs one way.
         var verified = VerifyResult(differences: 0, audit: AuditResult(pending: [], refused: []))
         let wholePass = plan.isDailyPass && scope == .wholeSet
@@ -676,7 +673,9 @@ public final class RunCoordinator: Sendable {
         let root = mirror.path + "/"
         func relative(_ path: String) -> String { path.hasPrefix(root) ? String(path.dropFirst(root.count)) : path }
         let now = clock()
-        state.uploadingPaths = Set(state.uploadingPaths).union(audit.pending.map(relative)).sorted()
+        let pending = Set(audit.pending.map(relative))
+        state.uploadTotal += pending.subtracting(state.uploadingPaths).count
+        state.uploadingPaths = Set(state.uploadingPaths).union(pending).sorted()
         state.pendingUploads = state.uploadingPaths.count
         if !state.uploadingPaths.isEmpty, state.uploadingSince == nil { state.uploadingSince = now }
         for path in audit.refused.map(relative) where state.refusedSince[path] == nil { state.refusedSince[path] = now }
@@ -843,6 +842,8 @@ public final class RunCoordinator: Sendable {
         guard job.isLocal else { return }
         guard !state.uploadingPaths.isEmpty || !state.refusedSince.isEmpty else {
             clear([.uploadStalled, .fileRefused], job.pair)
+            state.uploadTotal = 0
+            state.uploadSample = nil
             return
         }
         let now = clock()
@@ -862,6 +863,7 @@ public final class RunCoordinator: Sendable {
         state.uploadingPaths = pending.sorted()
         state.pendingUploads = pending.count
         state.refusedSince = Dictionary(uniqueKeysWithValues: refused.map { ($0, state.refusedSince[$0] ?? now) })
+        reportUploads(job, state: &state, now: now)
 
         if let since = state.uploadingSince, now.timeIntervalSince(since) > Self.patience {
             tally.notices.append((.uploadStalled, job.pair, "\(pending.count) files waiting for over a day"))
@@ -878,6 +880,23 @@ public final class RunCoordinator: Sendable {
         } else {
             clear([.fileRefused], job.pair)
         }
+    }
+
+    /// macOS gives no byte figures for iCloud, so progress is files, and the rate comes from the last
+    /// sighting, which may be a wake-up ago.
+    private func reportUploads(_ job: Job, state: inout SetState, now: Date) {
+        guard state.pendingUploads > 0 else {
+            state.uploadTotal = 0
+            state.uploadSample = nil
+            return
+        }
+        state.uploadTotal = max(state.uploadTotal, state.pendingUploads)
+        let done = state.uploadTotal - state.pendingUploads
+        var estimator = RateEstimator()
+        if let last = state.uploadSample { estimator.add(bytes: UInt64(last.done), at: last.at) }
+        let rate = estimator.add(bytes: UInt64(done), at: now)
+        state.uploadSample = UploadSample(done: done, at: now)
+        progress.uploading(pair: job.pair, done: done, total: state.uploadTotal, filesPerSecond: rate)
     }
 
     // MARK: Failures

@@ -199,6 +199,10 @@ private final class Harness: @unchecked Sendable {
     var set: BackupSet
     var iCloudDest = Destination(name: "iCloud", kind: .iCloudFolder)
     var helperError: (any Error)?
+    private var _written: [TransferProgress] = []
+    var written: [TransferProgress] { lock.withLock { _written } }
+    private(set) lazy var progress = RunProgress(store: ProgressStore(root: support), clock: { [self] in now },
+                                                 observer: { [self] p in lock.withLock { _written.append(p) } })
     private var _evicted: [String] = []
     var evicted: [String] { lock.withLock { _evicted } }
     private var _freed = Set<String>()
@@ -260,7 +264,8 @@ private final class Harness: @unchecked Sendable {
             archives: { [self] endpoint, context, kind in
                 ArchiveManager(rclone: runner, endpoint: endpoint, context: context, kind: kind, isUploaded: { _ in true },
                                evict: { [self] url in lock.withLock { _evicted.append(url.lastPathComponent) } })
-            })
+            },
+            progress: progress)
     }
 
     @discardableResult
@@ -2266,4 +2271,129 @@ private struct CancelledCapture: RcloneRunning {
     func sync(_ r: SyncRequest) async throws -> RcloneResult { try await wrapping.sync(r) }
     func check(_ r: CheckRequest) async throws -> RcloneResult { try await wrapping.check(r) }
     func capture(_ arguments: [String], context: RcloneContext) async throws -> RcloneCapture { throw CancellationError() }
+}
+
+@Suite struct RunWiringProgressTests {
+    private func files(_ h: Harness) -> [String] {
+        (try? FileManager.default.contentsOfDirectory(atPath: h.support.appendingPathComponent("progress").path)) ?? []
+    }
+    private let stats = RcloneStats(bytes: 50, bytesTotal: 100, filesDone: 1, filesTotal: 2, speed: 4096, eta: 12)
+
+    @Test func aRunGoesThroughItsPhasesAndLeavesNothingBehind() async throws {
+        let h = try Harness(); try h.prime(); h.change("flowapp/a.txt")
+        await h.run()
+        var phases: [TransferProgress.Phase] = []
+        for p in h.written.map(\.phase) where phases.last != p { phases.append(p) }
+        #expect(phases == [.scanning, .transferring, .verifying])
+        #expect(h.written.allSatisfy { $0.pair == h.pair })
+        #expect(files(h).isEmpty)
+    }
+
+    @Test func statsReachTheStoreOnlyWhileTransferring() async throws {
+        let h = try Harness(); try h.prime(); h.change("flowapp/a.txt")
+        let (progress, stats) = (h.progress, stats)
+        var seen: TransferProgress?
+        h.rclone.onDryRun = { progress.stats(stats) }
+        h.rclone.onRealSync = { progress.stats(stats) }
+        await h.run()
+        seen = h.written.first { $0.bytesTotal != nil }
+        #expect(seen?.phase == .transferring)
+        #expect(seen?.fraction == 0.5 && seen?.eta == 12 && seen?.etaIsEstimate == false)
+        #expect(h.written.filter { $0.phase != .transferring }.allSatisfy { $0.bytesTotal == nil })
+    }
+
+    @Test func statsKeepAQuietPhaseFromGoingStale() async throws {
+        let h = try Harness(); try h.prime(); h.change("flowapp/a.txt")
+        let progress = h.progress
+        let stats = stats
+        h.rclone.onDryRun = { progress.stats(stats) }
+        await h.run()
+        #expect(h.written.filter { $0.phase == .scanning }.count == 2)
+    }
+
+    @Test func statsWithNoRunGoNowhere() throws {
+        let h = try Harness()
+        h.progress.stats(stats)
+        #expect(h.written.isEmpty)
+    }
+
+    @Test func aFailedRunClearsItsProgress() async throws {
+        let h = try Harness(); try h.prime(); h.change("flowapp/a.txt")
+        h.rclone.script(real: [.transient])
+        await h.run()
+        #expect(!h.written.isEmpty)
+        #expect(files(h).isEmpty)
+    }
+
+    @Test func aCancelledRunClearsItsProgress() async throws {
+        let h = try Harness(); try h.prime(); h.change("flowapp/a.txt")
+        h.rclone.script(killRealSync: true)
+        await h.run()
+        #expect(!h.written.isEmpty)
+        #expect(files(h).isEmpty)
+    }
+
+    @Test func aWakeUpWithNothingToDoWritesNothing() async throws {
+        let h = try Harness(); try h.prime()
+        await h.run()
+        #expect(h.written.isEmpty)
+        #expect(!FileManager.default.fileExists(atPath: h.support.appendingPathComponent("progress").path))
+    }
+
+    @Test func iCloudUploadsCountFilesWithAnEstimatedTime() async throws {
+        let h = try Harness(); try h.prime()
+        var s = try h.state
+        s.uploadingPaths = (0..<80).map { "p/\($0)" } + (80..<100).map { "p/done\($0)" }
+        s.uploadingSince = h.now.addingTimeInterval(-hour)
+        s.uploadTotal = 100
+        s.uploadSample = UploadSample(done: 0, at: h.now.addingTimeInterval(-1000))
+        try h.store.save(s, for: h.pair)
+        h.auditor.set(pending: Set((0..<80).map(String.init)))
+        await h.run()
+        let p = try #require(h.written.last)
+        #expect(p.phase == .waitingForICloud)
+        #expect(p.filesDone == 20 && p.filesTotal == 100)
+        #expect(p.etaIsEstimate && p.eta == 4000)
+        #expect(p.fraction == 0.2)
+        #expect(files(h).isEmpty)
+        #expect(try h.state.uploadSample == UploadSample(done: 20, at: h.now))
+    }
+
+    @Test func theFirstSightOfAnUploadHasNoRateToGoOn() async throws {
+        let h = try Harness(); try h.prime(); h.change("flowapp/a.txt")
+        h.rclone.script(copied: ["a.txt"], matching: 1)
+        h.auditor.set(pending: ["a.txt"])
+        await h.run()
+        let p = try #require(h.written.last)
+        #expect(p.phase == .waitingForICloud && p.filesDone == 0 && p.filesTotal == 1)
+        #expect(p.eta == nil && p.etaIsEstimate)
+    }
+
+    @Test func aFinishedBatchForgetsItsCount() async throws {
+        let h = try Harness(); try h.prime()
+        var s = try h.state
+        s.uploadingPaths = ["p/x"]
+        s.uploadingSince = h.now
+        s.uploadTotal = 5
+        s.uploadSample = UploadSample(done: 4, at: h.now)
+        try h.store.save(s, for: h.pair)
+        await h.run()
+        #expect(try h.state.uploadTotal == 0)
+        #expect(try h.state.uploadSample == nil)
+        #expect(h.written.isEmpty)
+    }
+
+    @Test func nothingIsCountedForACloudDestination() async throws {
+        let h = try Harness()
+        let cloud = try h.addCloud()
+        h.set.destinationIDs = [cloud.id]
+        try h.save(extra: [cloud])
+        try h.prime(PairID(set: h.set.id, destination: cloud.id), kind: .googleDrive)
+        h.setSession(cloud, FakeSession(endpoint: "crypt:"))
+        try h.cloudMarker(at: "crypt:.mirror-root")
+        h.change("flowapp/a.txt")
+        await h.run()
+        #expect(!h.written.isEmpty)
+        #expect(!h.written.contains { $0.phase == .waitingForICloud })
+    }
 }

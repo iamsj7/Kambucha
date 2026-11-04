@@ -22,18 +22,20 @@ enum BackupRun {
         // Never derive the executable path from argv: resolve it from the enclosing bundle.
         let binary = Bundle.main.bundleURL.appendingPathComponent("Contents/Helpers/rclone")
         let trust = SignedCodeTrust()
-        let rclone = RcloneRunner(binary: binary, helper: trust)
+        let clock: @Sendable () -> Date = { Date() }
+        let progress = RunProgress(root: places.support, clock: clock)
+        let rclone = RcloneRunner(binary: binary, helper: trust, onStats: { progress.stats($0) })
         let secrets = KeychainStore()
         let work = RcloneSession.defaultWorkDir
         let coordinator = RunCoordinator(
             store: ConfigStore(root: places.support), records: records, problems: problems, rclone: rclone,
             feed: FSEventsFeed(), verifier: Verifier(rclone: rclone, auditor: ICloudAuditor()),
             guard: PathGuard(iCloudDrive: places.iCloudDrive, backupRoot: places.backupRoot),
-            detector: StackDetector(presets: presets), filters: FilterBuilder(presets: presets), clock: { Date() },
+            detector: StackDetector(presets: presets), filters: FilterBuilder(presets: presets), clock: clock,
             sessions: { RcloneSession(destination: $0, secrets: secrets, binary: binary, helper: trust, workDir: work) },
             remote: RcloneRemoteFiles(binary: binary, helper: trust),
             paths: RunPaths(support: places.support, logs: places.logs, work: work),
-            helperCheck: { try trust.verifyHelper(at: binary) })
+            helperCheck: { try trust.verifyHelper(at: binary) }, progress: progress)
 
         if command.fullSpeed { AgentPriority.raiseToNormal() }
         // launchd sends SIGTERM at logout. Dying at once would strand rclone, any sign-in config and
