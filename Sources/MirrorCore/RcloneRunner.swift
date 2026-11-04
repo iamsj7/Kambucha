@@ -11,8 +11,8 @@ public protocol HelperValidating: Sendable {
     func verifyHelper(at url: URL) throws
 }
 
-public enum RcloneRunnerError: Error, Equatable {
-    /// The context holds secrets and this runner has nothing to check the binary with.
+public enum RcloneRunnerError: Error, Equatable, Codable, Sendable {
+    /// A `localOnly` runner was handed a context that isn't plainly local.
     case helperNotChecked
 }
 
@@ -23,11 +23,19 @@ public struct RcloneRunner: RcloneRunning {
     /// Seconds between SIGTERM and SIGKILL when a run is cancelled.
     let killGrace: TimeInterval
     private let helper: (any HelperValidating)?
-    /// `helper` may be nil only for runs with nothing secret, which is any iCloud run. A context with
-    /// a config or environment is refused without one.
-    public init(binary: URL, helper: (any HelperValidating)? = nil) { self.init(binary: binary, killGrace: 5, helper: helper) }
-    init(binary: URL, killGrace: TimeInterval, helper: (any HelperValidating)? = nil) {
+
+    public init(binary: URL, helper: any HelperValidating) {
+        self.init(binary: binary, killGrace: 5, helper: helper)
+    }
+    private init(binary: URL, killGrace: TimeInterval, helper: (any HelperValidating)?) {
         self.binary = binary; self.killGrace = killGrace; self.helper = helper
+    }
+
+    /// No helper check, so it accepts only contexts with nothing secret: `/dev/null` for a config and
+    /// an empty environment. Anything else throws `helperNotChecked` before rclone starts.
+    public static func localOnly(binary: URL) -> RcloneRunner { localOnly(binary: binary, killGrace: 5) }
+    static func localOnly(binary: URL, killGrace: TimeInterval) -> RcloneRunner {
+        RcloneRunner(binary: binary, killGrace: killGrace, helper: nil)
     }
 
     public func sync(_ r: SyncRequest) async throws -> RcloneResult {

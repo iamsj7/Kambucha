@@ -46,7 +46,7 @@ private final class Sandbox {
 }
 
 @Suite struct RcloneIntegrationTests {
-    let runner = RcloneRunner(binary: rcloneBinary)
+    let runner = RcloneRunner.localOnly(binary: rcloneBinary)
 
     @Test func addModifyDelete() async throws {
         let sb = try Sandbox()
@@ -197,7 +197,7 @@ private final class Sandbox {
         // Ignores SIGTERM, so only SIGKILL stops it.
         let fake = try script("trap '' TERM\nexec sleep 60")
         let sb = try Sandbox()
-        let runner = RcloneRunner(binary: fake, killGrace: 0.5)
+        let runner = RcloneRunner.localOnly(binary: fake, killGrace: 0.5)
         let req = sb.request()
         let started = Date()
         let task = Task { try await runner.sync(req) }
@@ -209,7 +209,7 @@ private final class Sandbox {
 
     @Test func launchFailureThrowsInsteadOfHanging() async throws {
         let sb = try Sandbox()
-        let runner = RcloneRunner(binary: URL(fileURLWithPath: "/nonexistent/rclone"))
+        let runner = RcloneRunner.localOnly(binary: URL(fileURLWithPath: "/nonexistent/rclone"))
         await #expect(throws: (any Error).self) { try await runner.sync(sb.request()) }
     }
 }

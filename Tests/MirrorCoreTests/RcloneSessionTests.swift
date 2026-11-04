@@ -542,13 +542,14 @@ private func cryptName(_ endpoint: String) -> String {
                         logFile: f.tmp.url.appendingPathComponent("l"), mode: .copyOnly,
                         profile: .profile(for: Destination(name: "t", kind: .iCloudFolder)), context: context)
         }
-        let unchecked = RcloneRunner(binary: vendoredRclone)
-        await #expect(throws: RcloneRunnerError.helperNotChecked) {
-            try await unchecked.sync(request(RcloneContext(configPath: "/dev/null", environment: ["A": "b"])))
+        let spawned = f.tmp.url.appendingPathComponent("spawned")
+        let unchecked = RcloneRunner.localOnly(binary: try fakeRclone(in: f.tmp.url, body: "touch '\(spawned.path)'"))
+        for context in [RcloneContext(configPath: "/dev/null", environment: ["A": "b"]),
+                        RcloneContext(configPath: "/tmp/x.conf", environment: [:]),
+                        RcloneContext(configPath: "/tmp/x.conf", environment: ["A": "b"])] {
+            await #expect(throws: RcloneRunnerError.helperNotChecked) { try await unchecked.sync(request(context)) }
         }
-        await #expect(throws: RcloneRunnerError.helperNotChecked) {
-            try await unchecked.sync(request(RcloneContext(configPath: "/tmp/x.conf", environment: [:])))
-        }
+        #expect(!FileManager.default.fileExists(atPath: spawned.path))
         await #expect(throws: AgentFailure.untrustedHelper) {
             try await RcloneRunner(binary: vendoredRclone, helper: RefusingHelper())
                 .sync(request(RcloneContext(configPath: "/dev/null", environment: ["A": "b"])))

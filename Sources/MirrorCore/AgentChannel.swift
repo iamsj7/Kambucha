@@ -36,7 +36,7 @@ public enum AgentRequest: Codable, Sendable, CustomStringConvertible, CustomDebu
 /// Typed, so the app sees the same errors the agent did. None of them carries a secret.
 public enum AgentFailure: Error, Equatable, Codable, Sendable {
     case session(RcloneSessionError), setup(RemoteSetupError), kit(RecoveryKitError)
-    case drill(RestoreDrillError), keychain(SecretStoreError)
+    case drill(RestoreDrillError), keychain(SecretStoreError), runner(RcloneRunnerError)
     case untrustedCaller, untrustedHelper, presenceRefused, configUnreadable, busy, lockFailed
     case invalidRequest, cancelled, other
 
@@ -48,6 +48,7 @@ public enum AgentFailure: Error, Equatable, Codable, Sendable {
         case let e as RecoveryKitError: self = .kit(e)
         case let e as RestoreDrillError: self = .drill(e)
         case let e as SecretStoreError: self = .keychain(e)
+        case let e as RcloneRunnerError: self = .runner(e)
         case is CancellationError: self = .cancelled
         default: self = .other   // arbitrary errors could describe anything, so they don't cross
         }
@@ -60,6 +61,7 @@ public enum AgentFailure: Error, Equatable, Codable, Sendable {
         case .kit(let e): e
         case .drill(let e): e
         case .keychain(let e): e
+        case .runner(let e): e
         case .cancelled: CancellationError()
         default: self
         }

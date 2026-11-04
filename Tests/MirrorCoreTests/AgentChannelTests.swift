@@ -150,6 +150,15 @@ private struct ServiceRig {
         #expect(r.failure == .kit(.notARecoveryKit))
     }
 
+    /// It's a programming error worth seeing, so it mustn't blur into `.other` on the way to the app.
+    @Test func helperNotCheckedKeepsItsType() throws {
+        let failure = AgentFailure(RcloneRunnerError.helperNotChecked)
+        #expect(failure == .runner(.helperNotChecked))
+        let crossed = try JSONDecoder().decode(AgentFailure.self, from: JSONEncoder().encode(failure))
+        #expect(crossed == failure)
+        #expect(crossed.underlying as? RcloneRunnerError == .helperNotChecked)
+    }
+
     @Test func badInputIsRefusedWithoutEchoingIt() async throws {
         let rig = try ServiceRig()
         let garbage = Data("client-secret-not-real".utf8)
