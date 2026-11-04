@@ -23,6 +23,10 @@ public struct AgentProcessTransport: AgentTransport {
             [subcommand], binary: executable, helper: nil,
             context: RcloneContext(configPath: "/dev/null", environment: [:]),
             stdin: body, capture: true, killGrace: AgentClient.killGrace)
+        // An answer counts only with exit code 0, or with an explicit `ok` or `failure` of its own; a crash or a stray
+        // non-zero exit never reads as success.
+        let answer = try? JSONDecoder().decode(AgentWire.Response.self, from: output)
+        guard code == 0 || answer?.ok != nil || answer?.failure != nil else { throw AgentClientError.noResponse(exitCode: code) }
         if output.isEmpty { throw AgentClientError.noResponse(exitCode: code) }
         return output
     }
@@ -89,21 +93,13 @@ public struct AgentArchiveProvider: ArchiveProviding {
     }
 }
 
-/// The files a held backup would remove, from the agent's dry run. Only pairs that actually hold deletions are asked,
-/// and the lists are merged, so the count the owner reviews is never smaller than any one destination's.
+/// The files a held backup to one destination would remove, from the agent's dry run.
 public struct AgentDeletionDryRun: DeletionDryRunProviding {
     private let client: any ArchiveAgentCalling
-    private let store: ConfigStore
-    public init(client: any ArchiveAgentCalling, store: ConfigStore) { self.client = client; self.store = store }
+    public init(client: any ArchiveAgentCalling) { self.client = client }
 
-    public func heldDeletions(set: BackupSet) async throws -> [String] {
-        var files = Set<String>()
-        for id in set.destinationIDs {
-            let held = (try? store.state(for: PairID(set: set.id, destination: id)))?.heldDeletions ?? 0
-            guard held > 0 else { continue }
-            files.formUnion(try await client.dryRunDeletions(set: set.id, destination: id))
-        }
-        return files.sorted()
+    public func heldDeletions(set: BackupSet, destination: Destination) async throws -> [String] {
+        try await client.dryRunDeletions(set: set.id, destination: destination.id).sorted()
     }
 }
 

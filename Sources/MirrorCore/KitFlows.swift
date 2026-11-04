@@ -54,7 +54,7 @@ public final class KitRestoreModel {
 /// first and can ask again after a refusal. The text is held in memory only while the sheet is open.
 @MainActor @Observable
 public final class KitRevealModel {
-    public enum Phase: Equatable, Sendable { case idle, asking, shown, failed(String) }
+    public enum Phase: Equatable, Sendable { case idle, asking, shown, cancelled, failed(String) }
     public private(set) var phase: Phase = .idle
     public private(set) var kitText: String?
     public let destination: Destination
@@ -66,10 +66,10 @@ public final class KitRevealModel {
     }
 
     public func begin() async {
-        guard phase != .asking, phase != .shown else { return }
+        guard phase != .asking, phase != .shown else { return }   // idle, cancelled and failed may ask again
         phase = .asking
         do { kitText = try await fetch(destination); phase = .shown }
-        catch is CancellationError { phase = .idle }
+        catch is CancellationError { kitText = nil; phase = .cancelled }
         catch { kitText = nil; phase = .failed(SetupFailureText.message(for: error)) }
     }
 

@@ -83,6 +83,35 @@ private func utcStamp(_ s: String) -> Date { ISO8601DateFormatter().date(from: s
     #expect(try String(contentsOf: stdin, encoding: .utf8).contains("\"set\""))
 }
 
+private func scriptTransport(_ box: ArchiveSandbox, exit code: Int, output: String) throws -> AgentProcessTransport {
+    let script = box.root.appendingPathComponent("agent-\(UUID().uuidString).sh")
+    try "#!/bin/sh\ncat > /dev/null\nprintf '%s' '\(output)'\nexit \(code)\n".write(to: script, atomically: true, encoding: .utf8)
+    try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: script.path)
+    return AgentProcessTransport(executable: script)
+}
+
+@Test func aNonZeroExitWithoutAnOkOrAFailureIsNotASuccess() async throws {
+    let box = try ArchiveSandbox()
+    let t = try scriptTransport(box, exit: 3, output: "garbage")
+    await #expect(throws: AgentClientError.noResponse(exitCode: 3)) { _ = try await t.call(subcommand: "dry-run-deletions", body: Data()) }
+}
+
+@Test func aZeroExitWithoutOkIsNotASuccessEither() async throws {
+    let box = try ArchiveSandbox()
+    let t = try scriptTransport(box, exit: 0, output: #"{"files":["x"]}"#)
+    await #expect(throws: AgentClientError.self) {
+        _ = try await AgentArchiveClient(transport: t).dryRunDeletions(set: UUID(), destination: UUID())
+    }
+}
+
+@Test func aFailureAnswerSurvivesANonZeroExit() async throws {
+    let box = try ArchiveSandbox()
+    let t = try scriptTransport(box, exit: 1, output: #"{"ok":false,"failure":{"busy":{}}}"#)
+    await #expect(throws: AgentFailure.busy) {
+        _ = try await AgentArchiveClient(transport: t).archiveList(set: UUID(), destination: UUID())
+    }
+}
+
 // MARK: Providers
 
 @Test func archiveProviderAsksTheAgentForTheSetAndDestination() async throws {
@@ -103,21 +132,13 @@ private func utcStamp(_ s: String) -> Date { ISO8601DateFormatter().date(from: s
     #expect(bodyText(t).contains("Archive/Docs/2026-11-04T10-00/a.txt"))
 }
 
-@Test func dryRunAsksOnlyThePairsWithHeldDeletionsAndMergesTheAnswers() async throws {
-    let box = try ArchiveSandbox()
-    let store = ConfigStore(root: box.root)
-    let a = Destination(name: "iCloud", kind: .iCloudFolder), b = Destination(name: "Drive", kind: .googleDrive)
-    let c = Destination(name: "OneDrive", kind: .oneDrive)
-    var set = makeSet("Docs"); set.destinationIDs = [a.id, b.id, c.id]
-    try store.saveSets([set]); try store.saveDestinations([a, b, c])
-    var held = SetState(); held.heldDeletions = 5
-    try store.save(held, for: PairID(set: set.id, destination: a.id))
-    try store.save(held, for: PairID(set: set.id, destination: b.id))
-    try store.save(SetState(), for: PairID(set: set.id, destination: c.id))
-    let client = FakeDryRunClient(files: [a.id: ["x", "y"], b.id: ["y", "z"], c.id: ["never"]])
-    let files = try await AgentDeletionDryRun(client: client, store: store).heldDeletions(set: set)
-    #expect(files == ["x", "y", "z"])
-    #expect(Set(client.asked) == [a.id, b.id])
+@Test func dryRunAsksTheAgentForTheOneDestination() async throws {
+    let a = Destination(name: "iCloud", kind: .iCloudFolder)
+    let set = makeSet("Docs")
+    let client = FakeDryRunClient(files: [a.id: ["x", "y"]])
+    let files = try await AgentDeletionDryRun(client: client).heldDeletions(set: set, destination: a)
+    #expect(files == ["x", "y"])
+    #expect(client.asked == [a.id])
 }
 
 private final class FakeDryRunClient: ArchiveAgentCalling, @unchecked Sendable {

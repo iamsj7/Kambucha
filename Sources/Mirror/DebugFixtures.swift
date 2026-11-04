@@ -78,7 +78,7 @@ enum DebugFixtures {
         func rule(for group: PreviewGroup, included: Bool) -> UserRule { UserRule(pattern: group.pattern, action: included ? .include : .exclude) }
     }
     private struct FakeDryRun: DeletionDryRunProviding {
-        func heldDeletions(set: BackupSet) async throws -> [String] {
+        func heldDeletions(set: BackupSet, destination: Destination) async throws -> [String] {
             (0..<240).map { "Old Builds/release-\($0 / 20)/app-\($0).zip" }
         }
     }
@@ -166,10 +166,10 @@ enum DebugFixtures {
         Task { await pc.load() }
         spin(0.3)
         render(PreviewSheet(model: model, controller: pc) { _ in }, size: CGSize(width: 680, height: 560), to: at("preview"))
-        let review = DeletionReview(set: model.sets[0], provider: FakeDryRun())
+        let review = DeletionReview(set: model.sets[0], destinations: [dests[0], dests[1]], provider: FakeDryRun())
         Task { await review.load() }
         spin(0.3)
-        render(DeletionReviewSheet(model: model, review: review), size: CGSize(width: 560, height: 460), to: at("deletion-review"))
+        render(DeletionReviewSheet(model: model, review: review), size: CGSize(width: 600, height: 560), to: at("deletion-review"))
     }
 
     /// Renders each fixture in light and dark to `<dir>/<name>-<appearance>.png`.

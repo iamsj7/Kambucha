@@ -23,6 +23,8 @@ public enum PreviewWarnings {
 @MainActor @Observable
 public final class VolumeCache {
     public private(set) var volumes: [VolumeInfo] = []
+    /// False until the first read finishes, so a screen can say "Looking for drives" instead of "none".
+    public private(set) var hasLoaded = false
 
     @ObservationIgnored private let locator: any VolumeLocating
     @ObservationIgnored private let observers: Observers
@@ -50,6 +52,7 @@ public final class VolumeCache {
             await previous?.value
             let list = await Task.detached(priority: .utility) { locator.mounted() }.value
             self?.volumes = list
+            self?.hasLoaded = true
         }
         running = task
         await task.value
@@ -70,6 +73,20 @@ private final class Observers: @unchecked Sendable {
     init(center: NotificationCenter) { self.center = center }
     func add(_ token: any NSObjectProtocol) { tokens.append(token) }
     deinit { for t in tokens { center.removeObserver(t) } }
+}
+
+// MARK: Is the agent working
+
+public enum AgentLockProbe {
+    /// True while the agent holds `locks/agent.lock`. Never creates the file. It tries a shared lock without waiting and lets
+    /// go at once, so it can only fail the agent's own try-lock for the instant it holds it.
+    public static func isHeld(support: URL) -> Bool {
+        let fd = open(support.appendingPathComponent("locks/agent.lock").path, O_RDONLY | O_CLOEXEC | O_NOFOLLOW)
+        guard fd >= 0 else { return false }
+        defer { close(fd) }
+        if flock(fd, LOCK_SH | LOCK_NB) == 0 { flock(fd, LOCK_UN); return false }
+        return errno == EWOULDBLOCK
+    }
 }
 
 // MARK: Eject

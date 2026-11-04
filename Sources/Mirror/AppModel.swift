@@ -31,6 +31,7 @@ private struct Snapshot: Sendable {
     var destinations: [Destination]
     var states: [PairID: SetState]
     var progress: [ProgressItem]
+    var running: Bool
 
     static func load(support: URL) -> Snapshot? {
         let store = ConfigStore(root: support)
@@ -56,10 +57,11 @@ private struct Snapshot: Sendable {
             StatusSummary.overall(sets: ss, destinations: destinations, states: states,
                                   records: records, problems: problems, running: running)
         }
-        return Snapshot(sets: sets, status: overall(sets),
+        func needsPreview(_ ss: [BackupSet]) -> OverallStatus { StatusSummary.withPreviewNeeded(overall(ss), sets: ss) }
+        return Snapshot(sets: sets, status: needsPreview(sets),
                         rows: sets.map { SetRow(id: $0.id, name: $0.name, isPaused: $0.isPaused,
-                                                status: $0.isPaused ? .paused : overall([$0])) },
-                        destinations: destinations, states: states, progress: items)
+                                                status: $0.isPaused ? .paused : needsPreview([$0])) },
+                        destinations: destinations, states: states, progress: items, running: running)
     }
 }
 
@@ -102,6 +104,7 @@ final class AppModel {
     @ObservationIgnored private var process: Process?
     @ObservationIgnored private var runQueue = RunQueue()
     @ObservationIgnored private var surfaces = SurfaceVisibility()
+    private var agentRunning = false
     @ObservationIgnored private var poller: Task<Void, Never>?
 
     init(support: URL = MirrorPaths.support, services: AppServices = .live) {
@@ -113,17 +116,20 @@ final class AppModel {
                                         NSWorkspace.didRenameVolumeNotification])
         volumeCache = cache
         eject = EjectController(ejector: services.ejector, isBackupRunning: { false }, refresh: { await cache.refresh() })
-        eject.isBackupRunning = { [weak self] in self?.isBackupActive ?? false }
+        // Eject also asks the lock itself, so a launchd run this app hasn't loaded yet still blocks it.
+        eject.isBackupRunning = { [weak self] in
+            guard let self else { return false }
+            return self.isBackupActive || AgentLockProbe.isHeld(support: self.support)
+        }
         if let snap = Snapshot.load(support: support) { apply(snap) }   // first paint is synchronous
         else { status = .attention("Mirror could not read its settings") }
         attachMissingWatchers()
         Task { await cache.refresh() }
     }
 
-    /// An agent this app launched, or one launchd started, is working.
-    var isBackupActive: Bool {
-        isRunning || process?.isRunning == true || AgentPresence.isRunning(support: support)
-    }
+    /// An agent this app launched, or one launchd started, is working. Read from the last state load (the poller keeps it
+    /// current while anything is visible), never from disk per render.
+    var isBackupActive: Bool { agentRunning || process?.isRunning == true }
 
     deinit {
         for w in watchers.values { w.cancel() }
@@ -148,6 +154,7 @@ final class AppModel {
 
     private func apply(_ snap: Snapshot) {
         sets = snap.sets; rows = snap.rows; status = snap.status; progress = snap.progress
+        agentRunning = snap.running
         destinations = snap.destinations; states = snap.states
     }
 
@@ -197,6 +204,8 @@ final class AppModel {
     /// Runs the agent for one set, or all sets when nil.
     func runNow(_ set: UUID?) {
         lastError = nil
+        // Starting a run while a drive unmounts could write to a drive that is going away.
+        guard !eject.isEjecting else { lastError = "A drive is being ejected. Start the backup when it finishes."; return }
         runQueue.start(.all)
         // No backup for a set starts until its preview was accepted once (spec section 9).
         // Accepted sets still run; the others are named so the owner can preview them.

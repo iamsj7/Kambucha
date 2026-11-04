@@ -17,6 +17,7 @@ struct AddDestinationFlow: View {
     @State private var confirmedOff = false
     @State private var volumes: [ExternalDriveSetup.Choice] = []
     @State private var confirmingInternal = false
+    @State private var loadingVolumes = false
     @State private var volumeID: String?
     @State private var working = false
     @State private var error: String?
@@ -142,13 +143,21 @@ struct AddDestinationFlow: View {
     }
 
     private func refreshVolumes() {
-        volumes = ExternalDriveSetup.choices(from: model.services.volumes, existing: model.destinations)
-        if let id = volumeID, !volumes.contains(where: { $0.id == id && $0.selectable }) { volumeID = nil }
+        loadingVolumes = true
+        let locator = model.services.volumes, existing = model.destinations
+        Task {
+            let rows = await ExternalDriveSetup.loadChoices(from: locator, existing: existing)
+            volumes = rows
+            loadingVolumes = false
+            if let id = volumeID, !rows.contains(where: { $0.id == id && $0.selectable }) { volumeID = nil }
+        }
     }
 
     @ViewBuilder private var externalSection: some View {
         Section {
-            if volumes.isEmpty {
+            if loadingVolumes && volumes.isEmpty {
+                ProgressView("Looking for drives…")
+            } else if volumes.isEmpty {
                 Text("No external drives are connected.").foregroundStyle(.secondary)
             }
             ForEach(volumes) { v in

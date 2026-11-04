@@ -7,7 +7,8 @@ import Observation
 
 /// Supplies the files a held deletion would remove, from a dry run. The engine implements it.
 public protocol DeletionDryRunProviding: Sendable {
-    func heldDeletions(set: BackupSet) async throws -> [String]
+    /// Every file a run to this one destination would delete, `.git` ones included.
+    func heldDeletions(set: BackupSet, destination: Destination) async throws -> [String]
 }
 
 /// Finds files already mirrored that new exclude rules would now skip, and moves them to the archive
@@ -76,29 +77,55 @@ public final class PreviewController {
 
 // MARK: Deletion review
 
+/// One held destination's list. Deletions are reviewed and approved one destination at a time, so an approval can
+/// never cover more than the owner saw for that destination.
+public struct HeldDestination: Identifiable, Equatable, Sendable {
+    public var destination: Destination
+    public var files: [String] = []
+    public var isLoaded = false
+    public var loadError: String?
+    public var id: UUID { destination.id }
+    /// What the agent counts for the approval: deletions outside `.git` folders.
+    public var count: Int { AgentWire.nonGitCount(files) }
+}
+
 @MainActor @Observable
 public final class DeletionReview {
     public let set: BackupSet
-    public private(set) var files: [String] = []
-    public private(set) var isLoaded = false
-    public private(set) var loadError: String?
+    public private(set) var entries: [HeldDestination]
 
     @ObservationIgnored private let provider: any DeletionDryRunProviding
 
-    public init(set: BackupSet, provider: any DeletionDryRunProviding) { self.set = set; self.provider = provider }
-
-    public var count: Int { files.count }
-
-    public func load() async {
-        do { files = try await provider.heldDeletions(set: set); isLoaded = true; loadError = nil }
-        catch { loadError = SetupFailureText.message(for: error); isLoaded = false }
+    public init(set: BackupSet, destinations: [Destination], provider: any DeletionDryRunProviding) {
+        self.set = set; self.provider = provider
+        entries = destinations.map { HeldDestination(destination: $0) }
     }
 
-    /// The agent is told how many deletions were reviewed, so a bigger list later is held again.
-    /// Nil until a non-empty list has been shown.
-    public var allowOnceArguments: [String]? {
-        guard isLoaded, count > 0 else { return nil }
-        return ["--allow-deletes", set.id.uuidString, String(count)]
+    /// The destinations of `set` whose pair holds deletions.
+    nonisolated public static func heldDestinations(set: BackupSet, destinations: [Destination], states: [PairID: SetState]) -> [Destination] {
+        set.destinationIDs.compactMap { id in
+            (states[PairID(set: set.id, destination: id)]?.heldDeletions ?? 0) > 0 ? destinations.first { $0.id == id } : nil
+        }
+    }
+
+    public var isLoaded: Bool { entries.allSatisfy(\.isLoaded) }
+
+    public func load() async {
+        for i in entries.indices {
+            do {
+                entries[i].files = try await provider.heldDeletions(set: set, destination: entries[i].destination)
+                entries[i].isLoaded = true; entries[i].loadError = nil
+            } catch {
+                entries[i].isLoaded = false; entries[i].loadError = SetupFailureText.message(for: error)
+            }
+        }
+    }
+
+    /// `--allow-deletes <set> <destination> <count>`: the agent holds again if that pair's live count is larger.
+    /// Nil until that destination's list is shown and has something outside `.git` to approve.
+    public func allowOnceArguments(for destination: UUID) -> [String]? {
+        guard let e = entries.first(where: { $0.id == destination }), e.isLoaded, e.count > 0 else { return nil }
+        return ["--allow-deletes", set.id.uuidString, destination.uuidString, String(e.count)]
     }
 }
 

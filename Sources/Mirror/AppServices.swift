@@ -33,7 +33,7 @@ struct AppServices: Sendable {
         let volumes = SystemVolumes()
         return AppServices(
             preview: preview,
-            dryRun: AgentDeletionDryRun(client: calls, store: store),
+            dryRun: AgentDeletionDryRun(client: calls),
             inspector: LocalMirrorInspector(store: store, preview: preview, volumes: volumes, support: support),
             volumes: volumes, agent: agent, archive: AgentArchiveProvider(client: calls))
     }

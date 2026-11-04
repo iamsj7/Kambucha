@@ -333,3 +333,62 @@ private final class FakeEjector: VolumeEjecting, @unchecked Sendable {
     #expect(ReviewActions.waitingText(count: 1200) == "Waiting for iCloud to download 1,200 files to verify")
     #expect(ReviewActions.downloadingReason == "iCloud is downloading this file so Mirror can verify it")
 }
+
+// MARK: Fix round 1
+
+@Test func aLegacySetWithoutAnAcceptedPreviewShowsAsNeedingOne() {
+    let ok = BackupSet(name: "Done", source: URL(fileURLWithPath: "/a"))
+    var accepted = ok; accepted.acceptPreview()
+    let legacy = BackupSet(name: "Legacy", source: URL(fileURLWithPath: "/b"))
+    let backedUp = OverallStatus.backedUp(last: Date(), files: 1)
+    #expect(StatusSummary.withPreviewNeeded(backedUp, sets: [accepted]) == backedUp)
+    #expect(StatusSummary.withPreviewNeeded(backedUp, sets: [accepted, legacy]) == .attention("Preview needed: Legacy"))
+    #expect(StatusSummary.withPreviewNeeded(.attention("Not backed up yet"), sets: [legacy]) == .attention("Preview needed: Legacy"))
+    // Problems, held deletions and runs keep their own message; a paused set needs nothing.
+    #expect(StatusSummary.withPreviewNeeded(.held(3), sets: [legacy]) == .held(3))
+    #expect(StatusSummary.withPreviewNeeded(.attention("Sign-in expired"), sets: [legacy]) == .attention("Sign-in expired"))
+    var paused = legacy; paused.isPaused = true
+    #expect(StatusSummary.withPreviewNeeded(backedUp, sets: [paused]) == backedUp)
+}
+
+@Test func theAgentLockProbeSeesAHeldLockWithoutTakingIt() throws {
+    let root = FileManager.default.temporaryDirectory.appendingPathComponent("mirror-probe-\(UUID().uuidString)")
+    defer { try? FileManager.default.removeItem(at: root) }
+    #expect(!AgentLockProbe.isHeld(support: root))                      // no file: nothing holds it, and none is created
+    #expect(!FileManager.default.fileExists(atPath: root.appendingPathComponent("locks/agent.lock").path))
+    let lock = RunLock(url: root.appendingPathComponent("locks/agent.lock"))
+    #expect(lock.tryAcquire())
+    #expect(AgentLockProbe.isHeld(support: root))
+    lock.release()
+    #expect(!AgentLockProbe.isHeld(support: root))
+    let again = RunLock(url: root.appendingPathComponent("locks/agent.lock"))
+    #expect(again.tryAcquire())                                          // the probe left it free
+}
+
+@MainActor @Test func theCacheSaysItIsLoadingUntilTheFirstRead() async {
+    let cache = VolumeCache(locator: CountingLocator([vol("A")]), center: NotificationCenter(), names: [])
+    #expect(!cache.hasLoaded)
+    await cache.refresh()
+    #expect(cache.hasLoaded)
+}
+
+@Test func driveChoicesAreReadOffTheMainThread() async {
+    let loc = CountingLocator([vol("A")])
+    let rows = await ExternalDriveSetup.loadChoices(from: loc, existing: [])
+    #expect(rows.count == 1)
+    #expect(!loc.calledOnMainThread)
+}
+
+@MainActor @Test func aCancelledRevealCanBeTriedAgain() async {
+    nonisolated(unsafe) var cancel = true
+    let m = KitRevealModel(destination: Destination(name: "Drive", kind: .googleDrive)) { _ in
+        if cancel { throw CancellationError() }
+        return "KIT"
+    }
+    await m.begin()
+    #expect(m.phase == .cancelled)
+    #expect(m.kitText == nil)
+    cancel = false
+    await m.begin()
+    #expect(m.phase == .shown && m.kitText == "KIT")
+}

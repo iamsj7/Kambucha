@@ -34,6 +34,11 @@ public enum ExternalDriveSetup {
         return usable + bad
     }
 
+    /// `choices`, read off the calling thread: listing volumes touches the disks.
+    public static func loadChoices(from locator: any VolumeLocating, existing: [Destination]) async -> [Choice] {
+        await Task.detached(priority: .userInitiated) { choices(from: locator, existing: existing) }.value
+    }
+
     public static func needsInternalConfirmation(_ v: VolumeInfo) -> Bool { v.looksInternal }
 
     /// True for a saved drive that is connected, looks like an internal disk and was never confirmed. Runs refuse it
