@@ -46,4 +46,11 @@ struct AppSettingsTests {
         let icloud = Destination(name: "iCloud", kind: .iCloudFolder)
         #expect(!DrillSchedule.isDue(icloud, states: [state(finished: now - day, drill: nil)], now: now))
     }
+
+    @Test func settingsFileThatIsDamagedThrows() throws {
+        let root = tempRoot()
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        try Data("not json".utf8).write(to: root.appendingPathComponent("settings.json"))
+        #expect(throws: (any Error).self) { try SettingsStore(root: root).load() }
+    }
 }

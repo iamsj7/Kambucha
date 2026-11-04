@@ -89,7 +89,7 @@ enum DrillFilePicker {
     /// A small, plain, top-level file of the first set that uses the destination, one that has been
     /// backed up and hasn't changed since. Only top-level files are considered, and anything the backup
     /// would leave out is skipped: secret patterns, macOS and git files, the set's exclude rules and its
-    /// stack presets' excludes. A file the backup excluded would compare as missing and look like a bad
+    /// stack presets' excludes, matched on the path with the set's real filter. A file the backup excluded would compare as missing and look like a bad
     /// Kit, and a secret must never be chosen. `nil` when nothing qualifies.
     static func candidate(sets: [BackupSet], store: ConfigStore = ConfigStore(root: MirrorPaths.support)) -> (Destination) -> DrillCandidate? {
         { dest in
@@ -103,27 +103,28 @@ enum DrillFilePicker {
 
     private static let plainExtensions: Set<String> = ["txt", "md", "rtf", "csv", "json", "yaml", "yml", "xml", "html", "swift", "py", "js", "ts"]
 
-    private static func matches(_ pattern: String, _ name: String) -> Bool {
-        let p = pattern.hasSuffix("/") ? String(pattern.dropLast()) : pattern
-        return fnmatch(p, name, FNM_CASEFOLD) == 0
+    /// The set's real filter lines (user rules first, then secrets, git, macOS and preset excludes) plus
+    /// the presets' per-project excludes applied at the root, matched path-aware with `FilterMatcher`.
+    /// Secrets are always skipped here, whatever the set's secrets switch says. Nil if presets can't load.
+    static func filter(for set: BackupSet, loadPresets: () throws -> [Preset]) -> FilterMatcher? {
+        guard let presets = try? loadPresets() else { return nil }
+        var lines = FilterBuilder(presets: presets).lines(for: set, projects: [], scope: nil)
+        lines += PresetCatalog.secretPatterns.map { "- \($0)" }
+        lines += [".git/**", ".git"].map { "- \($0)" }
+        lines += presets.filter { set.presets.contains($0.id) }.flatMap(\.ambiguousExclude)
+            .map { "- " + ($0.hasSuffix("/") ? $0 + "**" : $0) }
+        return FilterMatcher(lines: lines)
     }
 
-    static func isExcluded(_ name: String, in set: BackupSet) -> Bool {
-        if name.hasPrefix(".") { return true }   // .git*, .env, .DS_Store and other hidden files
-        let presets = ((try? PresetCatalog.all()) ?? []).filter { set.presets.contains($0.id) }
-        let patterns = PresetCatalog.secretPatterns + PresetCatalog.macOSExcludes
-            + presets.flatMap { $0.alwaysExclude + $0.ambiguousExclude }
-            + set.rules.filter { $0.action == .exclude }.map(\.pattern)
-        return patterns.contains { matches($0, name) }
-    }
-
-    static func pick(in set: BackupSet, finishedBefore finished: Date?) -> DrillCandidate? {
-        guard let finished else { return nil }
+    static func pick(in set: BackupSet, finishedBefore finished: Date?,
+                     loadPresets: () throws -> [Preset] = PresetCatalog.all) -> DrillCandidate? {
+        guard let finished, let matcher = filter(for: set, loadPresets: loadPresets) else { return nil }
         let keys: [URLResourceKey] = [.isRegularFileKey, .fileSizeKey, .contentModificationDateKey]
         let files = (try? FileManager.default.contentsOfDirectory(at: set.source, includingPropertiesForKeys: keys,
                                                                   options: [.skipsHiddenFiles])) ?? []
         let usable = files.sorted { $0.lastPathComponent < $1.lastPathComponent }.filter { url in
-            guard !isExcluded(url.lastPathComponent, in: set),
+            let name = url.lastPathComponent
+            guard !name.hasPrefix("."), !matcher.isExcluded(name),   // top-level files: the relative path is the name
                   let v = try? url.resourceValues(forKeys: Set(keys)), v.isRegularFile == true,
                   let size = v.fileSize, size > 0, size <= 256 * 1024,
                   let modified = v.contentModificationDate, modified < finished.addingTimeInterval(-60),

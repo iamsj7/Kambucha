@@ -117,10 +117,84 @@ struct DrillPickerTests {
     }
 }
 
-struct AgentAccessProbeTests {
-    @Test func exitCodeDecidesTheAnswer() async {
-        #expect(await AgentAccessProbe(executable: URL(fileURLWithPath: "/usr/bin/true")).confirmed())
-        #expect(!(await AgentAccessProbe(executable: URL(fileURLWithPath: "/usr/bin/false")).confirmed()))
-        #expect(!(await AgentAccessProbe(executable: URL(fileURLWithPath: "/nonexistent/agent")).confirmed()))
+@MainActor
+struct DrillPathRuleTests {
+    func folder(_ files: [String]) throws -> URL {
+        let d = FileManager.default.temporaryDirectory.appendingPathComponent("mirror-test-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: d, withIntermediateDirectories: true)
+        for f in files {
+            let u = d.appendingPathComponent(f)
+            try Data("hello".utf8).write(to: u)
+            try FileManager.default.setAttributes([.modificationDate: Date(timeIntervalSince1970: 1_000_000)], ofItemAtPath: u.path)
+        }
+        return d
+    }
+    let finished = Date(timeIntervalSince1970: 2_000_000)
+
+    @Test func anchoredAndGlobstarRulesApply() throws {
+        let d = try folder(["build", "app.log", "notes.txt"])
+        var set = BackupSet(name: "S", source: d)
+        set.rules = [UserRule(pattern: "/build", action: .exclude), UserRule(pattern: "**/*.log", action: .exclude)]
+        #expect(DrillFilePicker.pick(in: set, finishedBefore: finished)?.original.lastPathComponent == "notes.txt")
+    }
+
+    @Test func anIncludeRuleBeforeAnExcludeWins() throws {
+        let d = try folder(["keep.log"])
+        var set = BackupSet(name: "S", source: d)
+        set.rules = [UserRule(pattern: "/keep.log", action: .include), UserRule(pattern: "*.log", action: .exclude)]
+        #expect(DrillFilePicker.pick(in: set, finishedBefore: finished)?.original.lastPathComponent == "keep.log")
+    }
+
+    @Test func presetLoadFailureMeansNothingSuitable() throws {
+        let d = try folder(["notes.txt"])
+        struct Boom: Error {}
+        #expect(DrillFilePicker.pick(in: BackupSet(name: "S", source: d), finishedBefore: finished, loadPresets: { throw Boom() }) == nil)
+    }
+}
+
+struct BoundedProcessTests {
+    @Test func finishedProcessReturnsItsExitCode() async {
+        #expect(await BoundedProcess.run(URL(fileURLWithPath: "/usr/bin/true"), [], timeout: 5) == 0)
+        #expect(await BoundedProcess.run(URL(fileURLWithPath: "/usr/bin/false"), [], timeout: 5) == 1)
+    }
+
+    @Test func aHungProcessIsKilledAtTheTimeout() async {
+        let start = Date()
+        #expect(await BoundedProcess.run(URL(fileURLWithPath: "/bin/sleep"), ["30"], timeout: 0.4) == nil)
+        #expect(Date().timeIntervalSince(start) < 5)
+    }
+
+    @Test func missingExecutableIsNil() async {
+        #expect(await BoundedProcess.run(URL(fileURLWithPath: "/nonexistent/x"), [], timeout: 1) == nil)
+    }
+}
+
+struct AccessConfirmationTests {
+    func support() throws -> URL {
+        let d = FileManager.default.temporaryDirectory.appendingPathComponent("mirror-test-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: d, withIntermediateDirectories: true)
+        return d
+    }
+
+    @Test func confirmsWhenTheKickedAgentWritesAFreshPassingReport() async throws {
+        let s = try support()
+        let ok = await AccessConfirmation.confirm(support: s, timeout: 3, kick: { AgentAccess.writeReport(support: s, paths: [s]) })
+        #expect(ok)
+    }
+
+    @Test func aStalePassingReportIsNotEnoughAfterAKick() async throws {
+        let s = try support()
+        AgentAccess.writeReport(support: s, paths: [s], now: Date().addingTimeInterval(-600))
+        #expect(!(await AccessConfirmation.confirm(support: s, timeout: 0.6, kick: {})))
+    }
+
+    @Test func aFailingReportIsNotConfirmed() async throws {
+        let s = try support()
+        let missing = URL(fileURLWithPath: "/nonexistent-\(UUID().uuidString)")
+        #expect(!(await AccessConfirmation.confirm(support: s, timeout: 0.6, kick: { AgentAccess.writeReport(support: s, paths: [missing]) })))
+    }
+
+    @Test func kickstartArgumentsNameTheAgentInTheUsersDomain() {
+        #expect(AccessConfirmation.kickstartArguments(uid: 501) == ["kickstart", "gui/501/com.shaikjaleel.mirror.agent"])
     }
 }

@@ -11,6 +11,8 @@ private final class FakeSystem: OnboardingSystem {
     var notes: NotificationAccess = .notDetermined
     var enableError: (any Error)?
     func fullDiskAccessConfirmed() async -> Bool { fda }
+    var checked = 0
+    func checkFullDiskAccessNow() async -> Bool { checked += 1; return fda }
     func agentStatus() -> SMAppService.Status { agent }
     func enableAgent() throws { if let enableError { throw enableError }; agent = .enabled }
     func notificationAccess() async -> NotificationAccess { notes }
@@ -60,6 +62,16 @@ struct OnboardingModelTests {
         sys.fda = false   // revoked later: onboarding comes back
         await m.refresh()
         #expect(!m.isDone(.fullDiskAccess))
+    }
+
+    @Test func checkNowKicksTheAgentAndConfirms() async {
+        let sys = FakeSystem()
+        let (m, _) = make(sys)
+        await m.checkAccessNow()
+        #expect(sys.checked == 1 && !m.isDone(.fullDiskAccess) && !m.isChecking)
+        sys.fda = true
+        await m.checkAccessNow()
+        #expect(m.isDone(.fullDiskAccess))
     }
 
     @Test func agentNeedingApprovalIsNotDone() async {

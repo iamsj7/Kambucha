@@ -9,8 +9,10 @@ enum NotificationAccess: Equatable { case notDetermined, allowed, denied }
 /// Everything onboarding reads from or asks of macOS, so the steps can be tested with a fake.
 @MainActor
 protocol OnboardingSystem {
-    /// Asked of the agent, which is the process that reads your folders. False means not confirmed.
+    /// Reads the agent's last report (`access.json`). False means not confirmed.
     func fullDiskAccessConfirmed() async -> Bool
+    /// Asks launchd to start the agent and waits (bounded) for its report.
+    func checkFullDiskAccessNow() async -> Bool
     func agentStatus() -> SMAppService.Status
     func enableAgent() throws
     func notificationAccess() async -> NotificationAccess
@@ -22,10 +24,8 @@ protocol OnboardingSystem {
 
 @MainActor
 struct LiveOnboardingSystem: OnboardingSystem {
-    /// Full Disk Access belongs to the process that reads, so the bundled agent is asked, not this app.
-    func fullDiskAccessConfirmed() async -> Bool {
-        await AgentAccessProbe(executable: Bundle.main.bundleURL.appendingPathComponent("Contents/MacOS/MirrorAgent")).confirmed()
-    }
+    func fullDiskAccessConfirmed() async -> Bool { AgentAccess.isConfirmed(support: MirrorPaths.support) }
+    func checkFullDiskAccessNow() async -> Bool { await AccessConfirmation.confirm(support: MirrorPaths.support) }
     func agentStatus() -> SMAppService.Status { AgentRegistration.status() }
     func enableAgent() throws { try AgentRegistration.enable() }
 
@@ -49,21 +49,52 @@ struct LiveOnboardingSystem: OnboardingSystem {
     private func open(_ s: String) { if let u = URL(string: s) { NSWorkspace.shared.open(u) } }
 }
 
-/// Runs `MirrorAgent --check-access`. Exit 0 is confirmed; any other result, including an agent that
-/// doesn't know the flag yet or can't be started, is "not confirmed".
-struct AgentAccessProbe: Sendable {
-    let executable: URL
-    func confirmed() async -> Bool {
-        let exe = executable
-        return await Task.detached {
+/// Runs a child process with a hard time limit. Returns the exit code, or nil if it couldn't start or
+/// had to be killed. Never blocks the caller's thread beyond polling, so it can't hang `refresh()`.
+enum BoundedProcess {
+    static func run(_ executable: URL, _ arguments: [String], timeout: TimeInterval) async -> Int32? {
+        await Task.detached {
             let p = Process()
-            p.executableURL = exe
-            p.arguments = ["--check-access"]
+            p.executableURL = executable
+            p.arguments = arguments
             p.standardInput = FileHandle.nullDevice; p.standardOutput = FileHandle.nullDevice; p.standardError = FileHandle.nullDevice
-            do { try p.run() } catch { return false }
-            p.waitUntilExit()
-            return p.terminationStatus == 0
+            do { try p.run() } catch { return nil }
+            let deadline = Date().addingTimeInterval(timeout)
+            while p.isRunning {
+                if Date() >= deadline {
+                    p.terminate()
+                    try? await Task.sleep(for: .milliseconds(200))
+                    if p.isRunning { kill(p.processIdentifier, SIGKILL) }
+                    return nil
+                }
+                try? await Task.sleep(for: .milliseconds(25))
+            }
+            return p.terminationStatus
         }.value
+    }
+}
+
+/// Proves the launchd agent's own Full Disk Access. A child of this app can inherit the app's grant,
+/// so instead launchd is asked to start the agent, which writes `access.json` at the start of each
+/// run (`AgentAccess.writeReport`). Only a fresh, passing report counts.
+enum AccessConfirmation {
+    static func kickstartArguments(uid: uid_t) -> [String] { ["kickstart", "gui/\(uid)/\(MirrorCore.agentLabel)"] }
+
+    static func launchctlKick(uid: uid_t = getuid(), timeout: TimeInterval = 5) async {
+        _ = await BoundedProcess.run(URL(fileURLWithPath: "/bin/launchctl"), kickstartArguments(uid: uid), timeout: timeout)
+    }
+
+    /// Kicks, then waits up to `timeout` seconds (15 in the app) for a report written after the kick.
+    static func confirm(support: URL, timeout: TimeInterval = 15,
+                        kick: () async -> Void = { await launchctlKick() }) async -> Bool {
+        let started = Date()
+        await kick()
+        let deadline = started.addingTimeInterval(timeout)
+        while true {
+            if AgentAccess.isConfirmed(support: support, notBefore: started.addingTimeInterval(-1)) { return true }
+            if Date() >= deadline { return false }
+            try? await Task.sleep(for: .milliseconds(250))
+        }
     }
 }
 
@@ -94,6 +125,8 @@ final class OnboardingModel {
     private(set) var agentNeedsApproval = false
     private(set) var notificationsDenied = false
     private(set) var message: String?
+    private(set) var isChecking = false
+    private(set) var checkFailed = false
 
     @ObservationIgnored private let system: any OnboardingSystem
     @ObservationIgnored private let store: ConfigStore
@@ -123,6 +156,16 @@ final class OnboardingModel {
         if access == .allowed { d.insert(.notifications) }
         if let sets = try? store.loadSets(), !sets.isEmpty { d.insert(.firstSet) }
         done = d
+    }
+
+    /// Starts the agent through launchd and waits up to 15 seconds for its access report.
+    func checkAccessNow() async {
+        guard !isChecking else { return }
+        isChecking = true
+        let ok = await system.checkFullDiskAccessNow()
+        isChecking = false
+        checkFailed = !ok
+        if ok { done.insert(.fullDiskAccess) } else { done.remove(.fullDiskAccess) }
     }
 
     func openFullDiskAccess() { system.openFullDiskAccessPane() }
@@ -212,7 +255,7 @@ struct OnboardingView: View {
                 try? await Task.sleep(for: .seconds(1))
             }
         }
-        .onChange(of: scenePhase) { Task { await model.refresh() } }
+        .onChange(of: scenePhase) { if scenePhase == .active, !model.isDone(.fullDiskAccess) { Task { await model.checkAccessNow() } } }
     }
 }
 
@@ -242,7 +285,7 @@ private struct StepRow: View {
     private var explanation: String {
         switch step {
         case .fullDiskAccess:
-            "macOS protects folders like Documents and Desktop. Mirror needs Full Disk Access to back them up. Click the button, then switch on Mirror in the list. Not confirmed yet."
+            (model.checkFailed ? "Not confirmed yet. " : "") + "macOS protects folders like Documents and Desktop. Mirror needs Full Disk Access to back them up. Click the button, then switch on Mirror in the list."
         case .agent:
             model.agentNeedsApproval
                 ? "macOS needs your approval. Switch on Mirror in Login Items, then come back."
@@ -268,7 +311,11 @@ private struct StepRow: View {
     @ViewBuilder private var action: some View {
         switch step {
         case .fullDiskAccess:
-            Button("Open Full Disk Access Settings") { model.openFullDiskAccess() }.buttonStyle(.borderedProminent)
+            HStack {
+                Button("Open Full Disk Access Settings") { model.openFullDiskAccess() }.buttonStyle(.borderedProminent)
+                Button("Check Again") { Task { await model.checkAccessNow() } }.disabled(model.isChecking)
+                if model.isChecking { ProgressView().controlSize(.small).accessibilityLabel("Checking") }
+            }
         case .agent:
             if model.agentNeedsApproval {
                 Button("Open Login Items Settings") { model.openLoginItems() }.buttonStyle(.borderedProminent)
