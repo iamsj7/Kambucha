@@ -3,20 +3,25 @@ import Foundation
 public enum DeletionDecision: Equatable { case proceed(maxDelete: Int), hold(count: Int) }
 
 /// Decides whether a sync pass that would delete files should be held for review (spec section 10).
+///
+/// Files under any `.git` directory are excluded from the hold decision.
 public struct DeletionGate {
-    /// Files under any `.git` directory are excluded from the hold decision.
+    /// Slack added to `maxDelete` on proceed so small drift in the live tree does not abort a pass.
     private static let extraDeleteMargin = 10
 
+    /// `approvedDeletions` is the non-.git deletion count the owner reviewed and approved.
+    /// The hold is skipped only when the current non-.git count is at or below it.
     public static func decide(deletions: [String], totalFiles: Int, policy: DeletionPolicy,
-                              allowOnce: Bool) -> DeletionDecision {
+                              approvedDeletions: Int?) -> DeletionDecision {
         let nonGit = deletions.reduce(into: 0) { count, path in
             if !isUnderGit(path) { count += 1 }
         }
         let overPercent = Double(nonGit) > Double(totalFiles) * policy.percent / 100
         let overMinimum = nonGit >= policy.minFiles && overPercent
         let overAbsolute = nonGit > policy.absoluteMax
-        if !allowOnce && (overMinimum || overAbsolute) {
-            return .hold(count: deletions.count)
+        let approved = approvedDeletions.map { nonGit <= $0 } ?? false
+        if !approved && (overMinimum || overAbsolute) {
+            return .hold(count: nonGit)
         }
         return .proceed(maxDelete: deletions.count + extraDeleteMargin)
     }
