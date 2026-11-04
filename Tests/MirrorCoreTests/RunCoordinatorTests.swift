@@ -18,6 +18,18 @@ private final class FakeRclone: RcloneRunning, @unchecked Sendable {
     private var _realErrors: [String] = []
     private var _realThrow: (any Error)?
     private var _deepDifferences = 0
+    private var _captures: [[String]] = [], _archiveStamps: [String] = [], _captureFailure: RcloneCapture?
+    var captures: [[String]] { lock.withLock { _captures } }
+    var purged: [String] { captures.filter { $0.first == "purge" }.compactMap { $0.dropFirst().first } }
+    func archive(stamps: [String]) { lock.withLock { _archiveStamps = stamps } }
+    func failCaptures(_ c: RcloneCapture?) { lock.withLock { _captureFailure = c } }
+    func capture(_ arguments: [String], context: RcloneContext) async throws -> RcloneCapture {
+        lock.withLock {
+            _captures.append(arguments)
+            if let _captureFailure { return _captureFailure }
+            return RcloneCapture(exitCode: 0, stdout: arguments.first == "lsf" ? _archiveStamps.joined(separator: "\n") : "", stderr: "")
+        }
+    }
     func failRealSync(_ e: (any Error)?) { lock.withLock { _realThrow = e } }
     var onDryRun: (@Sendable () -> Void)?
     var onRealSync: (@Sendable () -> Void)?
@@ -187,6 +199,8 @@ private final class Harness: @unchecked Sendable {
     var set: BackupSet
     var iCloudDest = Destination(name: "iCloud", kind: .iCloudFolder)
     var helperError: (any Error)?
+    private var _evicted: [String] = []
+    var evicted: [String] { lock.withLock { _evicted } }
     private var _freed = Set<String>()
     /// File names iCloud has evicted.
     var freed: Set<String> { get { lock.withLock { _freed } } set { lock.withLock { _freed = newValue } } }
@@ -242,7 +256,11 @@ private final class Harness: @unchecked Sendable {
                 }
             },
             remote: files, paths: RunPaths(support: support, logs: logs, work: work),
-            helperCheck: { [self] in if let helperError { throw helperError } })
+            helperCheck: { [self] in if let helperError { throw helperError } },
+            archives: { [self] endpoint, context, kind in
+                ArchiveManager(rclone: runner, endpoint: endpoint, context: context, kind: kind, isUploaded: { _ in true },
+                               evict: { [self] url in lock.withLock { _evicted.append(url.lastPathComponent) } })
+            })
     }
 
     @discardableResult
@@ -1937,4 +1955,315 @@ private final class Harness: @unchecked Sendable {
 
 private struct Mute: Notifying {
     func post(_: Problem, pair: PairID, setName: String, detail: String) async -> Bool { false }
+}
+
+@Suite struct RunWiringArchiveTests {
+    private static let old = "2020-01-01T10-00-00", recent = "2033-05-18T00-00-00"
+
+    private func withArchive(_ h: Harness) {
+        h.rclone.archive(stamps: [Self.old + "/", "2033-05-17T00-00-00/", Self.recent + "/"])
+    }
+
+    /// Stamps relative to the harness clock, 2033-05-18.
+    private func expiredAndFresh(_ h: Harness) -> (String, [String]) {
+        let old = ArchiveScope.stampString(h.now.addingTimeInterval(-40 * 86_400))
+        return (old, [old + "/", ArchiveScope.stampString(h.now.addingTimeInterval(-86_400)) + "/"])
+    }
+
+    private func link(_ h: Harness, _ rel: String, to target: String) throws {
+        let url = h.source.appendingPathComponent(rel)
+        try FileManager.default.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
+        try FileManager.default.createSymbolicLink(atPath: url.path, withDestinationPath: target)
+    }
+
+    private func manifest(_ h: Harness) throws -> [String] {
+        try SymlinkManifest.read(set: "x", backupRoot: h.backupRoot).entries.map(\.path)
+    }
+
+    private func write(_ h: Harness, _ rel: String, _ text: String = "x") throws {
+        let url = h.source.appendingPathComponent(rel)
+        try FileManager.default.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
+        try Data(text.utf8).write(to: url)
+    }
+
+    @Test func archiveStampsAreOnesTheArchiveCanRead() async throws {
+        let h = try Harness(); try h.prime(); h.change("flowapp/a.txt", rescan: true)
+        await h.run()
+        let stamp = try #require(h.rclone.realSyncs.first?.backupDir.split(separator: "/").last.map(String.init))
+        #expect(ArchiveScope.parseStamp(stamp) == h.now)
+    }
+
+    @Test func aSuccessfulRunPrunesAndRecordsIt() async throws {
+        let h = try Harness(); try h.prime(); h.change("flowapp/a.txt")
+        let (old, stamps) = expiredAndFresh(h)
+        h.rclone.archive(stamps: stamps)
+        await h.run()
+        #expect(h.rclone.purged == [h.backupRoot.appendingPathComponent("Archive/x/\(old)").path])
+        #expect(try h.latest()?.archivesPruned == 1)
+        #expect(try h.latest()?.status == .success)
+    }
+
+    @Test func iCloudEvictsUploadedArchiveFilesAndNeverTheMirror() async throws {
+        let h = try Harness(); try h.prime(); h.change("flowapp/a.txt")
+        for rel in ["Archive/x/2033-05-01T00-00-00/gone.txt", "Sets/x/flowapp/a.txt"] {
+            let url = h.backupRoot.appendingPathComponent(rel)
+            try FileManager.default.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
+            try Data("a".utf8).write(to: url)
+        }
+        await h.run()
+        #expect(h.evicted == ["gone.txt"])
+    }
+
+    @Test func aCloudRunPrunesThroughItsEndpointAndEvictsNothing() async throws {
+        let h = try Harness()
+        let cloud = try h.addCloud()
+        h.set.destinationIDs = [cloud.id]
+        try h.save(extra: [cloud])
+        let pair = PairID(set: h.set.id, destination: cloud.id)
+        try h.prime(pair, kind: .googleDrive)
+        h.setSession(cloud, FakeSession(endpoint: "crypt:"))
+        try h.cloudMarker(at: "crypt:.mirror-root")
+        h.change("flowapp/a.txt")
+        let (old, stamps) = expiredAndFresh(h)
+        h.rclone.archive(stamps: stamps)
+        await h.run()
+        #expect(h.rclone.purged == ["crypt:Archive/x/\(old)"])
+        #expect(h.rclone.captures.allSatisfy { $0.contains("/private/run.conf") })
+        #expect(h.evicted.isEmpty)
+        #expect(!FileManager.default.fileExists(atPath: h.backupRoot.appendingPathComponent("Manifests").path))
+    }
+
+    @Test func nothingIsPrunedByARunThatDidNotFinish() async throws {
+        let h = try Harness(); try h.prime(); h.change("flowapp/a.txt")
+        withArchive(h)
+        h.rclone.script(real: [.transient])
+        await h.run()
+        #expect(h.rclone.captures.isEmpty)
+    }
+
+    @Test func nothingIsPrunedByARunThatFailedItsChecks() async throws {
+        let h = try Harness(); try h.prime(); h.change("flowapp/a.txt")
+        withArchive(h)
+        h.rclone.script(differences: 2)
+        await h.run()
+        #expect(h.rclone.captures.isEmpty)
+    }
+
+    @Test func nothingIsPrunedWhileDeletionsAreHeld() async throws {
+        let h = try Harness(); try h.prime(); h.change("flowapp/a.txt", rescan: true)
+        withArchive(h)
+        h.rclone.script(dryDeletions: (0..<500).map { "d\($0)" })
+        await h.run()
+        #expect(try h.latest()?.status == .held)
+        #expect(h.rclone.captures.isEmpty)
+    }
+
+    @Test func nothingIsPrunedWhenThereWasNoWork() async throws {
+        let h = try Harness(); try h.prime()
+        await h.run()
+        #expect(h.rclone.captures.isEmpty)
+    }
+
+    @Test func aFailedPruneDoesNotUndoTheBackupAndItsTextStaysOut() async throws {
+        let h = try Harness(); try h.prime(); h.change("flowapp/a.txt")
+        h.rclone.failCaptures(RcloneCapture(exitCode: 1, stdout: "", stderr: "token=SECRET-VALUE"))
+        await h.run()
+        let record = try #require(try h.latest())
+        #expect(record.status == .success)
+        #expect(record.errors == ["The archive could not be pruned"])
+        #expect(try h.state.lastEventID == 10)
+        #expect(try h.state.consecutiveFailures == 0)
+    }
+
+    @Test func anExpiredSignInDuringPruningStopsLikeAnyOther() async throws {
+        let h = try Harness()
+        let cloud = try h.addCloud()
+        h.set.destinationIDs = [cloud.id]
+        try h.save(extra: [cloud])
+        let pair = PairID(set: h.set.id, destination: cloud.id)
+        try h.prime(pair, kind: .googleDrive)
+        h.setSession(cloud, FakeSession(endpoint: "crypt:"))
+        try h.cloudMarker(at: "crypt:.mirror-root")
+        h.change("flowapp/a.txt")
+        h.rclone.failCaptures(RcloneCapture(exitCode: 1, stdout: "", stderr: """
+            {"level":"error","msg":"Failed to create file system: couldn't fetch token: invalid_grant"}
+            """))
+        await h.run()
+        #expect(try h.state(pair).stoppedBy == .signInExpired)
+        #expect(try h.active.contains(.signInExpired))
+        #expect(h.session(cloud)?.closes == 1)
+    }
+
+    @Test func aCancelledPruneStopsTheAgent() async throws {
+        let h = try Harness(); try h.prime(); h.change("flowapp/a.txt")
+        let spy = CancelledCapture(wrapping: h.rclone)
+        #expect(await h.coordinator(rclone: spy).runAll(command: RunCommand()))
+        #expect(try h.latest()?.errors == ["Stopped before finishing"])
+    }
+
+    // MARK: Symlink manifest
+
+    @Test func theManifestListsLinksAndSkipsExcludedFolders() async throws {
+        let h = try Harness(); try h.prime(); h.change("flowapp/a.txt", rescan: true)
+        try link(h, "flowapp/link", to: "a.txt")
+        try link(h, "flowapp/node_modules/.bin/tool", to: "../tool")
+        try link(h, "flowapp/skipped-link", to: "a.txt")
+        h.set.rules = [UserRule(pattern: "node_modules/**", action: .exclude), UserRule(pattern: "skipped-link", action: .exclude)]
+        try h.save()
+        await h.run()
+        #expect(try manifest(h) == ["flowapp/link"])
+    }
+
+    @Test func aScopedRunRefreshesOnlyItsFolders() async throws {
+        let h = try Harness(); try h.prime()
+        try SymlinkManifest(set: "x", entries: [
+            .init(path: "other/kept", target: "t", isAbsolute: false, isBroken: true),
+            .init(path: "flowapp/stale", target: "t", isAbsolute: false, isBroken: true),
+        ]).write(backupRoot: h.backupRoot)
+        try link(h, "flowapp/fresh", to: "a.txt")
+        try link(h, "unvisited/not-walked", to: "x")
+        h.change("flowapp/a.txt")
+        await h.run()
+        #expect(try manifest(h) == ["flowapp/fresh", "other/kept"])
+    }
+
+    @Test func anUnchangedManifestIsNotRewritten() async throws {
+        let h = try Harness(); try h.prime()
+        try link(h, "flowapp/link", to: "a.txt")
+        h.change("flowapp/a.txt", rescan: true)
+        await h.run()
+        let file = try SymlinkManifest.location(set: "x", backupRoot: h.backupRoot)
+        let before = try FileManager.default.attributesOfItem(atPath: file.path)[.systemFileNumber] as? Int
+        h.feed.set(ChangeBatch(paths: [], mustRescan: true, latestEventID: 11))
+        await h.run()
+        #expect(try FileManager.default.attributesOfItem(atPath: file.path)[.systemFileNumber] as? Int == before)
+    }
+
+    @Test func aManifestFolderLeadingOutOfTheRootIsNotWrittenThrough() async throws {
+        let h = try Harness(); try h.prime(); h.change("flowapp/a.txt", rescan: true)
+        try link(h, "flowapp/link", to: "a.txt")
+        let outside = h.root.appendingPathComponent("outside")
+        try FileManager.default.createDirectory(at: outside, withIntermediateDirectories: true)
+        try FileManager.default.createSymbolicLink(at: h.backupRoot.appendingPathComponent("Manifests"), withDestinationURL: outside)
+        await h.run()
+        #expect(try FileManager.default.contentsOfDirectory(atPath: outside.path).isEmpty)
+        #expect(try h.latest()?.errors == ["The symlink list could not be saved"])
+        #expect(try h.latest()?.status == .success)
+    }
+
+    // MARK: Items to review
+
+    private func excludingVendor(_ h: Harness) throws {
+        h.set.rules = [UserRule(pattern: "cache/**", action: .exclude), UserRule(pattern: "node_modules/**", action: .exclude)]
+        try h.save()
+    }
+
+    @Test func aSecretInAnExcludedFolderIsSpottedEvenWithNothingToBackUp() async throws {
+        let h = try Harness(); try h.prime(); try excludingVendor(h)
+        try write(h, "flowapp/cache/.env")
+        h.change("flowapp/cache/.env")
+        await h.run()
+        #expect(try h.latest()?.status == .skipped)
+        #expect(try h.state.reviewItems == [ReviewItem(id: "secret:flowapp/cache/.env", path: "flowapp/cache/.env", kind: .secretInExcluded)])
+    }
+
+    @Test func thirdPartyFoldersAndDeletedFilesAreNotItems() async throws {
+        let h = try Harness(); try h.prime(); try excludingVendor(h)
+        try write(h, "flowapp/node_modules/pkg/.env")
+        h.change("flowapp/node_modules/pkg/.env", "flowapp/cache/gone.pem")
+        await h.run()
+        #expect(try h.state.reviewItems.isEmpty)
+    }
+
+    @Test func aSecretExcludedByItsOwnNameIsNoSurprise() async throws {
+        let h = try Harness(); try h.prime()
+        h.set.backupSecrets = false
+        try h.save()
+        try write(h, "flowapp/.env")
+        h.change("flowapp/.env")
+        await h.run()
+        #expect(try h.state.reviewItems.isEmpty)
+    }
+
+    @Test func aManualRunStillLooksAtWhatChanged() async throws {
+        let h = try Harness(); try h.prime(); try excludingVendor(h)
+        try write(h, "flowapp/cache/key.pem")
+        h.change("flowapp/cache/key.pem")
+        await h.run(RunCommand(force: true))
+        #expect(try h.state.reviewItems.map(\.path) == ["flowapp/cache/key.pem"])
+    }
+
+    @Test func anItemIsRaisedOnceAndGoesWhenTheOwnerDecides() async throws {
+        let h = try Harness(); try h.prime(); try excludingVendor(h)
+        try write(h, "flowapp/cache/.env")
+        h.change("flowapp/cache/.env")
+        await h.run()
+        h.change("flowapp/cache/.env", id: 11)
+        await h.run()
+        #expect(try h.state.reviewItems.count == 1)
+
+        h.set.rules.insert(UserRule(pattern: "/flowapp/cache/.env", action: .exclude), at: 0)
+        try h.save()
+        h.change("flowapp/cache/.env", id: 12)
+        await h.run()
+        #expect(try h.state.reviewItems.isEmpty)
+    }
+
+    private func repo(_ h: Harness, tracked: String) throws {
+        let dir = h.source.appendingPathComponent("flowapp")
+        try write(h, "flowapp/\(tracked)")
+        func git(_ a: String...) throws {
+            let p = Process()
+            p.executableURL = URL(fileURLWithPath: "/usr/bin/git")
+            p.arguments = ["-C", dir.path] + a
+            p.standardOutput = FileHandle.nullDevice; p.standardError = FileHandle.nullDevice
+            try p.run(); p.waitUntilExit()
+        }
+        try git("init", "-q")
+        try git("add", "-f", tracked)
+    }
+
+    @Test func aFullPassFindsTrackedFilesInExcludedFolders() async throws {
+        let h = try Harness(); try h.prime(); try excludingVendor(h)
+        try repo(h, tracked: "cache/committed.txt")
+        h.now = Date()   // the index was just written
+        var s = try h.state
+        s.lastFullPass = h.now.addingTimeInterval(-2 * 86_400)
+        try h.store.save(s, for: h.pair)
+        h.change("flowapp/a.txt")
+        await h.run()
+        #expect(try h.state.reviewItems == [ReviewItem(id: "tracked:flowapp/cache", path: "flowapp/cache", kind: .trackedInExcluded)])
+    }
+
+    @Test func aRepoWhoseIndexIsOlderThanTheLastPassIsLeftAlone() async throws {
+        let h = try Harness(); try h.prime(); try excludingVendor(h)
+        try repo(h, tracked: "cache/committed.txt")
+        h.now = Date().addingTimeInterval(3 * 86_400)
+        var s = try h.state
+        s.lastFullPass = h.now.addingTimeInterval(-2 * 86_400)   // a day after the index changed
+        try h.store.save(s, for: h.pair)
+        h.change("flowapp/a.txt")
+        await h.run()
+        #expect(try h.state.reviewItems.isEmpty)
+    }
+
+    @Test func anOrdinaryRunRunsNoGit() async throws {
+        let h = try Harness(); try h.prime(); try excludingVendor(h)
+        try repo(h, tracked: "cache/committed.txt")
+        h.now = Date()
+        var s = try h.state
+        s.lastFullPass = h.now.addingTimeInterval(-3600)
+        try h.store.save(s, for: h.pair)
+        h.change("flowapp/a.txt")
+        await h.run()
+        #expect(try h.state.reviewItems.isEmpty)
+    }
+}
+
+/// Everything goes through, until something is captured.
+private struct CancelledCapture: RcloneRunning {
+    let wrapping: FakeRclone
+    func sync(_ r: SyncRequest) async throws -> RcloneResult { try await wrapping.sync(r) }
+    func check(_ r: CheckRequest) async throws -> RcloneResult { try await wrapping.check(r) }
+    func capture(_ arguments: [String], context: RcloneContext) async throws -> RcloneCapture { throw CancellationError() }
 }

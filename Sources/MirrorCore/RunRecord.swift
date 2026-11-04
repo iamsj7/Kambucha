@@ -17,6 +17,8 @@ public struct RunRecord: Codable, Identifiable, Equatable, Sendable {
     public var filesChecked: Int, copied: Int, renamed: Int, deleted: Int, archived: Int
     public var bytes: Int64
     public var verification: String
+    /// Archive folders past their keep period that this run removed. Optional, so older records still read.
+    public var archivesPruned: Int?
     public var pendingUploads: Int, refused: Int
     public var errors: [String]
     public var status: Status
@@ -25,7 +27,8 @@ public struct RunRecord: Codable, Identifiable, Equatable, Sendable {
                 start: Date, end: Date, trigger: Trigger, scope: String,
                 filesChecked: Int = 0, copied: Int = 0, renamed: Int = 0, deleted: Int = 0, archived: Int = 0,
                 bytes: Int64 = 0, verification: String = "", pendingUploads: Int = 0, refused: Int = 0,
-                errors: [String] = [], status: Status) {
+                errors: [String] = [], status: Status, archivesPruned: Int? = nil) {
+        self.archivesPruned = archivesPruned
         self.id = id; self.setID = setID; self.setName = setName
         self.destinationID = destinationID; self.destinationName = destinationName
         self.start = start; self.end = end; self.trigger = trigger; self.scope = scope

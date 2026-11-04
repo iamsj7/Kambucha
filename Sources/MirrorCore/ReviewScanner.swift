@@ -45,6 +45,40 @@ public struct ReviewScanner: Sendable {
         return out
     }
 
+    /// Repos below `source`, by a look at folder listings. Excluded folders are never entered, nor are
+    /// repos, so a vendored checkout inside one isn't reported as the owner's.
+    public func repos(in source: URL, isExcluded: (String) -> Bool, maxDepth: Int = 4) -> [URL] {
+        let fm = FileManager.default
+        var found: [URL] = []
+        func walk(_ dir: URL, _ rel: String, _ depth: Int) {
+            if fm.fileExists(atPath: dir.appendingPathComponent(".git/index").path) { found.append(dir); return }
+            guard depth < maxDepth, let names = try? fm.contentsOfDirectory(atPath: dir.path) else { return }
+            for name in names.sorted() where name != ".git" {
+                let path = rel.isEmpty ? name : rel + "/" + name
+                let url = dir.appendingPathComponent(name)
+                var st = stat()
+                guard lstat(url.path, &st) == 0, (st.st_mode & S_IFMT) == S_IFDIR, !isExcluded(path + "/") else { continue }
+                walk(url, path, depth + 1)
+            }
+        }
+        walk(source, "", 0)
+        return found
+    }
+
+    /// One item per outermost excluded folder holding tracked files. `prefix` is the repo's folder in the
+    /// set, "" at its root, and items carry set-relative paths. `git ls-files` only: no folder is walked.
+    public func trackedInExcluded(repo: URL, prefix: String, isExcluded: (String) -> Bool) throws -> [ReviewItem] {
+        var folders = Set<String>()
+        for file in try gitLsFiles(repo) {
+            var path = prefix
+            for part in file.split(separator: "/").dropLast() {
+                path += path.isEmpty ? String(part) : "/\(part)"
+                if isExcluded(path + "/") { folders.insert(path); break }
+            }
+        }
+        return folders.sorted().map { ReviewItem(id: "tracked:\($0)", path: $0, kind: .trackedInExcluded) }
+    }
+
     /// A repo's own config must not be able to run anything in this process (core.fsmonitor, hooks).
     static func gitArguments(_ repo: URL) -> [String] {
         ["-C", repo.path, "-c", "core.fsmonitor=false", "-c", "core.hooksPath=/dev/null",

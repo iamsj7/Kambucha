@@ -3,6 +3,7 @@ import Foundation
 public enum ArchiveError: Error, Equatable, Sendable {
     case outsideArchive(String)
     case rcloneFailed(String)
+    case authExpired
 }
 
 /// Keeps archive work inside `Archive/`. Textual checks for every endpoint; for a local folder the path is
@@ -162,13 +163,18 @@ public struct ArchiveManager: Sendable {
         return path
     }
 
-    private func args(_ a: [String]) -> [String] { a + ["--config", context.configPath] }
+    /// JSON on stderr, so an expired sign-in can be told apart the way a run's log is read.
+    private func args(_ a: [String]) -> [String] { a + ["--use-json-log", "--config", context.configPath] }
+
+    private func failure(_ out: RcloneCapture) -> ArchiveError {
+        RcloneLogParser.outcome(exitCode: out.exitCode, log: Data(out.stderr.utf8)) == .authExpired ? .authExpired : .rcloneFailed(out.stderr)
+    }
 
     // rclone reports a missing directory as exit code 3. For an archive that has not been made yet that is empty.
     private func lsf(_ extra: [String], _ path: String) async throws -> [String] {
         let out = try await rclone.capture(args(["lsf"] + extra + [path]), context: context)
         if out.exitCode == 3 { return [] }
-        guard out.exitCode == 0 else { throw ArchiveError.rcloneFailed(out.stderr) }
+        guard out.exitCode == 0 else { throw failure(out) }
         return out.stdout.split(separator: "\n", omittingEmptySubsequences: true).map(String.init)
     }
 
@@ -192,20 +198,24 @@ public struct ArchiveManager: Sendable {
     /// Purges stamp folders older than the set's keep period (never less than 1 day). Only
     /// `Archive/<set>/<stamp>` is ever passed to purge. The newest stamp is always kept, and nothing is
     /// pruned when the clock looks wrong: a stamp in the future, or a newest stamp older than the keep period
-    /// plus 7 days (a forward jump would otherwise make every stamp look expired).
-    public func prune(set: BackupSet, now: Date) async throws {
+    /// plus 7 days (a forward jump would otherwise make every stamp look expired). Returns how many went.
+    @discardableResult
+    public func prune(set: BackupSet, now: Date) async throws -> Int {
         let base = try target(set)
         let keep = Double(max(1, set.archiveDays)) * 86_400
         let stamps = try await lsf(["--dirs-only"], base).map { $0.hasSuffix("/") ? String($0.dropLast()) : $0 }
         let dated = stamps.compactMap { s in ArchiveScope.parseStamp(s).map { (s, $0) } }
-        guard let newest = dated.map(\.1).max() else { return }
-        if newest > now || now.timeIntervalSince(newest) > keep + 7 * 86_400 { return }
+        guard let newest = dated.map(\.1).max() else { return 0 }
+        if newest > now || now.timeIntervalSince(newest) > keep + 7 * 86_400 { return 0 }
+        var purged = 0
         let cutoff = now.addingTimeInterval(-keep)
         for (stamp, date) in dated where date < cutoff && date != newest {
             let path = try target(set, stamp: stamp)
             let out = try await rclone.capture(args(["purge", path]), context: context)
-            guard out.exitCode == 0 || out.exitCode == 3 else { throw ArchiveError.rcloneFailed(out.stderr) }
+            guard out.exitCode == 0 || out.exitCode == 3 else { throw failure(out) }
+            purged += 1
         }
+        return purged
     }
 
     /// Frees uploaded archive files on this Mac. iCloud only, and only below `Archive/<set>`; the mirror is

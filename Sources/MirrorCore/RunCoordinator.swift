@@ -37,12 +37,28 @@ public final class RunCoordinator: Sendable {
     private let remote: any RemoteFileAccessing
     private let paths: RunPaths
     private let helperCheck: @Sendable () throws -> Void
+    private let archives: @Sendable (String, RcloneContext, DestinationKind) -> ArchiveManager
+    private let reviewer: ReviewScanner
 
-    public init(store: ConfigStore, records: RunRecordStore, problems: ProblemCenter, rclone: any RcloneRunning,
+    public convenience init(store: ConfigStore, records: RunRecordStore, problems: ProblemCenter, rclone: any RcloneRunning,
+                            feed: any ChangeFeeding, verifier: Verifier, guard pathGuard: PathGuard, detector: StackDetector,
+                            filters: FilterBuilder, clock: @escaping @Sendable () -> Date,
+                            sessions: @escaping @Sendable (Destination) -> any RunSession, remote: any RemoteFileAccessing,
+                            paths: RunPaths, helperCheck: @escaping @Sendable () throws -> Void = {}) {
+        self.init(store: store, records: records, problems: problems, rclone: rclone, feed: feed, verifier: verifier,
+                  guard: pathGuard, detector: detector, filters: filters, clock: clock, sessions: sessions, remote: remote,
+                  paths: paths, helperCheck: helperCheck,
+                  archives: { ArchiveManager(rclone: rclone, endpoint: $0, context: $1, kind: $2) })
+    }
+
+    init(store: ConfigStore, records: RunRecordStore, problems: ProblemCenter, rclone: any RcloneRunning,
                 feed: any ChangeFeeding, verifier: Verifier, guard pathGuard: PathGuard, detector: StackDetector,
                 filters: FilterBuilder, clock: @escaping @Sendable () -> Date,
                 sessions: @escaping @Sendable (Destination) -> any RunSession, remote: any RemoteFileAccessing,
-                paths: RunPaths, helperCheck: @escaping @Sendable () throws -> Void = {}) {
+                paths: RunPaths, helperCheck: @escaping @Sendable () throws -> Void,
+                archives: @escaping @Sendable (String, RcloneContext, DestinationKind) -> ArchiveManager) {
+        self.archives = archives
+        reviewer = ReviewScanner(filters: filters)
         self.store = store; self.records = records; self.problems = problems; self.rclone = rclone
         self.feed = feed; self.verifier = verifier; self.pathGuard = pathGuard; self.detector = detector
         self.filters = filters; self.clock = clock; self.sessions = sessions; self.remote = remote; self.paths = paths
@@ -143,6 +159,7 @@ public final class RunCoordinator: Sendable {
         var filesChecked = 0
         var verification = ""
         var pending = 0, refused = 0
+        var archivesPruned = 0
         var errors: [String] = []
         var status = RunRecord.Status.failed
         /// Raised once the run is over, so a slow notification never holds a session open.
@@ -295,14 +312,15 @@ public final class RunCoordinator: Sendable {
         let wanted = command.force || job.approved != nil
         var projects: [DetectedProject]?
         var scope = RunScope.nothing
-        if wanted {
-            scope = .wholeSet
-        } else if !batch.paths.isEmpty || batch.mustRescan {
+        var newItems: [ReviewItem] = []
+        if wanted || !batch.paths.isEmpty || batch.mustRescan {
             let found = try scan(&set, state: &state)
             projects = found
             let matcher = FilterMatcher(lines: filters.lines(for: set, projects: found, scope: nil))
-            scope = ScopeMapper().scope(for: batch, root: set.source, isExcluded: matcher.isExcluded)
+            scope = wanted ? .wholeSet : ScopeMapper().scope(for: batch, root: set.source, isExcluded: matcher.isExcluded)
+            newItems = secretsChanged(batch, set: set, matcher: matcher)
         }
+        settleReview(newItems, set: set, state: &state)
         let plan = RunPlanner.plan(state: state, scope: scope, profile: job.profile, now: clock())
         if plan.isDailyPass, tally.trigger == .schedule { tally.trigger = .daily }
 
@@ -381,6 +399,7 @@ public final class RunCoordinator: Sendable {
         // What earlier runs left unproven. Kept apart, as `owe` may give the saved list up to the flag.
         let carried = state.verifyOwed
         let flaggedBefore = state.hashWholeSet
+        let previousPass = state.lastFullPass
 
         func request(_ s: Slice, mode: SyncMode, dryRun: Bool) -> SyncRequest {
             SyncRequest(source: s.source, destination: s.destination, backupDir: s.backupDir, filterFile: s.filter,
@@ -503,6 +522,99 @@ public final class RunCoordinator: Sendable {
         try await reconcileUploads(job, set: set, state: &state, tally: &tally)
         finish(job, plan: plan, scope: scope, batch: batch, verified: verified, holding: holding, deepRan: deepRan, state: &state)
         tally.status = holding ? .held : (verified.backedUp && state.isBackedUp ? .success : .partial)
+        try await tidy(job, set: set, scope: scope, fullPass: plan.isDailyPass, previousPass: previousPass, holding: holding,
+                       matcher: matcher, endpoint: endpoint, context: context, state: &state, tally: &tally)
+    }
+
+    // MARK: After a finished run
+
+    /// Housekeeping for a run whose sync and checks passed. The backup stands whatever happens here, so a
+    /// failure is only noted. What would stop a run stops this too: a cancel, an expired sign-in, a bad rclone.
+    private func tidy(_ job: Job, set: BackupSet, scope: RunScope, fullPass: Bool, previousPass: Date?, holding: Bool,
+                      matcher: FilterMatcher, endpoint: String, context: RcloneContext,
+                      state: inout SetState, tally: inout Tally) async throws {
+        if job.isLocal {
+            do { try writeManifest(set: set, scope: scope, matcher: matcher) } catch {
+                Self.log.error("could not save the symlink list")
+                tally.errors.append("The symlink list could not be saved")
+            }
+        }
+        if fullPass { reviewRepos(set: set, since: previousPass, matcher: matcher, state: &state, tally: &tally) }
+        guard !holding else { return }   // the archive may be what undoes whatever is being held
+        let archive = archives(endpoint, context, job.destination.kind)
+        do {
+            let pruned = try await archive.prune(set: set, now: clock())
+            tally.archivesPruned = pruned
+            if pruned > 0 { Self.log.info("pruned \(pruned) archive folders") }
+            let evicted = try archive.evictUploaded(set: set)
+            if evicted > 0 { Self.log.info("evicted \(evicted) archive files") }
+        } catch ArchiveError.authExpired {
+            throw ArchiveError.authExpired
+        } catch let error as AgentFailure {
+            throw error
+        } catch is CancellationError {
+            throw CancellationError()
+        } catch {
+            Self.log.error("archive pruning failed")   // rclone's text can quote a token, so it stays out
+            tally.errors.append("The archive could not be pruned")
+        }
+    }
+
+    /// A scoped run walks only its folders, and an unchanged list isn't written, as iCloud would upload it.
+    private func writeManifest(set: BackupSet, scope: RunScope, matcher: FilterMatcher) throws {
+        let root = pathGuard.backupRoot
+        let skip: (String) -> Bool = { matcher.isExcluded($0 + "/") }
+        let old = try? SymlinkManifest.read(set: set.name, backupRoot: root)
+        var fresh: SymlinkManifest
+        if case .projects(let names) = scope, let old {
+            fresh = old.refreshing(names, source: set.source, skipDirectory: skip)
+        } else {
+            fresh = SymlinkManifest.scan(set: set, source: set.source, skipDirectory: skip)
+        }
+        fresh.entries.removeAll { matcher.isExcluded($0.path) }
+        guard fresh != old else { return }
+        // The manifest's own check can't see a Manifests folder that is itself a link.
+        try pathGuard.assertInsideRoot(try SymlinkManifest.location(set: set.name, backupRoot: root))
+        try fresh.write(backupRoot: root)
+    }
+
+    /// Spec section 9: secrets FSEvents saw inside excluded folders, spotted by name at no cost.
+    private func secretsChanged(_ batch: ChangeBatch, set: BackupSet, matcher: FilterMatcher) -> [ReviewItem] {
+        let inExcluded = ScopeMapper.relative(batch.paths, root: set.source).filter { path in
+            let folder = (path as NSString).deletingLastPathComponent
+            return !folder.isEmpty && matcher.isExcluded(folder + "/") && Self.exists(set.source.appendingPathComponent(path))
+        }
+        return reviewer.secretsIn(changedExcludedPaths: inExcluded)
+    }
+
+    /// On a full pass, `git ls-files` for repos whose index moved since the last one.
+    private func reviewRepos(set: BackupSet, since: Date?, matcher: FilterMatcher, state: inout SetState, tally: inout Tally) {
+        var found: [ReviewItem] = []
+        var failed = false
+        let base = set.source.standardizedFileURL.path + "/"
+        for repo in reviewer.repos(in: set.source, isExcluded: matcher.isExcluded) {
+            let index = repo.appendingPathComponent(".git/index")
+            let changed = (try? FileManager.default.attributesOfItem(atPath: index.path))?[.modificationDate] as? Date
+            if let since, let changed, changed <= since { continue }
+            let path = repo.standardizedFileURL.path
+            let prefix = path.hasPrefix(base) ? String(path.dropFirst(base.count)) : ""
+            do { found += try reviewer.trackedInExcluded(repo: repo, prefix: prefix, isExcluded: matcher.isExcluded) }
+            catch { failed = true }
+        }
+        if failed {
+            Self.log.error("git could not list a repo")
+            tally.errors.append("A repository could not be checked")
+        }
+        settleReview(found, set: set, state: &state)
+    }
+
+    /// Adds what's new, once, and lets go of anything the owner has since made a rule for.
+    private func settleReview(_ found: [ReviewItem], set: BackupSet, state: inout SetState) {
+        let decided = Set(set.rules.map(\.pattern))
+        state.reviewItems.removeAll { decided.contains($0.rulePattern) }
+        for item in found where !decided.contains(item.rulePattern) && !state.reviewItems.contains(where: { $0.id == item.id }) {
+            state.reviewItems.append(item)
+        }
     }
 
     /// Adds to what's owed, even with the flag set: the flag can clear in this same run, and what
@@ -810,7 +922,8 @@ public final class RunCoordinator: Sendable {
             default:
                 fail("\(failure)", job, state: &state, tally: &tally)
             }
-        case Stop.rclone(.authExpired, _), VerifyError.checkDidNotComplete(.authExpired), RemoteFileError.authExpired:
+        case Stop.rclone(.authExpired, _), VerifyError.checkDidNotComplete(.authExpired), RemoteFileError.authExpired,
+             ArchiveError.authExpired:
             signInExpired()
         case RcloneSessionError.notSignedIn, RcloneSessionError.invalidSignIn:
             signInExpired()
@@ -905,7 +1018,7 @@ public final class RunCoordinator: Sendable {
                                filesChecked: tally.filesChecked, copied: s.copied.count, renamed: s.renamed.count,
                                deleted: s.deleted.count, archived: s.archived.count, bytes: s.bytes,
                                verification: tally.verification, pendingUploads: tally.pending, refused: tally.refused,
-                               errors: tally.errors, status: tally.status)
+                               errors: tally.errors, status: tally.status, archivesPruned: tally.archivesPruned)
         do { try records.append(record) } catch { Self.log.error("could not write a run record") }
     }
 
@@ -966,11 +1079,8 @@ public final class RunCoordinator: Sendable {
         }
     }
 
-    /// Sortable, and safe as a folder name on every destination.
-    private static func stamp(_ date: Date) -> String {
-        date.formatted(Date.ISO8601FormatStyle(timeZone: .gmt).year().month().day().time(includingFractionalSeconds: false)
-            .dateSeparator(.omitted).timeSeparator(.omitted))
-    }
+    /// The archive's own format, or it would never list or prune what a run left there.
+    private static func stamp(_ date: Date) -> String { ArchiveScope.stampString(date) }
 
     private static func add(_ s: LogSummary, to total: inout LogSummary) {
         total.copied += s.copied; total.deleted += s.deleted; total.archived += s.archived

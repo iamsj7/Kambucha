@@ -205,6 +205,36 @@ private struct NoSession: RunSession {
         #expect(try r.problems.active().isEmpty)
     }
 
+    @Test func aRealRunArchivesWhereTheArchiveCanFindItAndPrunesWhatExpired() async throws {
+        let r = try Rig()
+        try r.write("p/f.txt", "first")
+        try r.write("p/g.txt")
+        _ = try await r.run()
+
+        let expired = ArchiveScope.stampString(Date().addingTimeInterval(-40 * 86_400))
+        let old = r.backupRoot.appendingPathComponent("Archive/x/\(expired)/p")
+        try FileManager.default.createDirectory(at: old, withIntermediateDirectories: true)
+        try Data("old".utf8).write(to: old.appendingPathComponent("stale.txt"))
+
+        try r.write("p/f.txt", "second, and longer")
+        let record = try await r.run()
+        #expect(record.status == .success)
+        #expect(record.archivesPruned == 1)
+        #expect(!FileManager.default.fileExists(atPath: old.path))
+
+        let entries = try await ArchiveManager(rclone: r.rclone, endpoint: r.backupRoot.path, context: plain, kind: .iCloudFolder).list(set: r.set)
+        #expect(entries.map { ($0.path as NSString).lastPathComponent } == ["f.txt"])
+    }
+
+    @Test func aRealRunWritesTheManifestRestoreReads() async throws {
+        let r = try Rig()
+        try r.write("p/f.txt")
+        try FileManager.default.createSymbolicLink(atPath: r.source.appendingPathComponent("p/link").path, withDestinationPath: "f.txt")
+        _ = try await r.run()
+        let manifest = try SymlinkManifest.read(set: "x", backupRoot: r.backupRoot)
+        #expect(manifest.entries == [.init(path: "p/link", target: "f.txt", isAbsolute: false, isBroken: false)])
+    }
+
     @Test func emptiedSourceLeavesTheMirrorAlone() async throws {
         let r = try Rig()
         for i in 0..<5 { try r.write("p/f\(i).txt") }

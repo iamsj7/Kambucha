@@ -28,6 +28,20 @@ public struct SymlinkManifest: Equatable, Sendable {
     /// source-relative folder path and returns true to leave it unvisited (junk folders hold thousands of links).
     public static func scan(set: BackupSet, source: URL,
                             skipDirectory: (String) -> Bool = { _ in false }) -> SymlinkManifest {
+        SymlinkManifest(set: set.name, entries: links(under: source, prefix: "", skipDirectory: skipDirectory))
+    }
+
+    /// This manifest with `folders`, which are set-relative, read afresh and the rest left as it was.
+    public func refreshing(_ folders: [String], source: URL, skipDirectory: (String) -> Bool = { _ in false }) -> SymlinkManifest {
+        var kept = entries.filter { e in !folders.contains { e.path.hasPrefix($0 + "/") } }
+        for folder in folders {
+            kept += Self.links(under: source.appendingPathComponent(folder), prefix: folder, skipDirectory: skipDirectory)
+        }
+        kept.sort { $0.path < $1.path }
+        return SymlinkManifest(set: set, entries: kept)
+    }
+
+    private static func links(under source: URL, prefix: String, skipDirectory: (String) -> Bool) -> [Entry] {
         let fm = FileManager.default
         var entries: [Entry] = []
         // Listed folder by folder with lstat: the enumerator drops dangling links.
@@ -48,9 +62,9 @@ public struct SymlinkManifest: Equatable, Sendable {
                 }
             }
         }
-        walk(source, "")
+        walk(source, prefix)
         entries.sort { $0.path < $1.path }
-        return SymlinkManifest(set: set.name, entries: entries)
+        return entries
     }
 
     /// `<backupRoot>/Manifests/<set>.json`. Refuses a set name that is not one path component.

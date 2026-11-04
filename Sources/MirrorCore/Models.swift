@@ -91,6 +91,9 @@ public struct ReviewItem: Codable, Equatable, Identifiable, Sendable {
     public var path: String
     public var kind: Kind
     public init(id: String, path: String, kind: Kind) { self.id = id; self.path = path; self.kind = kind }
+
+    /// The anchored rule that answers this item. Once the owner has one, the item is settled.
+    public var rulePattern: String { "/" + FilterBuilder.escape(path) }
 }
 
 public struct SetState: Codable, Equatable, Sendable {
