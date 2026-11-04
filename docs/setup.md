@@ -46,11 +46,12 @@ If Full Disk Access is ever lost, Mirror sends a notification and shows "Needs A
 
 ## 3. Add a folder and run the first backup
 
-1. Open Mirror from the menu bar and choose Open Mirror.
-2. Add a backup set. Choose the folder you want to protect. It can hold many projects.
-3. Mirror looks inside and switches on the presets for the kinds of project it finds, such as Node, Flutter or iOS. You can change any of them.
-4. Choose Preview Backup. You see what will be backed up, what will be skipped and how large each part is, and a short list of items that need your decision. Untick anything you do not want, or tick anything you do.
-5. Choose Start Backup.
+The first-run screen ends with this step. Later sets start from the plus button in the toolbar.
+
+1. Choose the folder you want to protect. It can hold many projects.
+2. Mirror looks inside and switches on the presets for the kinds of project it finds, such as Node, Flutter or iOS.
+3. The preview opens by itself. You see what will be backed up, what will be skipped and how large each part is, and a short list of items that need your decision. Untick anything you do not want, or tick anything you do. To change the presets, cancel and use the set's screen, then choose Preview Backup.
+4. Choose Start Backup. Nothing is copied before this.
 
 By default your destination is a folder called `Mac Backup` in iCloud Drive. Mirror only ever writes inside that folder. It will not start if a folder with that name exists but was not made by Mirror.
 

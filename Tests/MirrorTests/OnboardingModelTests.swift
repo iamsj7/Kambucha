@@ -144,4 +144,29 @@ struct OnboardingModelTests {
         m.addFirstSet(folder: folder)
         #expect(try ConfigStore(root: root).loadSets().first?.archiveDays == 90)
     }
+
+    @Test func firstSetTurnsOnTheStacksItFinds() throws {
+        let sys = FakeSystem()
+        let (m, root) = make(sys)
+        let folder = root.appendingPathComponent("Docs")
+        try FileManager.default.createDirectory(at: folder.appendingPathComponent("site"), withIntermediateDirectories: true)
+        try "{}".write(to: folder.appendingPathComponent("site/package.json"), atomically: true, encoding: .utf8)
+        m.addFirstSet(folder: folder)
+        #expect(try ConfigStore(root: root).loadSets().first?.presets.contains("node") == true)
+    }
+
+    @Test func firstSetGoesStraightToItsPreview() throws {
+        let sys = FakeSystem()
+        let (m, root) = make(sys)
+        m.addFirstSet(folder: root.appendingPathComponent("missing"))
+        #expect(m.setAwaitingPreview == nil)
+        let folder = root.appendingPathComponent("Docs")
+        try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+        m.addFirstSet(folder: folder)
+        let set = try #require(try ConfigStore(root: root).loadSets().first)
+        #expect(m.setAwaitingPreview == set.id)
+        #expect(!set.isPreviewAccepted)
+        m.previewShown()
+        #expect(m.setAwaitingPreview == nil)
+    }
 }

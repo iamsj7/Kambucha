@@ -152,6 +152,11 @@ final class AppModel {
         }
     }
 
+    /// Reads state now, for a change made outside this model that the next line depends on.
+    func reload() {
+        if let snap = Snapshot.load(support: support) { apply(snap) }
+    }
+
     private func apply(_ snap: Snapshot) {
         sets = snap.sets; rows = snap.rows; status = snap.status; progress = snap.progress
         agentRunning = snap.running
@@ -285,7 +290,7 @@ final class AppModel {
         lastError = nil
         do { try write() } catch { lastError = "Mirror could not save your changes." }
         // Apply at once so the screen the owner is on reflects the change before the file watcher fires.
-        if let snap = Snapshot.load(support: support) { apply(snap) }
+        reload()
         refresh()
     }
 

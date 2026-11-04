@@ -22,6 +22,7 @@ struct MainWindow: View {
     @State private var archive: ArchiveModel
     @State private var activity: ActivityModel
     @State private var onboarding: OnboardingModel
+    @State private var firstPreview: ReviewTarget?
 
     init(model: AppModel) {
         self.model = model
@@ -47,6 +48,13 @@ struct MainWindow: View {
                 try? await Task.sleep(for: .seconds(onboarding.isComplete ? 30 : 2))
             }
         }
+        .onChange(of: onboarding.setAwaitingPreview) { _, id in
+            guard let id else { return }
+            model.reload()
+            onboarding.previewShown()
+            selection = .set(id)
+            firstPreview = ReviewTarget(id: id)
+        }
     }
 
     private var split: some View {
@@ -66,6 +74,16 @@ struct MainWindow: View {
         }
         .sheet(item: reviewBinding) { item in
             DeletionReviewSheet(model: model, setID: item.id)
+        }
+        .sheet(item: $firstPreview) { item in
+            if let set = model.set(item.id) {
+                PreviewSheet(model: model, set: set) { updated in
+                    var accepted = updated
+                    accepted.acceptPreview()
+                    model.save(set: accepted)
+                    model.runNow(accepted.id)
+                }
+            }
         }
         .confirmationDialog(removalTitle, isPresented: $confirmingRemoval, titleVisibility: .visible) {
             Button("Remove", role: .destructive) { removeSelection() }

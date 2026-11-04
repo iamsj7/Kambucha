@@ -163,17 +163,22 @@ final class OnboardingModel {
     private(set) var hasRefreshed = false
     private(set) var checkFailed = false
     private(set) var kickFailed = false
+    /// The set just added here. The window goes straight to its preview, since nothing backs up until that's accepted.
+    private(set) var setAwaitingPreview: UUID?
     @ObservationIgnored private var firstCheckDone = false
 
     @ObservationIgnored private let system: any OnboardingSystem
     @ObservationIgnored private let store: ConfigStore
     @ObservationIgnored private let settings: SettingsStore
     @ObservationIgnored private let pathGuard: PathGuard
+    @ObservationIgnored private let presets: () -> [Preset]
 
     init(system: any OnboardingSystem = LiveOnboardingSystem(), store: ConfigStore = ConfigStore(root: MirrorPaths.support),
          settings: SettingsStore = SettingsStore(root: MirrorPaths.support),
-         pathGuard: PathGuard = PathGuard(iCloudDrive: MirrorPaths.iCloudDrive, backupRoot: MirrorPaths.backupRoot)) {
+         pathGuard: PathGuard = PathGuard(iCloudDrive: MirrorPaths.iCloudDrive, backupRoot: MirrorPaths.backupRoot),
+         presets: @escaping () -> [Preset] = { (try? PresetCatalog.all()) ?? [] }) {
         self.system = system; self.store = store; self.settings = settings; self.pathGuard = pathGuard
+        self.presets = presets
     }
 
     func isDone(_ s: OnboardingStep) -> Bool { done.contains(s) }
@@ -248,8 +253,7 @@ final class OnboardingModel {
         do {
             var destinations = try store.loadDestinations()
             let icloud = destinations.first { $0.kind == .iCloudFolder } ?? Destination(name: "iCloud Drive", kind: .iCloudFolder)
-            let name = PathGuard.sanitizedComponent(folder.lastPathComponent)
-            var set = BackupSet(name: name, source: folder, destinationIDs: [icloud.id])
+            var set = NewSet.make(folder: folder, presets: presets(), destinations: [icloud])
             set.archiveDays = (try? settings.load().defaultRetentionDays) ?? AppSettings().defaultRetentionDays
             let existing = try store.loadSets()
             try pathGuard.validateNewSet(set, existing: existing)
@@ -257,12 +261,15 @@ final class OnboardingModel {
             try store.saveSets(existing + [set])
             message = nil
             done.insert(.firstSet)
+            setAwaitingPreview = set.id
         } catch let e as GuardFailure {
             message = Self.explain(e)
         } catch {
             message = "Mirror couldn't add this folder."
         }
     }
+
+    func previewShown() { setAwaitingPreview = nil }
 
     static func explain(_ e: GuardFailure) -> String {
         switch e {
@@ -298,9 +305,6 @@ struct OnboardingView: View {
             .background(.quaternary.opacity(0.4), in: RoundedRectangle(cornerRadius: 10))
             if let m = model.message {
                 Label(m, systemImage: "exclamationmark.triangle").font(.callout)
-            }
-            if model.isComplete {
-                Label("All set. Mirror is ready.", systemImage: "checkmark.circle").font(.headline)
             }
         }
         .padding(24)
@@ -353,7 +357,7 @@ private struct StepRow: View {
                 ? "Notifications are off for Mirror. Switch them on in System Settings so you hear about problems."
                 : "Mirror tells you when something needs attention, such as held deletions or a failed check."
         case .firstSet:
-            "Choose a folder to back up. It is copied to iCloud Drive and checked after every run."
+            "Choose a folder to back up. Mirror turns on the stacks it finds and shows you a preview. Nothing is copied until you start it."
         }
     }
 
