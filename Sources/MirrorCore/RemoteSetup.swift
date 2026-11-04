@@ -65,7 +65,6 @@ public struct RemoteSetup: Sendable {
             case .absent:
                 guard vaultBefore == .absent else { throw RemoteSetupError.vaultLostNeedsRecoveryKit }
                 try secrets.saveVault(.generate(), for: destination)
-                try secrets.write(SecretKeys.firstRevealPending, key: SecretKeys.firstReveal(destination.id))
             }
         }
         try secrets.saveSignIn(signedIn, for: destination)

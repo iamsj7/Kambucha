@@ -40,6 +40,7 @@ final class MemorySecrets: SecretStoring, @unchecked Sendable {
         lock.withLock { values[key] = nil }
     }
     var isEmpty: Bool { lock.withLock { values.isEmpty } }
+    var keys: Set<String> { lock.withLock { Set(values.keys) } }
 }
 
 final class TempDir {
@@ -709,45 +710,6 @@ private func cryptName(_ endpoint: String) -> String {
         #expect(try rig.secrets.vault(for: d) == vault)   // new keys would strand every existing backup
     }
 
-    // MARK: - First reveal
-
-    private func marker(_ rig: Rig, _ d: Destination) throws -> String? {
-        try rig.secrets.read(SecretKeys.firstReveal(d.id))
-    }
-
-    @Test func newVaultMarksItsFirstReveal() async throws {
-        let rig = try Rig()
-        let d = Destination(name: "Drive", kind: .googleDrive)
-        try await rig.setup.connect(d, clientID: "id", clientSecret: "s")
-        #expect(try marker(rig, d) == SecretKeys.firstRevealPending)
-    }
-
-    @Test func existingVaultGetsNoMarker() async throws {
-        let rig = try Rig()
-        let d = Destination(name: "Drive", kind: .googleDrive)
-        try await rig.setup.connect(d, clientID: "id", clientSecret: "s")
-        try rig.secrets.delete(SecretKeys.firstReveal(d.id))
-        try await rig.setup.connect(d, clientID: "id", clientSecret: "s")
-        #expect(try marker(rig, d) == nil)
-    }
-
-    /// The marker waives the owner check. Being able to re-run setup must not earn another waiver.
-    @Test func vaultAppearingDuringTheBrowserGetsNoMarker() async throws {
-        let rig = try Rig()
-        let d = Destination(name: "Drive", kind: .googleDrive)
-        let json = String(decoding: try JSONEncoder().encode(VaultSecrets.generate()), as: UTF8.self)
-        rig.secrets.appearsAfterFirstRead = (SecretKeys.vault(d.id), json)
-        try await rig.setup.connect(d, clientID: "id", clientSecret: "s")
-        #expect(try marker(rig, d) == nil)
-    }
-
-    @Test func unencryptedDestinationGetsNoMarker() async throws {
-        let rig = try Rig()
-        let d = Destination(name: "O", kind: .oneDrive, encrypted: false)
-        try await rig.setup.connect(d, clientID: nil, clientSecret: nil)
-        #expect(try marker(rig, d) == nil)
-    }
-
     @Test func connectLeavesUnencryptedDestinationWithoutVault() async throws {
         let rig = try Rig()
         let d = Destination(name: "O", kind: .oneDrive, encrypted: false)
@@ -1007,13 +969,6 @@ private func cryptName(_ endpoint: String) -> String {
         try rig.secrets.saveSignIn(["client_id": "kit-id", "client_secret": "kit-secret", "token": fakeToken], for: d)
         do { try await rig.setup.restore(d, from: kit(.generate())) } catch { #expect(!opens) }
         #expect(try rig.secrets.signIn(for: d)?["token"] == newToken)
-    }
-
-    @Test func restoreNeverMarksAFirstReveal() async throws {
-        let rig = try Rig(prelude: Self.listing)
-        let d = confirmed()
-        try await rig.setup.restore(d, from: kit(.generate()))
-        #expect(try rig.secrets.read(SecretKeys.firstReveal(d.id)) == nil)
     }
 
     private func browserRan(_ rig: Rig) -> Bool {

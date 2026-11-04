@@ -51,10 +51,6 @@ public enum SecretKeys {
     /// A sign-in kept from a restore that couldn't prove its kit, until the owner answers. Apart from
     /// `signIn` on purpose: there it would pass as a sign-in that survived.
     public static func heldSignIn(_ destination: UUID) -> String { "heldsignin.\(destination.uuidString)" }
-    /// Waives the owner check for the one reveal at creation. Written with a new vault and spent by
-    /// that reveal. Its absence means ask, so losing it can only ever cost a prompt.
-    public static func firstReveal(_ destination: UUID) -> String { "firstreveal.\(destination.uuidString)" }
-    public static let firstRevealPending = "pending"
 }
 
 extension SecretStoring {
