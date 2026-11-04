@@ -143,9 +143,10 @@ public final class DeletionReview {
 // MARK: Destinations
 
 public enum DestinationRules {
-    public static func encryptionDefault(_ kind: DestinationKind) -> Bool { kind != .iCloudFolder }
+    public static func encryptionDefault(_ kind: DestinationKind) -> Bool { kind == .googleDrive || kind == .oneDrive }
     /// The iCloud folder is covered by Advanced Data Protection, so no switch is offered.
-    public static func encryptionOffered(_ kind: DestinationKind) -> Bool { kind != .iCloudFolder }
+    /// An external drive relies on its own password protection, so it never offers encryption either.
+    public static func encryptionOffered(_ kind: DestinationKind) -> Bool { kind == .googleDrive || kind == .oneDrive }
     public static func needsClientID(_ kind: DestinationKind) -> Bool { kind == .googleDrive }
     public static let encryptionOffWarning =
         "Without encryption the provider can read secrets such as .env files and private keys. This can't be changed later without creating a new destination."
@@ -162,7 +163,7 @@ public enum DestinationRules {
 
     public static func filesystemWarning(_ name: String) -> String? {
         name.lowercased().contains("exfat")
-            ? "exFAT can't store symbolic links or file permissions, and it keeps coarser timestamps. Mirror stores links as .rclonelink files. APFS is recommended."
+            ? "exFAT can't keep symbolic links as real links, stores timestamps to 2 second precision, and files named ._* are skipped. APFS is recommended."
             : nil
     }
 }
@@ -219,6 +220,8 @@ public enum SetupFailureText {
         case .setNameTaken(let name): "A set called \"\(name)\" already exists."
         case .iCloudUnavailable: "iCloud Drive isn't available."
         case .destinationOutsideRoot, .destinationUnclaimed: "The backup folder isn't safe to use."
+        case .wrongDrive: "This isn't the drive this destination was set up with. Connect the right drive."
+        case .internalDiskNotConfirmed: "This looks like an internal disk and hasn't been confirmed. Remove the destination and add it again to confirm."
         case .sourceSuspiciouslyEmpty: "That folder looks empty compared with the last backup."
         }
     }
