@@ -77,4 +77,16 @@ import Foundation
         // Nothing is touched.
         #expect(FileManager.default.fileExists(atPath: mirror.appendingPathComponent("app/dist/out.js").path))
     }
+
+    @Test func newlyExcludedFollowsUserRulesAndIsEmptyWhenNothingChanged() async throws {
+        let box = try ArchiveSandbox(); var set = try fixture(box)
+        let mirror = try box.dir("mirror")
+        for f in ["app/index.js", "app/debug.log", "notes/dist/keep.txt"] { try box.write(f, under: mirror) }
+        let b = try builder()
+        #expect(try await b.newlyExcluded(set: set, mirror: mirror.path).isEmpty)
+        set.rules = [UserRule(pattern: "*.log", action: .exclude)]
+        #expect(try await b.newlyExcluded(set: set, mirror: mirror.path) == ["app/debug.log"])
+        let missing = box.root.appendingPathComponent("nope").path
+        await #expect(throws: PreviewError.self) { _ = try await b.newlyExcluded(set: set, mirror: missing) }
+    }
 }

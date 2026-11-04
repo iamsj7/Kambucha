@@ -3,7 +3,7 @@ import Foundation
 /// Every run writes one of these per set to `Mac Backup/Manifests/<set>.json`, outside `Sets/`.
 /// On iCloud the mirror holds real symlinks, but how iCloud stores them could not be proved from one Mac,
 /// so restore recreates any link missing from the restored files from this record.
-public struct SymlinkManifest: Codable, Equatable, Sendable {
+public struct SymlinkManifest: Equatable, Sendable {
     public struct Entry: Codable, Equatable, Sendable {
         /// Path of the link, relative to the set's source.
         public var path: String
@@ -21,6 +21,7 @@ public struct SymlinkManifest: Codable, Equatable, Sendable {
     public var entries: [Entry]
     public init(set: String, entries: [Entry]) { self.set = set; self.entries = entries }
 
+    /// On disk the manifest is a JSON array of entries; the set is named by the file.
     public static let folderName = "Manifests"
 
     /// Lists every symlink under `source` without following any of them. `skipDirectory` receives a
@@ -67,12 +68,13 @@ public struct SymlinkManifest: Codable, Equatable, Sendable {
         try FileManager.default.createDirectory(at: file.deletingLastPathComponent(), withIntermediateDirectories: true)
         let enc = JSONEncoder()
         enc.outputFormatting = [.prettyPrinted, .sortedKeys]
-        try enc.encode(self).write(to: file, options: .atomic)
+        try enc.encode(entries).write(to: file, options: .atomic)
         return file
     }
 
     public static func read(set: String, backupRoot: URL) throws -> SymlinkManifest {
-        try JSONDecoder().decode(SymlinkManifest.self, from: Data(contentsOf: location(set: set, backupRoot: backupRoot)))
+        let entries = try JSONDecoder().decode([Entry].self, from: Data(contentsOf: location(set: set, backupRoot: backupRoot)))
+        return SymlinkManifest(set: set, entries: entries)
     }
 
     /// Recreates links that are not present under `root`. `subpath` is the set-relative folder that `root`
@@ -87,10 +89,21 @@ public struct SymlinkManifest: Codable, Equatable, Sendable {
             let comps = e.path.split(separator: "/").map(String.init)
             guard comps.count > prefix.count, Array(comps.prefix(prefix.count)) == prefix,
                   !comps.contains(".."), !comps.contains(".") else { continue }
-            let dest = comps.dropFirst(prefix.count).reduce(root) { $0.appendingPathComponent($1) }
-            if (try? fm.attributesOfItem(atPath: dest.path)) != nil { continue }   // lstat: present, even if broken
+            // The parent chain is built one component at a time. A component that is a symlink (for example a
+            // restored `a -> /outside`) is never entered, so nothing is written outside `root`.
+            var cur = root, ok = true
+            for c in comps.dropFirst(prefix.count).dropLast() {
+                cur = cur.appendingPathComponent(c)
+                var st = stat()
+                if lstat(cur.path, &st) == 0 {
+                    if (st.st_mode & S_IFMT) != S_IFDIR { ok = false; break }
+                } else if (try? fm.createDirectory(at: cur, withIntermediateDirectories: false)) == nil { ok = false; break }
+            }
+            let dest = cur.appendingPathComponent(comps.last!)
+            guard ok, PathGuard.strictlyInsideCanonical(cur.appendingPathComponent("x"), root) else { continue }
+            var st = stat()
+            if lstat(dest.path, &st) == 0 { continue }   // present, even if broken
             do {
-                try fm.createDirectory(at: dest.deletingLastPathComponent(), withIntermediateDirectories: true)
                 try fm.createSymbolicLink(atPath: dest.path, withDestinationPath: e.target)
                 created += 1
             } catch { continue }

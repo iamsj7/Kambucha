@@ -44,7 +44,7 @@ public struct PreviewBuilder: PreviewProviding {
         let scanner = ReviewScanner(filters: filters)
         decisions += scanner.secretsIn(changedExcludedPaths: measured.secretPaths)
         for (repo, folders) in Self.reposByFolder(source: source, folders: measured.folders) {
-            decisions += scanner.trackedInExcluded(repo: repo, excluded: folders)
+            decisions += try scanner.trackedInExcluded(repo: repo, excluded: folders)
         }
 
         var groups: [PreviewGroup] = measured.groups.map { key, g in

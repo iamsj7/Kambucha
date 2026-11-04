@@ -37,7 +37,7 @@ import Foundation
         try git(repo, "init", "-q")
         try git(repo, "add", "vendor/autoload.php", "src/main.php")
         try git(repo, "commit", "-q", "-m", "init")
-        let items = scanner.trackedInExcluded(repo: repo, excluded: ["vendor", "node_modules/"])
+        let items = try scanner.trackedInExcluded(repo: repo, excluded: ["vendor", "node_modules/"])
         #expect(items.count == 1)
         #expect(items[0].kind == .trackedInExcluded)
         #expect(items[0].path == repo.appendingPathComponent("vendor").path)
@@ -48,7 +48,15 @@ import Foundation
         try git(repo, "init", "-q")
         try git(repo, "add", "src/main.php")
         try git(repo, "commit", "-q", "-m", "init")
-        #expect(scanner.trackedInExcluded(repo: repo, excluded: ["vendor", "node_modules"]).isEmpty)
-        #expect(scanner.trackedInExcluded(repo: box.root, excluded: ["vendor"]).isEmpty)   // not a repo
+        #expect(try scanner.trackedInExcluded(repo: repo, excluded: ["vendor", "node_modules"]).isEmpty)
+        #expect(try scanner.trackedInExcluded(repo: box.root, excluded: ["vendor"]).isEmpty)   // not a repo
+    }
+
+    @Test func gitFailingIsReportedNotSwallowed() throws {
+        let box = try ArchiveSandbox()
+        let repo = try box.dir("broken"); try box.dir("broken/.git")   // looks like a repo, is not one
+        #expect(throws: ReviewError.self) { try scanner.trackedInExcluded(repo: repo, excluded: ["vendor"]) }
+        let missing = ReviewScanner(filters: FilterBuilder(presets: []), gitPath: "/nonexistent/git")
+        #expect(throws: ReviewError.self) { try missing.trackedInExcluded(repo: repo, excluded: ["vendor"]) }
     }
 }

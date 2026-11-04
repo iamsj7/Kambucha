@@ -1,11 +1,15 @@
 import Foundation
 
+public enum ReviewError: Error, Equatable, Sendable { case gitFailed(String) }
+
 /// Finds items worth a second look without walking excluded folders.
 public struct ReviewScanner: Sendable {
     /// Third-party folders: a secret inside one is somebody else's, never the owner's.
     public static let thirdParty: Set<String> = ["node_modules", "Pods", ".venv", "vendor"]
     let filters: FilterBuilder
-    public init(filters: FilterBuilder) { self.filters = filters }
+    let gitPath: String
+    public init(filters: FilterBuilder) { self.init(filters: filters, gitPath: "/usr/bin/git") }
+    init(filters: FilterBuilder, gitPath: String) { self.filters = filters; self.gitPath = gitPath }
 
     static func isSecretName(_ name: String) -> Bool {
         let n = name.lowercased()
@@ -26,10 +30,13 @@ public struct ReviewScanner: Sendable {
     }
 
     /// `excluded` are repo-relative excluded folders. One item per folder that holds tracked files, which
-    /// means it is not really junk. Uses `git ls-files` only; no folder is walked.
-    public func trackedInExcluded(repo: URL, excluded: [String]) -> [ReviewItem] {
+    /// means it is not really junk. Uses `git ls-files` only; no folder is walked. A folder with no `.git` is
+    /// not a repo and gives nothing; git failing to run in a repo throws, so it is never read as "all clear".
+    public func trackedInExcluded(repo: URL, excluded: [String]) throws -> [ReviewItem] {
         let folders = excluded.map { $0.split(separator: "/").joined(separator: "/") }.filter { !$0.isEmpty }
-        guard !folders.isEmpty, let tracked = Self.gitLsFiles(repo) else { return [] }
+        guard !folders.isEmpty,
+              FileManager.default.fileExists(atPath: repo.appendingPathComponent(".git").path) else { return [] }
+        let tracked = try gitLsFiles(repo)
         var out: [ReviewItem] = []
         for folder in Set(folders).sorted() where tracked.contains(where: { $0.hasPrefix(folder + "/") }) {
             let path = repo.appendingPathComponent(folder).path
@@ -38,17 +45,17 @@ public struct ReviewScanner: Sendable {
         return out
     }
 
-    static func gitLsFiles(_ repo: URL) -> [String]? {
+    func gitLsFiles(_ repo: URL) throws -> [String] {
         let p = Process()
-        p.executableURL = URL(fileURLWithPath: "/usr/bin/git")
+        p.executableURL = URL(fileURLWithPath: gitPath)
         p.arguments = ["-C", repo.path, "-c", "core.quotepath=off", "ls-files", "-z"]
         p.environment = ["PATH": "/usr/bin:/bin", "HOME": NSHomeDirectory(), "GIT_OPTIONAL_LOCKS": "0"]
         let out = Pipe()
         p.standardOutput = out; p.standardError = FileHandle.nullDevice; p.standardInput = FileHandle.nullDevice
-        do { try p.run() } catch { return nil }
+        do { try p.run() } catch { throw ReviewError.gitFailed("could not run git: \(error.localizedDescription)") }
         let data = out.fileHandleForReading.readDataToEndOfFile()
         p.waitUntilExit()
-        guard p.terminationStatus == 0 else { return nil }
+        guard p.terminationStatus == 0 else { throw ReviewError.gitFailed("git ls-files exited \(p.terminationStatus) in \(repo.path)") }
         return String(decoding: data, as: UTF8.self).split(separator: "\0").map(String.init)
     }
 }

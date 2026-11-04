@@ -55,6 +55,39 @@ enum ArchiveScope {
         }
     }
 
+    /// Restore sources: `Sets/<set>[/sub]` or `Archive/<set>/<stamp>[/sub]` below the backup root. With
+    /// `backupRoot` the path must sit under exactly that root; without it, under the first `Sets` or
+    /// `Archive` component. Local paths are canonicalised, so a link cannot lead out.
+    static func validateRestore(_ path: String, backupRoot: String? = nil) throws {
+        let p = parse(path)
+        guard !p.comps.contains(".."), !p.comps.contains("."), !path.contains("\0") else {
+            throw ArchiveError.outsideArchive(path)
+        }
+        var rootCount: Int
+        if let backupRoot {
+            let r = parse(backupRoot)
+            guard r.remote == p.remote, p.comps.count > r.comps.count,
+                  Array(p.comps.prefix(r.comps.count)) == r.comps else { throw ArchiveError.outsideArchive(path) }
+            rootCount = r.comps.count
+        } else {
+            guard let i = p.comps.firstIndex(where: { $0 == "Sets" || $0 == folder }) else { throw ArchiveError.outsideArchive(path) }
+            rootCount = i
+        }
+        let rest = Array(p.comps.dropFirst(rootCount))
+        switch rest.first {
+        case "Sets": guard rest.count >= 2 else { throw ArchiveError.outsideArchive(path) }
+        case folder: guard rest.count >= 3, parseStamp(rest[2]) != nil else { throw ArchiveError.outsideArchive(path) }
+        default: throw ArchiveError.outsideArchive(path)
+        }
+        if p.remote == nil, path.hasPrefix("/") {
+            let top = "/" + (p.comps.prefix(rootCount) + [rest[0]]).joined(separator: "/")
+            let root = URL(fileURLWithPath: top, isDirectory: true)
+            let target = URL(fileURLWithPath: "/" + p.comps.joined(separator: "/"))
+            do { try PathGuard(iCloudDrive: root, backupRoot: root).assertInsideRoot(target) }
+            catch { throw ArchiveError.outsideArchive(path) }
+        }
+    }
+
     /// Stamp folder names: `2026-11-04T10-00` or `2026-11-04T10-00-30`, UTC.
     static func parseStamp(_ s: String) -> Date? {
         let f = DateFormatter()
@@ -141,13 +174,19 @@ public struct ArchiveManager: Sendable {
         return entries.sorted { ($0.stamp, $0.path) > ($1.stamp, $1.path) }
     }
 
-    /// Purges stamp folders older than the set's keep period. Only `Archive/<set>/<stamp>` is ever passed to purge.
+    /// Purges stamp folders older than the set's keep period (never less than 1 day). Only
+    /// `Archive/<set>/<stamp>` is ever passed to purge. The newest stamp is always kept, and nothing is
+    /// pruned when the clock looks wrong: a stamp in the future, or a newest stamp older than the keep period
+    /// plus 7 days (a forward jump would otherwise make every stamp look expired).
     public func prune(set: BackupSet, now: Date) async throws {
         let base = try target(set)
-        let cutoff = now.addingTimeInterval(-Double(set.archiveDays) * 86_400)
+        let keep = Double(max(1, set.archiveDays)) * 86_400
         let stamps = try await lsf(["--dirs-only"], base).map { $0.hasSuffix("/") ? String($0.dropLast()) : $0 }
-        for stamp in stamps {
-            guard let date = ArchiveScope.parseStamp(stamp), date < cutoff else { continue }
+        let dated = stamps.compactMap { s in ArchiveScope.parseStamp(s).map { (s, $0) } }
+        guard let newest = dated.map(\.1).max() else { return }
+        if newest > now || now.timeIntervalSince(newest) > keep + 7 * 86_400 { return }
+        let cutoff = now.addingTimeInterval(-keep)
+        for (stamp, date) in dated where date < cutoff && date != newest {
             let path = try target(set, stamp: stamp)
             let out = try await rclone.capture(args(["purge", path]), context: context)
             guard out.exitCode == 0 || out.exitCode == 3 else { throw ArchiveError.rcloneFailed(out.stderr) }

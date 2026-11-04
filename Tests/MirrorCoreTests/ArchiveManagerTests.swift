@@ -91,6 +91,39 @@ import Foundation
         #expect(try await m.list(set: makeSet()).count == 1)
         #expect(try await m.list(set: makeSet("Nothing")).isEmpty)
     }
+
+    func pruneRig(_ stamps: [String]) throws -> (ArchiveSandbox, ArchiveManager) {
+        let box = try ArchiveSandbox()
+        for st in stamps { try box.write("Archive/Projects/\(st)/f.txt") }
+        return (box, manifest(box))
+    }
+    func manifest(_ box: ArchiveSandbox) -> ArchiveManager { manager(box) }
+
+    @Test func pruneNeverPurgesBelowOneDayAndKeepsNewest() async throws {
+        let (box, m) = try pruneRig(["2026-11-04T09-00", "2026-11-04T01-00", "2026-11-02T10-00"])
+        try await m.prune(set: makeSet(days: 0), now: utc("2026-11-04T10-00"))
+        #expect(box.exists("Archive/Projects/2026-11-04T09-00"))      // within the 1 day minimum
+        #expect(box.exists("Archive/Projects/2026-11-04T01-00"))
+        #expect(!box.exists("Archive/Projects/2026-11-02T10-00"))     // older than 1 day
+    }
+
+    @Test func pruneAlwaysKeepsTheNewestStamp() async throws {
+        let (box, m) = try pruneRig(["2026-10-01T10-00", "2026-10-03T10-00"])
+        try await m.prune(set: makeSet(days: 30), now: utc("2026-11-04T10-00"))   // both expired
+        #expect(!box.exists("Archive/Projects/2026-10-01T10-00"))
+        #expect(box.exists("Archive/Projects/2026-10-03T10-00"))
+    }
+
+    @Test func pruneSkipsWhenClockLooksWrong() async throws {
+        // Clock jumped a year ahead: newest stamp is older than keep + 7 days.
+        let (box, m) = try pruneRig(["2026-10-01T10-00", "2026-10-03T10-00"])
+        try await m.prune(set: makeSet(days: 30), now: utc("2027-11-04T10-00"))
+        #expect(box.exists("Archive/Projects/2026-10-01T10-00") && box.exists("Archive/Projects/2026-10-03T10-00"))
+        // Clock jumped behind: a stamp is in the future.
+        let (box2, m2) = try pruneRig(["2026-01-01T10-00", "2026-12-03T10-00"])
+        try await m2.prune(set: makeSet(days: 30), now: utc("2026-11-04T10-00"))
+        #expect(box2.exists("Archive/Projects/2026-01-01T10-00"))
+    }
 }
 
 final class Seen: @unchecked Sendable {
