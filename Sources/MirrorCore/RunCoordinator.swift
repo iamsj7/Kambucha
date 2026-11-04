@@ -497,10 +497,9 @@ public final class RunCoordinator: Sendable {
                 // Lowered first, so whatever the steps below can't hold raises it again and it stays up.
                 state.hashWholeSet = false
                 if let awaitingDeep {
-                    // What the deep check's list left out, a sampled-out evicted file say, wasn't hashed.
-                    let unhashed = deep.hashedPaths.map { hashed in
-                        awaitingDeep.names.filter { !hashed.contains(Self.mirrorName($0)) }
-                    } ?? []
+                    // Both lists use rclone's names, so a link is covered by the deep hash of `x.rclonelink`.
+                    // What the list left out, a sampled-out evicted file say, had the size check alone.
+                    let unhashed = deep.hashedPaths.map { hashed in awaitingDeep.names.filter { !hashed.contains($0) } } ?? []
                     prove(awaitingDeep.slice, awaitingDeep.result, unhashed: unhashed, set: set, state: &state)
                 }
                 track(deep.audit, mirror: mirrorRoot(set), state: &state)

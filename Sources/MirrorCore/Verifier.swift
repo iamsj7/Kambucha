@@ -12,7 +12,8 @@ public struct VerifyResult: Equatable, Sendable {
     public var differingPaths: [String] = []
     /// Asked to be hashed, but evicted, so left unproven. Only the Quick check skips these.
     public var skippedFreed: [String] = []
-    /// What a deep check's hash list held. Nil when it compared everything, as on a cloud destination.
+    /// What a deep check's hash list held, in rclone's names. Nil when it compared everything, as on a
+    /// cloud destination.
     public var hashedPaths: Set<String>?
     /// The only value that may drive "Backed Up": clean checks and nothing pending, refused or missing.
     public var backedUp: Bool {
@@ -119,10 +120,13 @@ public struct Verifier: Sendable {
         var differing = size.flagged
         var present: [String] = [], freed: [String] = []
         for rel in all {
-            if isDataless(root.appendingPathComponent(rel)) { freed.append(rel) } else { present.append(rel) }
+            let url = root.appendingPathComponent(rel)
+            // Rclone only knows a link as `x.rclonelink`: under `x` it'd match nothing, and pass unchecked.
+            if Self.isLink(url) { present.append(rel + Self.linkSuffix) }
+            else if isDataless(url) { freed.append(rel) }
+            else { present.append(rel) }
         }
-        let sampled = Array(freed.shuffled().prefix(max(0, sampleFreed)))
-        let list = present + sampled
+        let list = present + freed.shuffled().prefix(max(0, sampleFreed))
         if !list.isEmpty {
             // No filter alongside a file list: rclone cannot combine them.
             let hash = try await run(CheckRequest(
@@ -133,7 +137,7 @@ public struct Verifier: Sendable {
             differences += hash.differences
             differing += hash.flagged
         }
-        let audit = try await runAudit((present + freed).map { root.appendingPathComponent($0) })
+        let audit = try await runAudit(all.map { root.appendingPathComponent($0) })
         var result = VerifyResult(differences: differences, audit: audit)
         result.differingPaths = differing
         result.hashedPaths = Set(list)
@@ -141,6 +145,12 @@ public struct Verifier: Sendable {
     }
 
     private static let linkSuffix = ".rclonelink"
+
+    private static func isLink(_ url: URL) -> Bool {
+        var st = stat()
+        return lstat(url.path, &st) == 0 && (st.st_mode & S_IFMT) == S_IFLNK
+    }
+
     private static let auditQueue = DispatchQueue(label: "mirror.upload-audit", qos: .utility)
 
     /// Audits read resource values from disk, so they run on a dispatch queue, never the cooperative

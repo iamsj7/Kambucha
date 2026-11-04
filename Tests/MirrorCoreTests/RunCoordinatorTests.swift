@@ -1959,6 +1959,33 @@ private final class Harness: @unchecked Sendable {
     }
 }
 
+/// Fix round 4: a run with a deep check to come has no Quick hash, so the deep list is all a link has.
+@Suite struct LinksOnADeepRunTests {
+    private func touched(_ h: Harness, inMirror: Bool) throws {
+        try h.prime()
+        var s = try h.state; s.hashWholeSet = true; try h.store.save(s, for: h.pair)
+        let m = h.backupRoot.appendingPathComponent("Sets/x/flowapp")
+        try FileManager.default.createDirectory(at: m, withIntermediateDirectories: true)
+        try FileManager.default.createSymbolicLink(atPath: h.source.appendingPathComponent("flowapp/link").path, withDestinationPath: "a.txt")
+        if inMirror { try FileManager.default.createSymbolicLink(atPath: m.appendingPathComponent("link").path, withDestinationPath: "a.txt") }
+        h.rclone.script(copied: ["flowapp/link.rclonelink"])
+    }
+
+    @Test func aTouchedLinkClearsOnTheDeepHashOfItsRcloneName() async throws {
+        let h = try Harness(); try touched(h, inMirror: true)
+        await h.run()
+        #expect(h.rclone.hashed.last?.contains("flowapp/link.rclonelink") == true)
+        #expect(h.rclone.checks.contains { $0.logFile.lastPathComponent == "quick-size.log" })
+        #expect(try h.state.verifyOwed.isEmpty)
+    }
+
+    @Test func aTouchedLinkNoHashReachedStaysOwed() async throws {
+        let h = try Harness(); try touched(h, inMirror: false)
+        await h.run()
+        #expect(try h.state.verifyOwed == ["flowapp/link.rclonelink"])
+    }
+}
+
 /// Fix round 3: a mismatch is a recorded fact, cleared only by a hash.
 @Suite struct RecordedMismatchTests {
     private func deepFailed(_ h: Harness, path: String = "flowapp/a.txt") async throws {

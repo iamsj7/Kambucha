@@ -159,6 +159,22 @@ private final class Sandbox {
         #expect(sb.exists(sb.dst, "a.txt"))
     }
 
+    /// Same length, so the size check can't see it. Only a hash under rclone's name for the link can.
+    @Test func aDeepCheckFindsALinkRetargetedToTheSameLength() async throws {
+        let sb = try Sandbox()
+        try FileManager.default.createSymbolicLink(atPath: sb.src.appendingPathComponent("link").path, withDestinationPath: "aaaa")
+        try FileManager.default.createSymbolicLink(atPath: sb.dst.appendingPathComponent("link").path, withDestinationPath: "bbbb")
+        struct Everything: UploadAuditing { func audit(_: [URL]) -> AuditResult { AuditResult(pending: [], refused: []) } }
+        let profile = DestinationProfile.profile(for: Destination(name: "i", kind: .iCloudFolder))
+        let logs = sb.root.appendingPathComponent("logs")
+        try FileManager.default.createDirectory(at: logs, withIntermediateDirectories: true)
+        let result = try await Verifier(rclone: runner, auditor: Everything()).deep(
+            source: sb.src, destination: sb.dst.path, profile: profile, context: RcloneContext(configPath: "/dev/null", environment: [:]),
+            filter: sb.filter, sampleFreed: 0, logDir: logs)
+        #expect(result.differences == 1)
+        #expect(result.differingPaths == ["link.rclonelink"])
+    }
+
     @Test func symlinksRoundTrip() async throws {
         let sb = try Sandbox()
         try sb.write("target.txt", "payload")
