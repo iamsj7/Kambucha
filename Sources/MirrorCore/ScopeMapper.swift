@@ -1,0 +1,46 @@
+import Foundation
+
+public enum RunScope: Equatable {
+    case nothing
+    case projects([String])
+    case wholeSet
+}
+
+/// Maps a change batch to the smallest safe run scope. Any doubt widens to `.wholeSet`.
+public struct ScopeMapper {
+    public let maxProjects: Int
+    public init(maxProjects: Int = 25) { self.maxProjects = maxProjects }
+
+    public func scope(for batch: ChangeBatch, root: URL, isExcluded: (String) -> Bool) -> RunScope {
+        if batch.mustRescan { return .wholeSet }
+        let prefixes = Self.rootPrefixes(root)
+        var projects = Set<String>()
+        for path in batch.paths {
+            guard let rel = Self.relative(path, prefixes: prefixes) else { return .wholeSet }
+            let parts = rel.split(separator: "/").map(String.init)
+            // The root itself, a root-level entry, or a top-level folder itself (created, deleted,
+            // renamed) cannot be pinned to one project.
+            if parts.count < 2 { return .wholeSet }
+            if isExcluded(rel) { continue }
+            projects.insert(parts[0])
+        }
+        if projects.isEmpty { return .nothing }
+        if projects.count > maxProjects { return .wholeSet }
+        return .projects(projects.sorted())
+    }
+
+    private static func rootPrefixes(_ root: URL) -> [String] {
+        var out = [root.standardizedFileURL.path]
+        let resolved = root.resolvingSymlinksInPath().path
+        if !out.contains(resolved) { out.append(resolved) }
+        return out.map { $0.hasSuffix("/") ? $0 : $0 + "/" }
+    }
+
+    private static func relative(_ path: String, prefixes: [String]) -> String? {
+        for p in prefixes {
+            if path.hasPrefix(p) { return String(path.dropFirst(p.count)) }
+            if path + "/" == p { return "" }
+        }
+        return nil
+    }
+}
