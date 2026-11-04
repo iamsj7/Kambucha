@@ -115,7 +115,9 @@ extension OverallStatus {
         switch self {
         case .backedUp: "Backed Up"
         case .uploading(let n): "Uploading \(n.formatted())"
-        case .waitingForDownload: "Waiting for iCloud"
+        case .waitingForDownload: "Didn't Match"
+        case .notAccepted(let n): "\(n.formatted()) not accepted"
+        case .unfinished: "Not Finished"
         case .running: "Backing Up"
         case .held(let n): "\(n.formatted()) held"
         case .attention: "Needs Attention"

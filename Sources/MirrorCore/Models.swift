@@ -106,6 +106,16 @@ public struct UploadSample: Codable, Equatable, Sendable {
     public init(done: Int, at: Date) { self.done = done; self.at = at }
 }
 
+/// A file a check found different. Only a passing hash of the file itself ends one.
+public struct Mismatch: Codable, Equatable, Sendable {
+    public var since: Date
+    /// iCloud has evicted it, so its hash has to wait for a download. It drives no runs meanwhile.
+    public var evicted: Bool
+    /// The owner has been told it couldn't be verified in time. They're told once.
+    public var alerted = false
+    public init(since: Date, evicted: Bool = false) { self.since = since; self.evicted = evicted }
+}
+
 public struct SetState: Codable, Equatable, Sendable {
     public var lastEventID: UInt64?
     public var lastFullPass: Date?
@@ -136,18 +146,16 @@ public struct SetState: Codable, Equatable, Sendable {
     /// Set-relative paths a run touched or planned to, not yet proven by a hash check and an audit.
     /// Saved before the real sync and after each slice, so a failure or a kill can't forget them.
     public var verifyOwed: [String] = []
-    /// `verifyOwed` outgrew its bound, so only a whole-set hash check can prove what it held.
+    /// `verifyOwed` outgrew its bound, so a whole-set hash check of the files on disk has to run.
     public var hashWholeSet = false
     /// A stop that never reached the backup: iCloud gone, source unreadable, marker lost, sign-in
     /// expired. Cleared only when the same check next passes.
     public var stoppedBy: Problem?
-    /// Which of `verifyOwed` iCloud has evicted, and since when. These can't be hashed without a
-    /// download, which the agent asks iCloud for. They stay owed until a hash passes, but don't force
-    /// a run at every wake-up while they wait.
-    public var freedSince: [String: Date] = [:]
-    /// Files a check found different, which `.verificationFailed` is about. All are in `verifyOwed`,
-    /// and only a passing hash of the file itself clears one.
-    public var mismatched: [String] = []
+    /// Files a check found different, which `.verificationFailed` is about. All are in `verifyOwed`.
+    public var mismatched: [String: Mismatch] = [:]
+    /// The last evicted mismatch a download was requested for. The next batch starts after it, so a
+    /// stuck file can't keep the others from their turn.
+    public var downloadCursor: String?
     public init() {}
 
     /// Fields added after the first release of this file may be absent, and that must never make
@@ -176,18 +184,23 @@ public struct SetState: Codable, Equatable, Sendable {
         verifyOwed = try c.decodeIfPresent([String].self, forKey: .verifyOwed) ?? []
         hashWholeSet = try c.decodeIfPresent(Bool.self, forKey: .hashWholeSet) ?? false
         stoppedBy = try c.decodeIfPresent(Problem.self, forKey: .stoppedBy)
-        freedSince = try c.decodeIfPresent([String: Date].self, forKey: .freedSince) ?? [:]
-        mismatched = try c.decodeIfPresent([String].self, forKey: .mismatched) ?? []
+        mismatched = try c.decodeIfPresent([String: Mismatch].self, forKey: .mismatched) ?? [:]
+        downloadCursor = try c.decodeIfPresent(String.self, forKey: .downloadCursor)
     }
 
     /// Files iCloud must bring back before Mirror can verify them.
-    public var waitingForDownload: Int { freedSince.count }
+    public var waitingForDownload: Int { mismatched.values.filter(\.evicted).count }
+
+    /// Every recorded mismatch is evicted and within its time, so what's left is iCloud's to deliver.
+    public var isOnlyWaiting: Bool {
+        !mismatched.isEmpty && mismatched.values.allSatisfy { $0.evicted && !$0.alerted }
+    }
 
     /// The one source of "Backed Up": the last run finished, checks passed, everything reached iCloud.
     public var isBackedUp: Bool {
         lastFinished != nil && consecutiveFailures == 0 && heldDeletions == 0 && pendingUploads == 0
             && refusedSince.isEmpty && !syncIncomplete && !wholeSetOwed
-            && verifyOwed.isEmpty && !hashWholeSet && stoppedBy == nil
+            && verifyOwed.isEmpty && mismatched.isEmpty && !hashWholeSet && stoppedBy == nil
     }
 }
 

@@ -163,12 +163,30 @@ private final class FakeVolumes: VolumeLocating, @unchecked Sendable {
 private final class FakeDownloader: ICloudDownloading, @unchecked Sendable {
     private let lock = NSLock()
     private var _requested: [URL] = []
+    private var _queues: [String] = []
     private var _error: (any Error)?
+    private var _space: (free: Int64, capacity: Int64)? = (100_000_000_000, 500_000_000_000)
+    private var _gate: DispatchSemaphore?
+    private var _returned = 0
     var requested: [URL] { lock.withLock { _requested } }
+    /// Which dispatch queue each request ran on.
+    var queues: [String] { lock.withLock { _queues } }
+    var returned: Int { lock.withLock { _returned } }
     func fail(_ e: (any Error)?) { lock.withLock { _error = e } }
+    func set(space: (free: Int64, capacity: Int64)?) { lock.withLock { _space = space } }
+    /// Requests hang until `release`, or 30 seconds.
+    func stall() { lock.withLock { _gate = DispatchSemaphore(value: 0) } }
+    func release() { lock.withLock { _gate }?.signal() }
+    func space(at: URL) -> (free: Int64, capacity: Int64)? { lock.withLock { _space } }
     func requestDownload(of url: URL) throws {
+        let queue = String(cString: __dispatch_queue_get_label(nil))
+        let gate = lock.withLock {
+            _requested.append(url); _queues.append(queue)
+            return _gate
+        }
+        _ = gate?.wait(timeout: .now() + 30)
         try lock.withLock {
-            _requested.append(url)
+            _returned += 1
             if let _error { throw _error }
         }
     }
@@ -300,7 +318,7 @@ private final class Harness: @unchecked Sendable {
         try store.saveDestinations([iCloudDest] + extra)
     }
 
-    func coordinator(presets: [Preset] = [], rclone wrapped: (any RcloneRunning)? = nil) -> RunCoordinator {
+    func coordinator(presets: [Preset] = [], rclone wrapped: (any RcloneRunning)? = nil, requestGrace: TimeInterval = 30) -> RunCoordinator {
         let clock: @Sendable () -> Date = { [self] in now }
         let runner: any RcloneRunning = wrapped ?? rclone
         return RunCoordinator(
@@ -327,7 +345,7 @@ private final class Harness: @unchecked Sendable {
             },
             progress: progress, volumes: volumes, mountWakeWindow: mountWakeWindow,
             priority: { [self] fast in lock.withLock { _priorities.append(fast) } },
-            lowPower: { [self] in lowPower }, downloader: downloader)
+            lowPower: { [self] in lowPower }, downloader: downloader, requestGrace: requestGrace)
     }
 
     @discardableResult
@@ -1750,38 +1768,33 @@ private final class Harness: @unchecked Sendable {
     private func owedFreed(_ h: Harness, _ names: [String] = ["a.txt"]) throws {
         try h.prime()
         var s = try h.state
-        for (i, name) in names.enumerated() {
+        for name in names {
             try Data().write(to: h.source.appendingPathComponent("flowapp/\(name)"))
             s.verifyOwed.append("flowapp/\(name)")
-            s.freedSince["flowapp/\(name)"] = h.now.addingTimeInterval(Double(i))
+            s.mismatched["flowapp/\(name)"] = Mismatch(since: h.now, evicted: true)
         }
         s.verifyOwed.sort()
         try h.store.save(s, for: h.pair)
         h.freed = Set(names)
     }
 
-    @Test func owedEvictedFilesAreRequestedAtTheirMirrorPath() async throws {
+    @Test func owedEvictedMismatchesAreRequestedAtTheirMirrorPath() async throws {
         let h = try Harness(); try owedFreed(h)
         await h.run()
         #expect(h.downloader.requested.map(\.path) == [h.mirror + "/flowapp/a.txt"])
     }
 
-    @Test func requestsStopAtTheLimitOldestFirst() async throws {
-        let h = try Harness()
-        try owedFreed(h, (0...RunCoordinator.maxDownloadsPerRun).map { String(format: "f%04d", $0) })
-        await h.run()
-        #expect(h.downloader.requested.count == RunCoordinator.maxDownloadsPerRun)
-        #expect(h.downloader.requested.first?.lastPathComponent == "f0000")
-        #expect(!h.downloader.requested.contains { $0.lastPathComponent == String(format: "f%04d", RunCoordinator.maxDownloadsPerRun) })
-    }
-
-    @Test func onlyOwedFilesAreEverRequested() async throws {
+    @Test func onlyMismatchesAreEverRequested() async throws {
         let h = try Harness(); try h.prime()
         let m = h.backupRoot.appendingPathComponent("Sets/x/flowapp")
         try FileManager.default.createDirectory(at: m, withIntermediateDirectories: true)
         try Data().write(to: m.appendingPathComponent("other.txt"))
-        var s = try h.state; s.lastFullPass = h.now.addingTimeInterval(-25 * hour); try h.store.save(s, for: h.pair)
-        h.freed = ["other.txt"]   // evicted, but nothing is owed on it
+        try Data().write(to: m.appendingPathComponent("owed.txt"))
+        try Data().write(to: h.source.appendingPathComponent("flowapp/owed.txt"))
+        var s = try h.state
+        s.lastFullPass = h.now.addingTimeInterval(-25 * hour); s.verifyOwed = ["flowapp/owed.txt"]
+        try h.store.save(s, for: h.pair)
+        h.freed = ["other.txt", "owed.txt"]   // evicted, and no mismatch recorded on either
         await h.run()
         #expect(h.downloader.requested.isEmpty)
     }
@@ -1804,7 +1817,7 @@ private final class Harness: @unchecked Sendable {
         h.rclone.script(hashDifferences: 1, differing: ["a.txt"])
         await h.run()
         #expect(try h.state.verifyOwed == ["flowapp/a.txt"])
-        #expect(try h.state.mismatched == ["flowapp/a.txt"])
+        #expect(try h.state.mismatched.keys.sorted() == ["flowapp/a.txt"])
         #expect(try h.active == [.verificationFailed])
     }
 
@@ -1829,19 +1842,326 @@ private final class Harness: @unchecked Sendable {
         let h = try Harness(); try owedFreed(h, ["a.txt", "b.txt"])
         await h.run()
         #expect(try h.state.waitingForDownload == 2)
-        #expect(try h.latest()?.verification == "Waiting for iCloud to download 2 files to verify")
+        #expect(try h.latest()?.verification == StatusSummary.recheckText(count: 2))
+    }
+}
+
+/// Fix round 4: what the owner sees, from the records, problems and state real runs leave behind.
+@Suite struct WaitingStatusTests {
+    private func status(_ h: Harness) throws -> OverallStatus {
+        StatusSummary.overall(sets: [h.set], destinations: [h.iCloudDest], states: [h.pair: try h.state],
+                              records: try h.records.recent(limit: 50), problems: try h.problems.active(), running: false)
     }
 
-    @Test func theWaitReachesTheOverallStatus() throws {
-        let set = { () -> BackupSet in
-            var s = BackupSet(name: "x", source: URL(fileURLWithPath: "/x")); s.destinationIDs = [UUID()]; return s
-        }()
-        let d = Destination(id: set.destinationIDs[0], name: "i", kind: .iCloudFolder)
-        var state = SetState()
-        state.lastFinished = Date(); state.verifyOwed = ["a"]; state.freedSince = ["a": Date()]
-        let status = StatusSummary.overall(sets: [set], destinations: [d], states: [PairID(set: set.id, destination: d.id): state],
-                                           records: [], problems: [], running: false)
-        #expect(status == .waitingForDownload(1))
+    /// A real mismatch, then iCloud evicts the file, then a clean run of other work.
+    private func evictedAfterAMismatch(_ h: Harness) async throws {
+        try h.prime(); h.change("flowapp/a.txt")
+        h.rclone.script(copied: ["a.txt"], hashDifferences: 1, differing: ["a.txt"])
+        await h.run()
+        #expect(try status(h) == .attention(Problem.verificationFailed.headline))
+        h.rclone.script()
+        h.freed = ["a.txt"]
+        h.now = h.now.addingTimeInterval(hour)   // records order by time
+        await h.run()
+        #expect(try h.latest()?.status == .partial)
+        #expect(try h.latest()?.pendingUploads == 0)
+    }
+
+    @Test func aRealRunWaitingOnICloudReachesTheOwner() async throws {
+        let h = try Harness(); try await evictedAfterAMismatch(h)
+        #expect(try status(h) == .waitingForDownload(1))
+        #expect(try h.active == [.verificationFailed])   // told at once, and still open until the hash
+        #expect(try h.latest()?.verification == "Re-checking 1 file that didn't match, waiting for iCloud to download it")
+    }
+
+    @Test func thePassingHashEndsTheWait() async throws {
+        let h = try Harness(); try await evictedAfterAMismatch(h)
+        h.freed = []
+        h.now = h.now.addingTimeInterval(hour)
+        await h.run()
+        guard case .backedUp = try status(h) else { Issue.record("expected Backed Up"); return }
+    }
+
+    @Test func sevenDaysOfWaitingTurnsToAttention() async throws {
+        let h = try Harness(); try await evictedAfterAMismatch(h)
+        h.now = h.now.addingTimeInterval(7 * 24 * hour)
+        await h.run()
+        #expect(try status(h) == .attention(Problem.verificationFailed.headline))
+    }
+
+    @Test func aRunStoppedByTheTimeLimitIsUnfinishedOnceTheAgentHasGone() async throws {
+        let h = try Harness(); try h.prime(); h.change("flowapp/a.txt")
+        h.rclone.script(real: [.partial])
+        await h.run()
+        #expect(try h.latest()?.status == .partial)
+        #expect(try status(h) == .unfinished)
+    }
+
+    private func refused(_ h: Harness) async throws {
+        try h.prime(); h.change("flowapp/a.txt")
+        h.rclone.script(copied: ["a.txt"])
+        h.auditor.set(refused: ["a.txt"])
+        await h.run()
+        #expect(try h.latest()?.status == .partial)
+    }
+
+    @Test func aRefusedFileWaitingOnItsAlertIsCounted() async throws {
+        let h = try Harness(); try await refused(h)
+        #expect(try status(h) == .notAccepted(1))
+        #expect(StatusSummary.notAcceptedText(count: 1) == "1 file iCloud hasn't accepted yet")
+    }
+
+    @Test func aRefusedFileTurnsToAttentionAfterADay() async throws {
+        let h = try Harness(); try await refused(h)
+        h.now = h.now.addingTimeInterval(25 * hour)
+        await h.run()
+        #expect(try status(h) == .attention(Problem.fileRefused.headline))
+    }
+
+    @Test func aFileICloudAcceptsAfterAllEndsTheCount() async throws {
+        let h = try Harness(); try await refused(h)
+        h.auditor.set()
+        h.now = h.now.addingTimeInterval(hour)   // records order by time
+        await h.run()   // a skipped run, so the partial record stands
+        #expect(try h.latest()?.status == .skipped)
+        guard case .backedUp = try status(h) else { Issue.record("expected Backed Up"); return }
+    }
+}
+
+/// Fix round 4: downloads are for recorded mismatches, and never at the cost of the disk or the wake-up.
+@Suite struct DownloadLimitTests {
+    private func waiting(_ h: Harness, _ names: [String] = ["a.txt"], since: Date? = nil) throws {
+        try h.prime()
+        var s = try h.state
+        for name in names {
+            try Data().write(to: h.source.appendingPathComponent("flowapp/\(name)"))
+            s.verifyOwed.append("flowapp/\(name)")
+            s.mismatched["flowapp/\(name)"] = Mismatch(since: since ?? h.now, evicted: true)
+        }
+        s.verifyOwed.sort()
+        try h.store.save(s, for: h.pair)
+        h.freed = Set(names)
+    }
+
+    private func names(_ count: Int) -> [String] { (0..<count).map { String(format: "f%04d", $0) } }
+
+    @Test func aRunRequestsNoMoreThanTheLimit() async throws {
+        #expect(RunCoordinator.maxDownloadsPerRun == 50)
+        let h = try Harness(); try waiting(h, names(RunCoordinator.maxDownloadsPerRun + 1))
+        await h.run()
+        #expect(h.downloader.requested.count == RunCoordinator.maxDownloadsPerRun)
+    }
+
+    @Test func requestsRotateSoEveryFileGetsItsTurn() async throws {
+        let h = try Harness(); let all = names(RunCoordinator.maxDownloadsPerRun * 2 + 10)
+        try waiting(h, all)
+        for _ in 0..<3 { await h.run() }
+        let asked = h.downloader.requested.map(\.lastPathComponent)
+        #expect(Set(asked) == Set(all))
+        #expect(asked.count == RunCoordinator.maxDownloadsPerRun * 3)
+        await h.run()   // wrapped round
+        #expect(Set(h.downloader.requested.suffix(RunCoordinator.maxDownloadsPerRun).map(\.lastPathComponent)).isDisjoint(with: Set(asked.suffix(10))))
+    }
+
+    @Test func aFileThatLeavesTheListCantLoseTheOthersTheirTurn() async throws {
+        let h = try Harness(); let all = names(RunCoordinator.maxDownloadsPerRun + 5)
+        try waiting(h, all)
+        await h.run()
+        var s = try h.state; s.mismatched[try #require(s.downloadCursor)] = nil; try h.store.save(s, for: h.pair)
+        await h.run()
+        #expect(h.downloader.requested.suffix(RunCoordinator.maxDownloadsPerRun).first?.lastPathComponent == all[RunCoordinator.maxDownloadsPerRun])
+    }
+
+    @Test func theFreeSpaceBoundIsTheLargerOfFiveGBAndFivePercent() {
+        let gb: Int64 = 1_000_000_000
+        #expect(RunCoordinator.hasRoomForDownloads(free: 5 * gb, capacity: 50 * gb))
+        #expect(!RunCoordinator.hasRoomForDownloads(free: 5 * gb - 1, capacity: 50 * gb))
+        #expect(RunCoordinator.hasRoomForDownloads(free: 50 * gb, capacity: 1_000 * gb))
+        #expect(!RunCoordinator.hasRoomForDownloads(free: 50 * gb - 1, capacity: 1_000 * gb))
+    }
+
+    @Test func aFullDiskGetsNoRequestsAndStaysOwed() async throws {
+        let h = try Harness(); try waiting(h)
+        h.downloader.set(space: (4_000_000_000, 500_000_000_000))
+        await h.run()
+        #expect(h.downloader.requested.isEmpty)
+        #expect(try h.state.verifyOwed == ["flowapp/a.txt"])
+    }
+
+    @Test func aVolumeThatCantBeReadGetsNoRequests() async throws {
+        let h = try Harness(); try waiting(h)
+        h.downloader.set(space: nil)
+        await h.run()
+        #expect(h.downloader.requested.isEmpty)
+    }
+
+    @Test func aFileDeletedFromTheSourceIsNotRequestedAndClearsOnTheNextFullPass() async throws {
+        let h = try Harness(); try waiting(h)
+        try FileManager.default.removeItem(at: h.source.appendingPathComponent("flowapp/a.txt"))
+        await h.run()
+        #expect(h.downloader.requested.isEmpty)
+        #expect(try h.state.mismatched.keys.sorted() == ["flowapp/a.txt"])
+        var s = try h.state; s.lastFullPass = h.now.addingTimeInterval(-25 * hour); try h.store.save(s, for: h.pair)
+        await h.run()
+        #expect(try h.state.mismatched.isEmpty)
+        #expect(try h.state.verifyOwed.isEmpty)
+    }
+
+    @Test func requestsLeaveTheCooperativePool() async throws {
+        let h = try Harness(); try waiting(h)
+        await h.run()
+        #expect(h.downloader.queues.count == 1)
+        #expect(h.downloader.queues.allSatisfy { !$0.contains("cooperative") })
+    }
+
+    /// The fake is still inside the call when the run returns, so nothing waited for it.
+    private func expectNotHeldUp(_ h: Harness) async throws {
+        h.downloader.stall()
+        defer { h.downloader.release() }
+        await h.coordinator(requestGrace: 0.05).runAll(command: RunCommand())
+        #expect(h.rclone.realSyncs.count == 1)
+        #expect(h.downloader.returned == 0)
+    }
+
+    @Test func aStalledRequestDoesNotHoldUpTheWakeUp() async throws {
+        let h = try Harness(); try waiting(h); h.change("other/b.txt")
+        try await expectNotHeldUp(h)
+    }
+
+    @Test func aDatalessMarkerIsRequestedWithoutHoldingUpTheWakeUp() async throws {
+        let h = try Harness(); try h.prime(); h.change("flowapp/a.txt")
+        h.freed = [RootMarker.fileName]
+        try await expectNotHeldUp(h)
+        #expect(h.downloader.requested.map(\.lastPathComponent) == [RootMarker.fileName])
+    }
+
+    @Test func aDatalessMarkerIsNotHeldBackByALowDisk() async throws {
+        let h = try Harness(); try h.prime()
+        h.freed = [RootMarker.fileName]
+        h.downloader.set(space: (1, 500_000_000_000))
+        await h.run()
+        #expect(h.downloader.requested.map(\.lastPathComponent) == [RootMarker.fileName])
+    }
+
+    private let stuck = "flowapp/a.txt couldn't be verified for 7 days"
+
+    @Test func aFileWaitingSevenDaysAlertsOnceWithItsOwnDetail() async throws {
+        let h = try Harness(); try waiting(h, since: h.now.addingTimeInterval(-7 * 24 * hour - 1))
+        try h.problems.store(.verificationFailed, pair: h.pair, setName: "x", detail: "1 differences found")
+        await h.run()
+        await h.run()
+        h.now = h.now.addingTimeInterval(hour)
+        await h.run()
+        #expect(try h.problems.active().map(\.detail) == [stuck])
+        #expect(h.notifier.details.filter { $0 == stuck }.count == 1)
+        #expect(try h.state.mismatched["flowapp/a.txt"]?.alerted == true)
+    }
+
+    @Test func aFileWaitingLessThanSevenDaysDoesNotAlert() async throws {
+        let h = try Harness(); try waiting(h, since: h.now.addingTimeInterval(-7 * 24 * hour + 60))
+        await h.run()
+        #expect(try h.active.isEmpty)
+        #expect(try h.state.mismatched["flowapp/a.txt"]?.alerted == false)
+    }
+
+    @Test func severalLateFilesShareOneAlert() async throws {
+        let h = try Harness(); try waiting(h, ["a.txt", "b.txt"], since: h.now.addingTimeInterval(-8 * 24 * hour))
+        await h.run()
+        #expect(try h.problems.active().map(\.detail) == ["2 files couldn't be verified for 7 days"])
+    }
+
+    @Test func aFileGoneFromTheSourceDoesNotAlert() async throws {
+        let h = try Harness(); try waiting(h, since: h.now.addingTimeInterval(-8 * 24 * hour))
+        try FileManager.default.removeItem(at: h.source.appendingPathComponent("flowapp/a.txt"))
+        await h.run()
+        #expect(try h.active.isEmpty)
+    }
+
+    @Test func anAlertedFileStillClearsOnlyOnItsHash() async throws {
+        let h = try Harness(); try waiting(h, since: h.now.addingTimeInterval(-8 * 24 * hour))
+        await h.run()
+        #expect(try h.active == [.verificationFailed])
+        h.freed = []
+        await h.run()
+        #expect(h.rclone.hashed.last == ["a.txt"])
+        #expect(try h.state.mismatched.isEmpty)
+        #expect(try h.active.isEmpty)
+    }
+
+    @Test func aHashThatFinishesTheFileInTheSameRunRaisesNoLateAlert() async throws {
+        let h = try Harness(); try waiting(h, since: h.now.addingTimeInterval(-8 * 24 * hour))
+        h.freed = []
+        await h.run()
+        #expect(try h.state.mismatched.isEmpty)
+        #expect(try h.active.isEmpty)
+    }
+}
+
+/// Fix round 4: iCloud only frees what it has uploaded, so a freed file with no recorded mismatch
+/// needs its size check and nothing else.
+@Suite struct PlainFreedFileTests {
+    private func owed(_ h: Harness, _ name: String = "a.txt") throws {
+        try h.prime()
+        var s = try h.state; s.verifyOwed = ["flowapp/\(name)"]; try h.store.save(s, for: h.pair)
+        h.freed = [name]
+    }
+
+    @Test func itClearsOnItsSizeCheckWithNoHashOrDownload() async throws {
+        let h = try Harness(); try owed(h)
+        await h.run()
+        #expect(h.rclone.checks.contains { $0.logFile.lastPathComponent == "quick-size.log" })
+        #expect(h.rclone.hashed.isEmpty)
+        #expect(h.downloader.requested.isEmpty)
+        #expect(try h.state.verifyOwed.isEmpty)
+        #expect(try h.state.isBackedUp)
+        #expect(try h.latest()?.status == .success)
+    }
+
+    @Test func aFailedSizeCheckClearsNothing() async throws {
+        let h = try Harness(); try owed(h)
+        h.rclone.script(differences: 1, differing: ["a.txt"])
+        await h.run()
+        #expect(try h.state.verifyOwed == ["flowapp/a.txt"])
+        #expect(try h.state.mismatched.keys.sorted() == ["flowapp/a.txt"])
+    }
+
+    @Test func aRoutineDeepCheckOwesNothingForEvictedFiles() async throws {
+        let h = try Harness(); try h.prime()
+        let names = try mirror(h, count: RunCoordinator.freedSample + 5)
+        h.freed = Set(names)
+        var s = try h.state
+        s.lastFullPass = h.now.addingTimeInterval(-25 * hour); s.lastDeepCheck = h.now.addingTimeInterval(-31 * 24 * hour)
+        try h.store.save(s, for: h.pair)
+        await h.run()
+        #expect(try h.state.verifyOwed.isEmpty)
+        #expect(h.downloader.requested.isEmpty)
+    }
+
+    /// The flag speaks for files on disk. Evicted ones it can't reach were uploaded, so none become owed.
+    @Test func aFlagDrivenDeepCheckHashesPresentFilesAndOwesNothingForEvictedOnes() async throws {
+        let h = try Harness(); try h.prime()
+        let names = try mirror(h, count: RunCoordinator.freedSample + 5)
+        try Data().write(to: h.backupRoot.appendingPathComponent("Sets/x/flowapp/present.txt"))
+        h.freed = Set(names)
+        var s = try h.state; s.hashWholeSet = true; try h.store.save(s, for: h.pair)
+        await h.run()
+        let after = try h.state
+        #expect(h.rclone.hashed.last?.contains("flowapp/present.txt") == true)
+        #expect(h.rclone.hashed.last?.count == RunCoordinator.freedSample + 1)
+        #expect(after.hashWholeSet == false)
+        #expect(after.verifyOwed.isEmpty)
+        #expect(h.downloader.requested.isEmpty)
+    }
+
+    private func mirror(_ h: Harness, count: Int) throws -> [String] {
+        let m = h.backupRoot.appendingPathComponent("Sets/x/flowapp")
+        try FileManager.default.createDirectory(at: m, withIntermediateDirectories: true)
+        let names = (0..<count).map { "e\($0).txt" }
+        for name in names {
+            try Data().write(to: m.appendingPathComponent(name))
+            try Data().write(to: h.source.appendingPathComponent("flowapp/\(name)"))
+        }
+        return names
     }
 }
 
@@ -1853,34 +2173,32 @@ private final class Harness: @unchecked Sendable {
         try h.prime()
         try Data().write(to: h.source.appendingPathComponent("flowapp/old.txt"))
         var s = try h.state
-        s.verifyOwed = ["flowapp/old.txt"]; s.freedSince = ["flowapp/old.txt": h.now]; s.mismatched = ["flowapp/old.txt"]
+        s.verifyOwed = ["flowapp/old.txt"]; s.mismatched = ["flowapp/old.txt": Mismatch(since: h.now, evicted: true)]
         try h.store.save(s, for: h.pair)
         h.freed = ["old.txt"]
     }
 
-    @Test func aScopedOverflowKeepsFreedFilesAndIsNotSuccess() async throws {
+    @Test func aScopedOverflowKeepsMismatchesAndIsNotSuccess() async throws {
         let h = try Harness(); try withFreedOwed(h); h.change("flowapp/a.txt")
         h.rclone.script(copied: many(), planned: many())
         await h.run()
         let s = try h.state
         #expect(s.hashWholeSet)
         #expect(s.verifyOwed == ["flowapp/old.txt"])
-        #expect(s.freedSince.keys.sorted() == ["flowapp/old.txt"])
-        #expect(s.mismatched == ["flowapp/old.txt"])
+        #expect(s.mismatched.keys.sorted() == ["flowapp/old.txt"])
         #expect(s.isBackedUp == false)
         #expect(try h.latest()?.status == .partial)
     }
 
     /// A run that reaches `prove` puts them back by itself, which hides a wipe. One that stops first can't.
-    @Test func anOverflowThenAFailedSyncStillKeepsFreedFiles() async throws {
+    @Test func anOverflowThenAFailedSyncStillKeepsMismatches() async throws {
         let h = try Harness(); try withFreedOwed(h); h.change("flowapp/a.txt")
         h.rclone.script(real: [.permanent], planned: many())
         await h.run()
         let s = try h.state
         #expect(s.hashWholeSet)
         #expect(s.verifyOwed == ["flowapp/old.txt"])
-        #expect(s.freedSince.keys.sorted() == ["flowapp/old.txt"])
-        #expect(s.mismatched == ["flowapp/old.txt"])
+        #expect(s.mismatched.keys.sorted() == ["flowapp/old.txt"])
     }
 
     @Test func aScopedRunNeverClearsTheFlag() async throws {
@@ -1897,7 +2215,7 @@ private final class Harness: @unchecked Sendable {
         #expect(h.rclone.realSyncs.last?.destination == h.mirror)
     }
 
-    @Test func theNextRunsDeepCheckEndsTheFlagAndKeepsFreedFiles() async throws {
+    @Test func theNextRunsDeepCheckEndsTheFlagAndKeepsMismatches() async throws {
         let h = try Harness(); try withFreedOwed(h); h.change("flowapp/a.txt")
         h.rclone.script(copied: many(), planned: many())
         await h.run()
@@ -1921,12 +2239,12 @@ private final class Harness: @unchecked Sendable {
     @Test func aDeepCheckThatCouldNotFinishProvesNothing() async throws {
         let h = try Harness(); try h.prime()
         var s = try h.state
-        s.hashWholeSet = true; s.verifyOwed = ["flowapp/a.txt"]; s.mismatched = ["flowapp/a.txt"]
+        s.hashWholeSet = true; s.verifyOwed = ["flowapp/a.txt"]; s.mismatched = ["flowapp/a.txt": Mismatch(since: h.now)]
         try h.store.save(s, for: h.pair)
         // Quick passes, then Deep can't even start: the mirror folder is missing.
         await h.run()
         #expect(try h.state.verifyOwed == ["flowapp/a.txt"])
-        #expect(try h.state.mismatched == ["flowapp/a.txt"])
+        #expect(try h.state.mismatched.keys.sorted() == ["flowapp/a.txt"])
         #expect(try h.state.hashWholeSet)
     }
 
@@ -1958,97 +2276,66 @@ private final class Harness: @unchecked Sendable {
 
     @Test func aFileTheDeepCheckDidNotHashStaysOwed() async throws {
         let h = try Harness(); try flagged(h)
-        var s = try h.state; s.verifyOwed = ["flowapp/a.txt"]; s.mismatched = ["flowapp/a.txt"]; try h.store.save(s, for: h.pair)
+        var s = try h.state; s.verifyOwed = ["flowapp/a.txt"]; s.mismatched = ["flowapp/a.txt": Mismatch(since: h.now)]; try h.store.save(s, for: h.pair)
         await h.run()   // a.txt isn't in the mirror, so the deep check's list can't have held it
         #expect(try h.state.verifyOwed == ["flowapp/a.txt"])
-        #expect(try h.state.mismatched == ["flowapp/a.txt"])
-        #expect(try h.state.freedSince.isEmpty)   // owed, but not evicted: the next run can hash it
+        #expect(try h.state.mismatched.keys.sorted() == ["flowapp/a.txt"])
     }
 
-    @Test func evictedFilesTheFlagStoodForAreOwedAfterItsDeepCheck() async throws {
-        let h = try Harness()
-        let names = (0..<(RunCoordinator.freedSample + 5)).map { "e\($0).txt" }
-        try flagged(h, freed: names)
+    @Test func aFileOnDiskTheDeepCheckDidNotHashStaysOwed() async throws {
+        let h = try Harness(); try flagged(h)
+        var s = try h.state; s.verifyOwed = ["flowapp/a.txt"]; try h.store.save(s, for: h.pair)
+        await h.run()   // a.txt isn't in the mirror, so the deep check's list can't have held it
+        #expect(try h.state.verifyOwed == ["flowapp/a.txt"])
+    }
+
+    /// An overflow says nothing about a mismatch, so none is lost to one, in any order.
+    @Test func aMismatchThatTipsTheListOverIsKeptAndOwed() async throws {
+        let h = try Harness(); try h.prime(); h.change("flowapp/a.txt")
+        try Data().write(to: h.source.appendingPathComponent("flowapp/b.txt"))
+        var s = try h.state; s.verifyOwed = (0..<RunCoordinator.maxOwed).map { "flowapp/f\($0)" }; try h.store.save(s, for: h.pair)
+        h.rclone.script(differences: 1, differing: ["b.txt"])
         await h.run()
-        let s = try h.state
-        #expect(s.hashWholeSet == false)
-        #expect(s.verifyOwed.count == 5)   // the rest were sampled, so hashed
-        #expect(Set(s.freedSince.keys) == Set(s.verifyOwed))
+        s = try h.state
+        #expect(s.hashWholeSet)
+        #expect(s.mismatched.keys.sorted() == ["flowapp/b.txt"])
+        #expect(s.verifyOwed == ["flowapp/b.txt"])
     }
 
-    @Test func aRoutineDeepCheckOwesNothingForEvictedFiles() async throws {
-        let h = try Harness(); try h.prime()
+    @Test func aMismatchNoLongerOnTheOwedListIsStillHashedBeforeItClears() async throws {
+        let h = try Harness(); try h.prime(); h.change("flowapp/a.txt")
+        var s = try h.state; s.mismatched = ["flowapp/a.txt": Mismatch(since: h.now)]; try h.store.save(s, for: h.pair)
+        await h.run()
+        #expect(h.rclone.hashed.last == ["a.txt"])
+        #expect(try h.state.mismatched.isEmpty)
+    }
+}
+
+/// Fix round 4: a run with a deep check to come has no Quick hash, so the deep list is all a link has.
+@Suite struct LinksOnADeepRunTests {
+    private func touched(_ h: Harness, inMirror: Bool) throws {
+        try h.prime()
+        var s = try h.state; s.hashWholeSet = true; try h.store.save(s, for: h.pair)
         let m = h.backupRoot.appendingPathComponent("Sets/x/flowapp")
         try FileManager.default.createDirectory(at: m, withIntermediateDirectories: true)
-        let names = (0..<(RunCoordinator.freedSample + 5)).map { "e\($0).txt" }
-        for name in names {
-            try Data().write(to: m.appendingPathComponent(name))
-            try Data().write(to: h.source.appendingPathComponent("flowapp/\(name)"))
-        }
-        h.freed = Set(names)
-        var s = try h.state
-        s.lastFullPass = h.now.addingTimeInterval(-25 * hour); s.lastDeepCheck = h.now.addingTimeInterval(-31 * 24 * hour)
-        try h.store.save(s, for: h.pair)
+        try FileManager.default.createSymbolicLink(atPath: h.source.appendingPathComponent("flowapp/link").path, withDestinationPath: "a.txt")
+        try Data().write(to: m.appendingPathComponent("a.txt"))   // so the deep list is never empty
+        if inMirror { try FileManager.default.createSymbolicLink(atPath: m.appendingPathComponent("link").path, withDestinationPath: "a.txt") }
+        h.rclone.script(copied: ["flowapp/link.rclonelink"])
+    }
+
+    @Test func aTouchedLinkClearsOnTheDeepHashOfItsRcloneName() async throws {
+        let h = try Harness(); try touched(h, inMirror: true)
         await h.run()
+        #expect(h.rclone.hashed.last?.contains("flowapp/link.rclonelink") == true)
+        #expect(h.rclone.checks.contains { $0.logFile.lastPathComponent == "quick-size.log" })
         #expect(try h.state.verifyOwed.isEmpty)
-        #expect(h.downloader.requested.isEmpty)
     }
 
-    @Test func aWholeSetDeepRunPastTheFreedBoundKeepsTheFlag() async throws {
-        let h = try Harness()
-        let names = (0...RunCoordinator.maxFreed).map { "k\($0)" }
-        try flagged(h, freed: names)
-        h.change("flowapp/a.txt", rescan: true)
-        var s = try h.state
-        s.verifyOwed = names.map { "flowapp/\($0)" }
-        for name in names.dropLast() { s.freedSince["flowapp/\(name)"] = h.now }
-        try h.store.save(s, for: h.pair)
+    @Test func aTouchedLinkNoHashReachedStaysOwed() async throws {
+        let h = try Harness(); try touched(h, inMirror: false)
         await h.run()
-        let after = try h.state
-        #expect(after.freedSince.count == RunCoordinator.maxFreed)
-        #expect(after.hashWholeSet)
-        #expect(after.isBackedUp == false)
-    }
-
-    @Test func aFullFreedListWaitsInsteadOfRepeatingDeepChecks() async throws {
-        let h = try Harness(); try h.prime()
-        var s = try h.state
-        s.hashWholeSet = true
-        for i in 0..<RunCoordinator.maxFreed {
-            s.freedSince["flowapp/k\(i)"] = h.now; s.verifyOwed.append("flowapp/k\(i)")
-        }
-        try h.store.save(s, for: h.pair)
-        h.freed = Set((0..<RunCoordinator.maxFreed).map { "k\($0)" })
-        await h.run()
-        #expect(h.rclone.allCalls == 0)
-        #expect(try h.state.hashWholeSet)
-    }
-
-    @Test func anOverflowClassifiesEvictedFilesBeforeDroppingThem() async throws {
-        let h = try Harness(); try h.prime(); h.change("flowapp/a.txt")
-        h.freed = ["old.txt"]
-        h.rclone.script(real: [.permanent], planned: many() + ["old.txt"])
-        await h.run()
-        #expect(try h.state.freedSince.keys.sorted() == ["flowapp/old.txt"])
-        #expect(try h.state.verifyOwed == ["flowapp/old.txt"])
-        #expect(try h.state.hashWholeSet)
-    }
-
-    @Test func theFreedListIsBoundedAndTheFlagCoversTheRest() async throws {
-        let h = try Harness(); try h.prime()
-        var s = try h.state
-        for i in 0..<RunCoordinator.maxFreed {
-            s.freedSince["flowapp/k\(i)"] = h.now; s.verifyOwed.append("flowapp/k\(i)")
-            try Data().write(to: h.source.appendingPathComponent("flowapp/k\(i)"))
-        }
-        s.verifyOwed.append("flowapp/a.txt")
-        try h.store.save(s, for: h.pair)
-        h.freed = Set((0..<RunCoordinator.maxFreed).map { "k\($0)" } + ["a.txt"])
-        await h.run()
-        let after = try h.state
-        #expect(after.freedSince.count == RunCoordinator.maxFreed)
-        #expect(after.hashWholeSet)
-        #expect(after.isBackedUp == false)
+        #expect(try h.state.verifyOwed == ["flowapp/link.rclonelink"])
     }
 }
 
@@ -2068,7 +2355,7 @@ private final class Harness: @unchecked Sendable {
     @Test func aDeepMismatchIsOwedAndRecorded() async throws {
         let h = try Harness(); try await deepFailed(h)
         #expect(try h.state.verifyOwed == ["flowapp/a.txt"])
-        #expect(try h.state.mismatched == ["flowapp/a.txt"])
+        #expect(try h.state.mismatched.keys.sorted() == ["flowapp/a.txt"])
     }
 
     @Test func aDeepMismatchInAFileThatLeftTheSourceIsNotOwed() async throws {
@@ -2085,16 +2372,6 @@ private final class Harness: @unchecked Sendable {
         #expect(try h.active.isEmpty)
     }
 
-    @Test func anEvictedDeepMismatchCantClearUnhashed() async throws {
-        let h = try Harness(); try await deepFailed(h)
-        h.rclone.script()
-        h.freed = ["a.txt"]
-        await h.run()
-        #expect(try h.state.mismatched == ["flowapp/a.txt"])
-        #expect(try h.state.verifyOwed == ["flowapp/a.txt"])
-        #expect(try h.active == [.verificationFailed])
-    }
-
     @Test func anUnrelatedFreedFileDoesNotHoldTheAlertOpen() async throws {
         let h = try Harness(); try h.prime(); h.change("flowapp/a.txt")
         try Data().write(to: h.source.appendingPathComponent("flowapp/b.txt"))
@@ -2106,8 +2383,44 @@ private final class Harness: @unchecked Sendable {
         h.freed = ["b.txt"]
         await h.run()
         #expect(try h.state.mismatched.isEmpty)
-        #expect(try h.state.verifyOwed == ["flowapp/b.txt"])
+        #expect(try h.state.verifyOwed.isEmpty)
         #expect(try h.active.isEmpty)
+    }
+
+    private func full(_ h: Harness) throws {
+        try h.prime(); h.change("flowapp/a.txt")
+        var s = try h.state
+        for i in 0..<RunCoordinator.maxMismatched {
+            s.mismatched["flowapp/k\(i)"] = Mismatch(since: h.now)
+            s.verifyOwed.append("flowapp/k\(i)")
+        }
+        try h.store.save(s, for: h.pair)
+        try h.problems.store(.verificationFailed, pair: h.pair, setName: "x", detail: "earlier")
+    }
+
+    @Test func pastTheBoundTheOwnerIsToldAndTheFlagCoversTheRest() async throws {
+        let h = try Harness(); try full(h)
+        h.rclone.script(copied: ["a.txt"], hashDifferences: 1, differing: ["a.txt"])
+        await h.run()
+        let s = try h.state
+        #expect(s.mismatched.count == RunCoordinator.maxMismatched)
+        #expect(s.mismatched["flowapp/a.txt"] == nil)
+        #expect(s.hashWholeSet)
+        let news = "More than 1,000 files differ, so not all of them are listed"
+        #expect(try h.problems.active().first?.detail == news)
+        #expect(h.notifier.details.filter { $0 == news }.count == 1)
+    }
+
+    /// What fell past the bound is known only to the flag, so an empty list isn't an all-clear.
+    @Test func theAlertOutlastsTheListWhileTheFlagIsUp() async throws {
+        let h = try Harness(); try h.prime(); h.change("flowapp/a.txt")
+        try h.problems.store(.verificationFailed, pair: h.pair, setName: "x", detail: "earlier")
+        let many = (0...RunCoordinator.maxOwed).map { "f\($0)" }
+        h.rclone.script(copied: many, planned: many)
+        await h.run()
+        #expect(try h.state.mismatched.isEmpty)
+        #expect(try h.state.hashWholeSet)
+        #expect(try h.active.contains(.verificationFailed))
     }
 
     @Test func aFileThatChangedDuringTheRunIsOwedButNotAMismatch() async throws {
@@ -2212,19 +2525,19 @@ private final class Harness: @unchecked Sendable {
         #expect(try h.active == [.verificationFailed])
     }
 
-    @Test func anEvictedOwedFileIsNotClearedUnhashed() async throws {
+    @Test func anEvictedMismatchIsNotClearedUnhashed() async throws {
         let h = try Harness(); try await mismatched(h)
         h.rclone.script()
         h.freed = ["a.txt"]
         await h.run()
         #expect(h.rclone.hashed.count == 1)   // only the first run's: nothing was hashed this time
         #expect(try h.state.verifyOwed == ["flowapp/a.txt"])
-        #expect(try h.state.freedSince["flowapp/a.txt"] == h.now)
+        #expect(try h.state.mismatched["flowapp/a.txt"]?.evicted == true)
         #expect(try h.state.isBackedUp == false)
         #expect(try h.active == [.verificationFailed])   // unhashed proves nothing, so the alert stands
     }
 
-    @Test func aFreedFileDoesNotForceAnRcloneRunEveryWakeUp() async throws {
+    @Test func anEvictedMismatchDoesNotForceAnRcloneRunEveryWakeUp() async throws {
         let h = try Harness(); try await mismatched(h)
         h.rclone.script(); h.freed = ["a.txt"]
         await h.run()
@@ -2234,7 +2547,7 @@ private final class Harness: @unchecked Sendable {
         #expect(try h.state.verifyOwed == ["flowapp/a.txt"])
     }
 
-    @Test func aFreedFileIsHashedOnceItsBackOnDisk() async throws {
+    @Test func anEvictedMismatchIsHashedOnceItsBackOnDisk() async throws {
         let h = try Harness(); try await mismatched(h)
         h.rclone.script(); h.freed = ["a.txt"]
         await h.run()
@@ -2242,11 +2555,11 @@ private final class Harness: @unchecked Sendable {
         await h.run()
         #expect(h.rclone.hashed.last == ["a.txt"])
         #expect(try h.state.verifyOwed.isEmpty)
-        #expect(try h.state.freedSince.isEmpty)
+        #expect(try h.state.mismatched.isEmpty)
         #expect(try h.active.isEmpty)
     }
 
-    private func deepDue(_ h: Harness, freed: [String]) throws {
+    private func deepDue(_ h: Harness, freed: [String], recorded: Bool = false) throws {
         try h.prime()
         let dir = h.backupRoot.appendingPathComponent("Sets/x/flowapp")
         try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
@@ -2257,27 +2570,39 @@ private final class Harness: @unchecked Sendable {
             try Data().write(to: dir.appendingPathComponent(name))
             try Data().write(to: h.source.appendingPathComponent("flowapp/\(name)"))
             s.verifyOwed.append("flowapp/\(name)")
-            s.freedSince["flowapp/\(name)"] = h.now.addingTimeInterval(-40 * 24 * hour)
+            if recorded { s.mismatched["flowapp/\(name)"] = Mismatch(since: h.now, evicted: true) }
         }
         s.verifyOwed.sort()
         try h.store.save(s, for: h.pair)
         h.freed = Set(freed)
     }
 
-    @Test func aPassingDeepCheckNeverClearsAFreedOwedFile() async throws {
-        let h = try Harness(); try deepDue(h, freed: ["old.txt"])
+    /// The deep sample is a real hash, so a recorded mismatch it reaches and passes is done with.
+    @Test func aSampledMismatchThatPassesItsHashClears() async throws {
+        let h = try Harness(); try deepDue(h, freed: ["old.txt"], recorded: true)
         await h.run()
-        #expect(try h.state.verifyOwed == ["flowapp/old.txt"])
-        #expect(try h.state.freedSince.keys.sorted() == ["flowapp/old.txt"])
-        #expect(try h.state.reviewItems.map(\.kind) == [.unprovenFreed])
+        #expect(h.rclone.hashed.last == ["flowapp/old.txt"])
+        #expect(try h.state.verifyOwed.isEmpty)
+        #expect(try h.state.mismatched.isEmpty)
     }
 
-    @Test func aSampledFreedFileThatMismatchesStaysOwedAndFlagged() async throws {
+    @Test func aMismatchTheSampleMissedStaysOwed() async throws {
+        let h = try Harness()
+        let names = (0...RunCoordinator.freedSample).map { "e\($0).txt" }
+        try deepDue(h, freed: names, recorded: true)
+        await h.run()
+        let s = try h.state
+        #expect(s.mismatched.count == 1)
+        #expect(s.verifyOwed == s.mismatched.keys.sorted())
+    }
+
+    @Test func aSampledFreedFileThatFailsIsReportedAndRecorded() async throws {
         let h = try Harness(); try deepDue(h, freed: ["old.txt"])
         h.rclone.script(hashDifferences: 1, differing: ["flowapp/old.txt"])
         await h.run()
         #expect(try h.state.verifyOwed == ["flowapp/old.txt"])
-        #expect(try h.state.reviewItems.map(\.kind) == [.unprovenFreed])
+        #expect(try h.state.mismatched.keys.sorted() == ["flowapp/old.txt"])
+        #expect(try h.state.reviewItems.isEmpty)
         #expect(try h.active.contains(.verificationFailed))
     }
 

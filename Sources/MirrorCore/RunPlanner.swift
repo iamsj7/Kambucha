@@ -25,11 +25,9 @@ public struct RunPlanner {
         let fullDue = fullPass ?? state.lastFullPass.map { now.timeIntervalSince($0) >= profile.fullPassInterval } ?? true
         // Never checked isn't overdue: the first full pass sets the baseline.
         let deepDue = state.lastDeepCheck.map { now.timeIntervalSince($0) >= deepInterval } ?? false
-        // Evicted files can't be hashed yet, so they don't drive runs. They stay owed, and they wait.
-        var planned = including(state.verifyOwed.filter { state.freedSince[$0] == nil }, in: scope)
-        // With the evicted list full, another deep check couldn't name any more. It waits for the list to drain.
-        let hashDue = state.hashWholeSet && state.freedSince.count < RunCoordinator.maxFreed
-        if fullDue || state.wholeSetOwed || hashDue {
+        // An evicted mismatch can't be hashed yet, so it doesn't drive runs. It stays owed, and it waits.
+        var planned = including(state.verifyOwed.filter { state.mismatched[$0]?.evicted != true }, in: scope)
+        if fullDue || state.wholeSetOwed || state.hashWholeSet {
             planned = .wholeSet
         } else if state.heldDeletions > 0, planned != .nothing {
             // A scoped dry run can't see the held deletions, and would read as "none left".

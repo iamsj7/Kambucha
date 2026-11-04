@@ -22,9 +22,11 @@ public extension UploadAuditing {
     func ubiquity(of url: URL) -> Bool? { audit([url]).refused.isEmpty }
 }
 
-/// Asks iCloud to bring a file back. Returns at once. The download happens in the background.
+/// Asks iCloud to bring a file back. The download happens in the background.
 public protocol ICloudDownloading: Sendable {
     func requestDownload(of: URL) throws
+    /// Free and total bytes on the volume holding this path. Nil when they can't be read.
+    func space(at: URL) -> (free: Int64, capacity: Int64)?
 }
 
 /// Measured from a process with no iCloud entitlement: an evicted file came back within a second.
@@ -32,6 +34,15 @@ public struct ICloudDownloader: ICloudDownloading {
     public init() {}
     public func requestDownload(of url: URL) throws {
         try FileManager.default.startDownloadingUbiquitousItem(at: url)
+    }
+
+    /// "Important usage" counts what the system will purge to make room, as a download would make it do.
+    public func space(at url: URL) -> (free: Int64, capacity: Int64)? {
+        let keys: Set<URLResourceKey> = [.volumeAvailableCapacityForImportantUsageKey, .volumeTotalCapacityKey]
+        guard let values = try? url.resourceValues(forKeys: keys),
+              let free = values.volumeAvailableCapacityForImportantUsage,
+              let capacity = values.volumeTotalCapacity else { return nil }
+        return (free, Int64(capacity))
     }
 }
 

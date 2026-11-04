@@ -205,6 +205,20 @@ private struct Env {
         #expect(rc.checks[1].filterFile == nil)
     }
 
+    /// A list naming a link's mirror name matches nothing in rclone, so it would go unchecked and pass.
+    @Test func deepHashesALinkUnderRclonesNameAndAuditsItUnderItsOwn() async throws {
+        let e = try Env(); defer { e.cleanup() }
+        try e.mirror(["ok"])
+        try FileManager.default.createSymbolicLink(atPath: e.dst.appendingPathComponent("link").path, withDestinationPath: "ok")
+        let rc = FakeRclone(), auditor = FakeAuditor()
+        let v = Verifier(rclone: rc, auditor: auditor, isDataless: { _ in false })
+        let result = try await v.deep(source: e.src, destination: e.dst.path, profile: profile(.iCloudFolder), context: ctx(),
+                                      filter: e.filter, sampleFreed: 0, logDir: e.logs)
+        #expect(rc.lists[1].sorted() == ["link.rclonelink", "ok"])
+        #expect(result.hashedPaths == ["link.rclonelink", "ok"])
+        #expect(auditor.calls.flatMap { $0 }.map(\.lastPathComponent).sorted() == ["link", "ok"])
+    }
+
     @Test func deepSamplesAtMostRequested() async throws {
         let e = try Env(); defer { e.cleanup() }
         try e.mirror(["ok", "freed1", "freed2", "freed3", "freed4"])
