@@ -10,8 +10,8 @@ public struct RestoreService: Sendable {
     private let rclone: any RcloneRunning
     private let backupRoot: String?
 
-    /// `backupRoot`, when given, is the exact backup root restores must come from. Without it any path below
-    /// a `Sets` or `Archive` folder is accepted.
+    /// `backupRoot`, when given, is the exact backup root restores must come from. Required for local paths; without
+    /// it only remote paths below a `Sets` or `Archive` folder are accepted.
     public init(rclone: any RcloneRunning, backupRoot: String? = nil) {
         self.rclone = rclone; self.backupRoot = backupRoot
     }
@@ -39,8 +39,8 @@ public struct RestoreService: Sendable {
         try FileManager.default.createDirectory(at: to, withIntermediateDirectories: true)
         let log = FileManager.default.temporaryDirectory.appendingPathComponent("mirror-restore-\(UUID().uuidString).log")
         defer { try? FileManager.default.removeItem(at: log) }
-        let args = ["copy", from, to.path, "--links", "--retries", "3", "--use-json-log", "-v",
-                    "--log-file", log.path, "--stats", "0", "--config", context.configPath]
+        let args = ["copy", "--links", "--retries", "3", "--use-json-log", "-v",
+                    "--log-file", log.path, "--stats", "0", "--config", context.configPath, "--", from, to.path]
         let result = try await rclone.execute(args, context: context, logFile: log)
         if result.outcome == .success, let manifest {
             manifest.recreateMissing(under: to, subpath: manifestSubpath)

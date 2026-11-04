@@ -12,7 +12,7 @@ import Foundation
     @Test func restoreRefusesOverSourceByDefault() async throws {
         let (box, from) = try rig()
         let source = try box.dir("home/proj")
-        let svc = RestoreService(rclone: realRunner())
+        let svc = RestoreService(rclone: realRunner(), backupRoot: box.root.path)
         for dest in [source, source.appendingPathComponent("sub"), box.root.appendingPathComponent("home")] {
             await #expect(throws: RestoreError.self) {
                 _ = try await svc.restore(from: from.path, context: plainContext, to: dest, sources: [source])
@@ -28,7 +28,7 @@ import Foundation
         let (box, _) = try rig()
         try box.write("Manifests/Projects.json", "[]")
         try box.write("Sets/Projects/live.txt")
-        let svc = RestoreService(rclone: realRunner())
+        let svc = RestoreService(rclone: realRunner(), backupRoot: box.root.path)
         let to = box.root.appendingPathComponent("out")
         let bad = [box.root.appendingPathComponent("Manifests").path, box.root.path,
                    box.root.appendingPathComponent("Archive").path,                          // no set
@@ -51,6 +51,48 @@ import Foundation
                                                    withDestinationPath: box.root.appendingPathComponent("Manifests").path)
         await #expect(throws: ArchiveError.self) {
             _ = try await pinned.restore(from: box.root.appendingPathComponent("Sets/escape").path, context: plainContext, to: to, sources: [])
+        }
+        #expect(!box.exists("out"))
+    }
+
+    @Test func symlinkedSetsOrArchiveFolderIsRefused() async throws {
+        let box = try ArchiveSandbox()
+        let elsewhere = try box.dir("elsewhere"); try box.write("Projects/x.txt", "secret", under: elsewhere)
+        let fm = FileManager.default
+        try fm.createSymbolicLink(atPath: box.root.appendingPathComponent("Sets").path, withDestinationPath: elsewhere.path)
+        try fm.createSymbolicLink(atPath: box.root.appendingPathComponent("Archive").path, withDestinationPath: elsewhere.path)
+        let svc = RestoreService(rclone: realRunner(), backupRoot: box.root.path)
+        let to = box.root.appendingPathComponent("out")
+        for from in ["Sets/Projects", "Archive/Projects/2026-10-30T10-00"] {
+            await #expect(throws: ArchiveError.self) {
+                _ = try await svc.restore(from: box.root.appendingPathComponent(from).path, context: plainContext, to: to, sources: [])
+            }
+        }
+        #expect(!box.exists("out"))
+    }
+
+    @Test func localRestoreWithoutBackupRootIsRefused() async throws {
+        let (box, from) = try rig()
+        await #expect(throws: ArchiveError.self) {
+            _ = try await RestoreService(rclone: realRunner()).restore(from: from.path, context: plainContext,
+                                                                       to: box.root.appendingPathComponent("o"), sources: [])
+        }
+    }
+
+    @Test func optionLikeAndRelativeAndOddRemoteSourcesAreRefused() async throws {
+        let box = try ArchiveSandbox()
+        let svc = RestoreService(rclone: realRunner(), backupRoot: box.root.path)
+        let remoteSvc = RestoreService(rclone: realRunner())
+        let to = box.root.appendingPathComponent("out")
+        for from in ["-Sets/x", "--config=/x/Sets/y", ":local:/tmp/Sets/x", "Sets/Projects", "./Sets/Projects"] {
+            await #expect(throws: ArchiveError.self) {
+                _ = try await svc.restore(from: from, context: plainContext, to: to, sources: [])
+            }
+        }
+        for from in ["a,b:Sets/Projects", "a:b:Sets/Projects", "-r:Sets/Projects", ":Sets/Projects"] {
+            await #expect(throws: ArchiveError.self) {
+                _ = try await remoteSvc.restore(from: from, context: plainContext, to: to, sources: [])
+            }
         }
         #expect(!box.exists("out"))
     }
@@ -109,7 +151,7 @@ import Foundation
     @Test func restoringOntoASourceIsRefused() async throws {
         let box = try ArchiveSandbox(); try wholeProject(box, in: box.root)
         let source = try box.dir("home/proj")
-        let svc = RestoreService(rclone: realRunner())
+        let svc = RestoreService(rclone: realRunner(), backupRoot: box.root.path)
         let from = box.root.appendingPathComponent("Sets/Projects").path
         await #expect(throws: RestoreError.overSource(source.path)) {
             _ = try await svc.restore(from: from, context: plainContext, to: source, sources: [source])
@@ -121,7 +163,7 @@ import Foundation
         let box = try ArchiveSandbox(); try wholeProject(box, in: box.root)
         let to = try box.dir("dest"); try box.write("mine.txt", "keep", under: to)
         try box.write("app/main.txt", "local edit", under: to)
-        let svc = RestoreService(rclone: realRunner())
+        let svc = RestoreService(rclone: realRunner(), backupRoot: box.root.path)
         let from = box.root.appendingPathComponent("Sets/Projects").path
         await #expect(throws: RestoreError.destinationNotEmpty(to.path)) {
             _ = try await svc.restore(from: from, context: plainContext, to: to, sources: [])
@@ -156,7 +198,7 @@ import Foundation
         let (box, from) = try rig()
         try FileManager.default.createSymbolicLink(atPath: from.appendingPathComponent("link").path, withDestinationPath: "main.txt")
         let to = box.root.appendingPathComponent("restored")
-        let r = try await RestoreService(rclone: realRunner()).restore(from: from.path, context: plainContext, to: to, sources: [])
+        let r = try await RestoreService(rclone: realRunner(), backupRoot: box.root.path).restore(from: from.path, context: plainContext, to: to, sources: [])
         #expect(r.outcome == .success)
         #expect(try FileManager.default.destinationOfSymbolicLink(atPath: to.appendingPathComponent("link").path) == "main.txt")
         #expect(!FileManager.default.fileExists(atPath: to.appendingPathComponent("link.rclonelink").path))
@@ -172,7 +214,7 @@ import Foundation
             .init(path: "app/../escape", target: "x", isAbsolute: false, isBroken: false),
         ])
         let to = box.root.appendingPathComponent("restored")
-        _ = try await RestoreService(rclone: realRunner()).restore(
+        _ = try await RestoreService(rclone: realRunner(), backupRoot: box.root.path).restore(
             from: from.path, context: plainContext, to: to, sources: [], manifest: manifest, manifestSubpath: "app")
         #expect(try FileManager.default.destinationOfSymbolicLink(atPath: to.appendingPathComponent("link").path) == "main.txt")
         #expect(try FileManager.default.destinationOfSymbolicLink(atPath: to.appendingPathComponent("deep/gone").path) == "/nowhere")

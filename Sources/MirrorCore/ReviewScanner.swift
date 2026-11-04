@@ -48,11 +48,12 @@ public struct ReviewScanner: Sendable {
     /// A repo's own config must not be able to run anything in this process (core.fsmonitor, hooks).
     static func gitArguments(_ repo: URL) -> [String] {
         ["-C", repo.path, "-c", "core.fsmonitor=false", "-c", "core.hooksPath=/dev/null",
-         "-c", "core.quotepath=off", "ls-files", "-z"]
+         "-c", "core.quotepath=off", "-c", "protocol.allow=never", "-c", "core.sshCommand=false", "ls-files", "-z"]
     }
     static var gitEnvironment: [String: String] {
         ["PATH": "/usr/bin:/bin", "HOME": NSHomeDirectory(), "GIT_OPTIONAL_LOCKS": "0",
-         "GIT_CONFIG_NOSYSTEM": "1", "GIT_CONFIG_GLOBAL": "/dev/null"]
+         "GIT_CONFIG_NOSYSTEM": "1", "GIT_CONFIG_GLOBAL": "/dev/null",
+         "GIT_NO_LAZY_FETCH": "1", "GIT_ALLOW_PROTOCOL": "", "GIT_TERMINAL_PROMPT": "0"]
     }
 
     func gitLsFiles(_ repo: URL) throws -> [String] {

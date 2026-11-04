@@ -78,6 +78,12 @@ import Foundation
         // The arguments and environment carry the hardening.
         #expect(ReviewScanner.gitArguments(repo).contains("core.fsmonitor=false"))
         #expect(ReviewScanner.gitArguments(repo).contains("core.hooksPath=/dev/null"))
+        let args = ReviewScanner.gitArguments(repo)
+        #expect(args.contains("protocol.allow=never"))
+        #expect(args.contains("core.sshCommand=false"))
+        #expect(ReviewScanner.gitEnvironment["GIT_NO_LAZY_FETCH"] == "1")
+        #expect(ReviewScanner.gitEnvironment["GIT_ALLOW_PROTOCOL"] == "")
+        #expect(ReviewScanner.gitEnvironment["GIT_TERMINAL_PROMPT"] == "0")
         #expect(ReviewScanner.gitEnvironment["GIT_CONFIG_NOSYSTEM"] == "1")
         #expect(ReviewScanner.gitEnvironment["GIT_CONFIG_GLOBAL"] == "/dev/null")
     }

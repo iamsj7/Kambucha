@@ -55,36 +55,51 @@ enum ArchiveScope {
         }
     }
 
-    /// Restore sources: `Sets/<set>[/sub]` or `Archive/<set>/<stamp>[/sub]` below the backup root. With
-    /// `backupRoot` the path must sit under exactly that root; without it, under the first `Sets` or
-    /// `Archive` component. Local paths are canonicalised, so a link cannot lead out.
+    /// Restore sources: `Sets/<set>[/sub]` or `Archive/<set>/<stamp>[/sub]` below the backup root.
+    /// - Local paths must be absolute and need `backupRoot` (also absolute): the target, canonicalised, must lie
+    ///   strictly inside the canonical `backupRoot/Sets` or `/Archive`, and that `Sets`/`Archive` folder must not
+    ///   itself be a symlink. The root is canonicalised alone, never derived from the target.
+    /// - Remote paths (`name:...`) need a remote name without `,` or `:`; with `backupRoot` they must sit under it,
+    ///   without it under the first `Sets` or `Archive` component.
+    /// - A path starting with `-` or `:` is refused, so rclone can never read it as an option or connection string.
     static func validateRestore(_ path: String, backupRoot: String? = nil) throws {
+        let bad = ArchiveError.outsideArchive(path)
+        guard !path.hasPrefix("-"), !path.hasPrefix(":") else { throw bad }
         let p = parse(path)
-        guard !p.comps.contains(".."), !p.comps.contains("."), !path.contains("\0") else {
-            throw ArchiveError.outsideArchive(path)
+        guard !p.comps.contains(".."), !p.comps.contains("."), !path.contains("\0") else { throw bad }
+        if let remote = p.remote, remote.isEmpty || remote.contains(",") || remote.contains(":") || remote.hasPrefix("-") {
+            throw bad
         }
+        let isLocal = p.remote == nil
+        if isLocal { guard path.hasPrefix("/") else { throw bad } }
         var rootCount: Int
         if let backupRoot {
+            guard !backupRoot.hasPrefix("-"), !backupRoot.hasPrefix(":") else { throw bad }
             let r = parse(backupRoot)
             guard r.remote == p.remote, p.comps.count > r.comps.count,
-                  Array(p.comps.prefix(r.comps.count)) == r.comps else { throw ArchiveError.outsideArchive(path) }
+                  Array(p.comps.prefix(r.comps.count)) == r.comps else { throw bad }
+            if isLocal { guard backupRoot.hasPrefix("/") else { throw bad } }
             rootCount = r.comps.count
         } else {
-            guard let i = p.comps.firstIndex(where: { $0 == "Sets" || $0 == folder }) else { throw ArchiveError.outsideArchive(path) }
+            if isLocal { throw bad }
+            guard let i = p.comps.firstIndex(where: { $0 == "Sets" || $0 == folder }) else { throw bad }
             rootCount = i
         }
         let rest = Array(p.comps.dropFirst(rootCount))
         switch rest.first {
-        case "Sets": guard rest.count >= 2 else { throw ArchiveError.outsideArchive(path) }
-        case folder: guard rest.count >= 3, parseStamp(rest[2]) != nil else { throw ArchiveError.outsideArchive(path) }
-        default: throw ArchiveError.outsideArchive(path)
+        case "Sets": guard rest.count >= 2 else { throw bad }
+        case folder: guard rest.count >= 3, parseStamp(rest[2]) != nil else { throw bad }
+        default: throw bad
         }
-        if p.remote == nil, path.hasPrefix("/") {
-            let top = "/" + (p.comps.prefix(rootCount) + [rest[0]]).joined(separator: "/")
-            let root = URL(fileURLWithPath: top, isDirectory: true)
+        if isLocal, let backupRoot {
+            let rootURL = PathGuard.canonical(URL(fileURLWithPath: backupRoot, isDirectory: true))
+            let top = URL(fileURLWithPath: backupRoot, isDirectory: true).appendingPathComponent(rest[0], isDirectory: true)
+            // The Sets/Archive folder itself must be a real directory, wherever a link would point.
+            if let type = (try? FileManager.default.attributesOfItem(atPath: top.path))?[.type] as? FileAttributeType,
+               type == .typeSymbolicLink { throw bad }
+            let allowed = rootURL.appendingPathComponent(rest[0], isDirectory: true)
             let target = URL(fileURLWithPath: "/" + p.comps.joined(separator: "/"))
-            do { try PathGuard(iCloudDrive: root, backupRoot: root).assertInsideRoot(target) }
-            catch { throw ArchiveError.outsideArchive(path) }
+            guard PathGuard.strictlyInsideCanonical(target, allowed) else { throw bad }
         }
     }
 
