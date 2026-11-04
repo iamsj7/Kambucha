@@ -223,3 +223,52 @@ private func aSet() -> BackupSet { BackupSet(name: "Projects", source: URL(fileU
     #expect(set.presets.contains("node"))
     #expect(set.source == dir)
 }
+
+// MARK: Fix round 1
+
+@Test func badSetNameGetsASanitizedSuggestion() {
+    #expect(SetNaming.suggestion(for: "a/b") == "a-b")
+    #expect(SetNaming.suggestion(for: "  ") == "Set")
+    #expect(SetNaming.suggestion(for: "Projects") == nil)
+    #expect(SetNaming.suggestion(for: " Projects ") == nil)   // trimming alone is not a bad name
+}
+
+@MainActor @Test func previewOfANewSetDoesNotPersistEdits() async {
+    let c = PreviewController(set: aSet(), provider: FakePreview(groups: groups), inspector: nil, persistsEdits: false)
+    await c.load()
+    var called = false
+    c.onSetChanged = { _ in called = true }
+    await c.setIncluded(false, for: groups[0])
+    #expect(!called)
+    #expect(c.set.rules.count == 1)   // the candidate still holds the edit
+}
+
+@Test func staleDraftNeverUndoesAnExternalPause() {
+    let base = aSet()
+    var draft = base
+    draft.archiveDays = 60                    // the owner is editing this field
+    var latest = base
+    latest.isPaused = true                    // the menu bar paused the set meanwhile
+    let merged = SetDraftMerge.merge(draft: draft, previouslySaved: base, latest: latest)
+    #expect(merged.isPaused)
+    #expect(merged.archiveDays == 60)
+}
+
+@Test func mergeLeavesDraftAloneWhenNothingChangedOutside() {
+    let base = aSet()
+    var draft = base
+    draft.archiveDays = 60
+    #expect(SetDraftMerge.merge(draft: draft, previouslySaved: base, latest: base) == draft)
+}
+
+@Test func runNowRunsAcceptedSetsAndReportsTheRest() {
+    let a = BackupSet(name: "A", source: URL(fileURLWithPath: "/a"))
+    let b = BackupSet(name: "B", source: URL(fileURLWithPath: "/b"))
+    var paused = BackupSet(name: "C", source: URL(fileURLWithPath: "/c")); paused.isPaused = true
+    let plan = RunNowPlan.make(sets: [a, b, paused], target: nil, isAccepted: { $0.id == a.id })
+    #expect(plan.run == [a.id])
+    #expect(plan.unaccepted == ["B"])
+    let one = RunNowPlan.make(sets: [a, b], target: b.id, isAccepted: { $0.id == a.id })
+    #expect(one.run.isEmpty)
+    #expect(one.unaccepted == ["B"])
+}

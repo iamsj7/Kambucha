@@ -81,6 +81,7 @@ final class AppModel {
     @ObservationIgnored private nonisolated(unsafe) var watchers: [String: DispatchSourceFileSystemObject] = [:]
     @ObservationIgnored private var generation = 0
     @ObservationIgnored private var process: Process?
+    @ObservationIgnored private var queuedRuns: [UUID] = []
     @ObservationIgnored private var panelVisible = false
     @ObservationIgnored private var poller: Task<Void, Never>?
 
@@ -149,12 +150,18 @@ final class AppModel {
     func runNow(_ set: UUID?) {
         lastError = nil
         // No backup for a set starts until its preview was accepted once (spec section 9).
-        let targets = sets.filter { set == nil ? !$0.isPaused : $0.id == set }
-        if let unaccepted = targets.first(where: { !acceptance.isAccepted($0) }) {
-            lastError = "Preview \"\(unaccepted.name)\" before its first backup. Open it in Mirror and choose Preview Backup."
-            return
+        // Accepted sets still run; the others are named so the owner can preview them.
+        let plan = RunNowPlan.make(sets: sets, target: set, isAccepted: { acceptance.isAccepted($0) })
+        if !plan.unaccepted.isEmpty {
+            lastError = "Preview before the first backup: \(plan.unaccepted.joined(separator: ", ")). Open each in Mirror and choose Preview Backup."
         }
-        launchAgent(["--run-now"] + (set.map { [$0.uuidString] } ?? []))
+        guard !plan.run.isEmpty else { return }
+        if set == nil && plan.unaccepted.isEmpty {
+            launchAgent(["--run-now"])
+        } else {
+            queuedRuns = Array(plan.run.dropFirst())
+            launchAgent(["--run-now", plan.run[0].uuidString])
+        }
     }
 
     func setPaused(_ paused: Bool) {
@@ -249,6 +256,7 @@ final class AppModel {
                     self.lastError = "The backup agent stopped with code \(code)." + (why.isEmpty ? "" : " \(why)")
                 }
                 self.refresh()
+                if code == 0, !self.queuedRuns.isEmpty { self.launchAgent(["--run-now", self.queuedRuns.removeFirst().uuidString]) }
             }
         }
         do { try p.run(); process = p }

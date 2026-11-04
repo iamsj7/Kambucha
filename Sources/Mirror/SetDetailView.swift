@@ -9,11 +9,14 @@ struct SetDetailView: View {
     @State private var presets: [Preset] = []
     @State private var showingPreview = false
     @State private var previewTask: Task<Void, Never>?
+    @State private var lastSaved: BackupSet
 
     init(model: AppModel, setID: UUID) {
         self.model = model
         self.setID = setID
-        _draft = State(initialValue: model.set(setID) ?? BackupSet(name: "", source: URL(fileURLWithPath: "/")))
+        let initial = model.set(setID) ?? BackupSet(name: "", source: URL(fileURLWithPath: "/"))
+        _draft = State(initialValue: initial)
+        _lastSaved = State(initialValue: initial)
     }
 
     /// Rules still being typed (empty patterns) are neither saved nor previewed.
@@ -35,12 +38,14 @@ struct SetDetailView: View {
             }
 
             Section("Location") {
-                TextField("Name", text: $draft.name)
+                LabeledContent("Name") { Text(draft.name) }
                 LabeledContent("Folder") {
                     Text(draft.source.path).lineLimit(1).truncationMode(.middle).textSelection(.enabled)
                 }
                 Button("Show in Finder") { NSWorkspace.shared.activateFileViewerSelecting([draft.source]) }
                 Toggle("Pause this set", isOn: $draft.isPaused)
+                Text("The name can't be changed, because it names this set's folder in every destination. To rename it, remove the set and add it again.")
+                    .font(.caption).foregroundStyle(.secondary)
             }
 
             Section {
@@ -132,7 +137,17 @@ struct SetDetailView: View {
         }
         .formStyle(.grouped)
         .navigationTitle(draft.name)
-        .onChange(of: draft) { _, new in model.save(set: Self.cleaned(new)) }
+        .onChange(of: draft) { _, new in
+            let c = Self.cleaned(new)
+            lastSaved = c
+            model.save(set: c)
+        }
+        // A change made elsewhere (the menu bar's Pause) is merged in, so a stale draft can't undo it.
+        .onChange(of: model.set(setID)) { _, latest in
+            guard let latest, latest != lastSaved else { return }
+            draft = SetDraftMerge.merge(draft: draft, previouslySaved: lastSaved, latest: latest)
+            lastSaved = latest
+        }
         .onChange(of: draft.presets) { requestPreview() }
         .onChange(of: draft.backupSecrets) { requestPreview() }
         .onChange(of: draft.backupGit) { requestPreview() }

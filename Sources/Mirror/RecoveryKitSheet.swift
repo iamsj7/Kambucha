@@ -38,6 +38,8 @@ struct RecoveryKitSheet: View {
                     Button("Print…") { printKit(kitText) }
                     Spacer()
                 }
+                Text("If you print to PDF, don't save the PDF inside a folder Mirror backs up.")
+                    .font(.caption).foregroundStyle(.secondary)
                 if let saveError { Label(saveError, systemImage: "xmark.octagon") }
                 Toggle("I saved or printed my Recovery Kit and I know where it is", isOn: $understood)
                     .disabled(!savedOrPrinted)
@@ -136,6 +138,9 @@ struct RecoveryKitPasteSheet: View {
         defer { working = false }
         do {
             try await model.services.agent.restore(destination, kitText: text)
+            // The owner holds the kit, so the destination counts as confirmed.
+            var d = destination; d.recoveryKitConfirmed = true
+            model.save(destination: d)
             text = ""
             restored()
             dismiss()

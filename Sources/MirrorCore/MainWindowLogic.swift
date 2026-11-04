@@ -72,8 +72,12 @@ public final class PreviewController {
     @ObservationIgnored private let provider: any PreviewProviding
     @ObservationIgnored private let inspector: (any MirroredExcludeInspecting)?
 
-    public init(set: BackupSet, provider: any PreviewProviding, inspector: (any MirroredExcludeInspecting)?) {
-        self.set = set; self.provider = provider; self.inspector = inspector
+    /// False for a set that doesn't exist yet: its edits stay in this controller until the owner starts the backup.
+    @ObservationIgnored private let persistsEdits: Bool
+
+    public init(set: BackupSet, provider: any PreviewProviding, inspector: (any MirroredExcludeInspecting)?,
+                persistsEdits: Bool = true) {
+        self.set = set; self.provider = provider; self.inspector = inspector; self.persistsEdits = persistsEdits
     }
 
     public func load() async {
@@ -89,7 +93,7 @@ public final class PreviewController {
         let rule = provider.rule(for: group, included: included)
         set.rules.removeAll { $0.pattern == rule.pattern }
         set.rules.append(rule)
-        onSetChanged?(set)
+        if persistsEdits { onSetChanged?(set) }
         await load()
         pendingImpact = nil
         if rule.action == .exclude, let inspector,
@@ -230,5 +234,40 @@ public enum NewSet {
         let ids = found.reduce(into: Set<String>()) { $0.formUnion($1.presetIDs) }
         return BackupSet(name: PathGuard.sanitizedComponent(folder.lastPathComponent), source: folder,
                          presets: ids, destinationIDs: destinations.prefix(1).map(\.id))
+    }
+}
+
+// MARK: Names, drafts and Back Up Now
+
+public enum SetNaming {
+    /// A safe replacement when the name can't be used as one folder name; nil when it is fine as typed.
+    public static func suggestion(for name: String) -> String? {
+        let trimmed = name.trimmingCharacters(in: .whitespacesAndNewlines)
+        let safe = PathGuard.sanitizedComponent(name)
+        return safe == trimmed ? nil : safe
+    }
+}
+
+/// Folds a change made elsewhere (the menu bar's Pause, say) into the draft being edited, without
+/// touching what the owner is typing. Only fields that changed outside are taken.
+public enum SetDraftMerge {
+    public static func merge(draft: BackupSet, previouslySaved: BackupSet, latest: BackupSet) -> BackupSet {
+        var out = draft
+        func take<T: Equatable>(_ k: WritableKeyPath<BackupSet, T>) {
+            if latest[keyPath: k] != previouslySaved[keyPath: k] { out[keyPath: k] = latest[keyPath: k] }
+        }
+        take(\.isPaused); take(\.destinationIDs); take(\.presets); take(\.backupSecrets); take(\.backupGit)
+        take(\.rules); take(\.deletion); take(\.archiveDays)
+        return out
+    }
+}
+
+public enum RunNowPlan {
+    public struct Plan: Equatable, Sendable { public var run: [UUID]; public var unaccepted: [String] }
+
+    /// Accepted sets run; the others are named so the owner can preview them. Paused sets are left out of "all".
+    public static func make(sets: [BackupSet], target: UUID?, isAccepted: (BackupSet) -> Bool) -> Plan {
+        let wanted = sets.filter { target == nil ? !$0.isPaused : $0.id == target }
+        return Plan(run: wanted.filter(isAccepted).map(\.id), unaccepted: wanted.filter { !isAccepted($0) }.map(\.name))
     }
 }

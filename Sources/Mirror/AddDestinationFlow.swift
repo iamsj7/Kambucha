@@ -33,7 +33,7 @@ struct AddDestinationFlow: View {
         if working { return false }
         switch choice {
         case .iCloud: return true
-        case .externalDrive: return selectedVolume != nil
+        case .externalDrive: return false   // until the external drive kind exists (Task 21)
         case .googleDrive: return !clientID.trimmingCharacters(in: .whitespaces).isEmpty && !clientSecret.isEmpty && encryptionSettled
         case .oneDrive: return encryptionSettled
         }
@@ -103,17 +103,19 @@ struct AddDestinationFlow: View {
             .padding(16)
         }
         .frame(minWidth: 520, minHeight: 600)
+        .onDisappear { clientSecret = "" }
         .onChange(of: choice) { _, new in
             error = nil
             if let k = kind { encrypted = DestinationRules.encryptionDefault(k); confirmedOff = false }
             if new == .externalDrive { volumes = model.services.volumes.connectedVolumes() }
         }
-        .sheet(isPresented: $showingKit) {
+        // Done and Later both end the flow: the destination is saved and shows "Save your Recovery Kit"
+        // until confirmed, so there is nothing left here that Sign In could collide with.
+        .sheet(isPresented: $showingKit, onDismiss: { if let d = pending { added(d.id); dismiss() } }) {
             if let d = pending {
                 RecoveryKitSheet(model: model, destination: d) {
                     var done = d; done.recoveryKitConfirmed = true
                     model.save(destination: done)
-                    added(done.id); dismiss()
                 }
             }
         }
@@ -154,7 +156,7 @@ struct AddDestinationFlow: View {
                 Label(warn, systemImage: "exclamationmark.triangle")
             }
         } header: { Text("Connected Drives") } footer: {
-            Text("Mirror doesn't encrypt external drives. Use a drive with its own password protection. A locked drive counts as not connected.")
+            Text("Mirror doesn't encrypt external drives. Use a drive with its own password protection. A locked drive counts as not connected. Adding external drives isn't available in this build yet.")
         }
     }
 

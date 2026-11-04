@@ -19,7 +19,7 @@ struct AddSetFlow: View {
 
     private var candidate: BackupSet? {
         guard let folder else { return nil }
-        let s = BackupSet(name: PathGuard.sanitizedComponent(name), source: folder, presets: presets,
+        let s = BackupSet(name: name.trimmingCharacters(in: .whitespacesAndNewlines), source: folder, presets: presets,
                           destinationIDs: model.destinations.filter { chosenDestinations.contains($0.id) }.map(\.id))
         return s
     }
@@ -46,11 +46,17 @@ struct AddSetFlow: View {
                             Button("Choose…") { chooseFolder() }
                         }
                     }
-                    if folder != nil { TextField("Name", text: $name) }
+                    if folder != nil {
+                        TextField("Name", text: $name)
+                        if let better = SetNaming.suggestion(for: name) {
+                            Button("Use \"\(better)\" instead") { name = better }
+                                .accessibilityHint("This name can't be used as a folder name")
+                        }
+                    }
                 } header: {
                     Text("Folder to Back Up")
                 } footer: {
-                    Text("Pick a parent folder such as Projects. Everything inside is backed up, except what your rules skip.")
+                    Text("Pick a parent folder such as Projects. Everything inside is backed up, except what your rules skip. The name can't be changed later, because it names the folder in every destination.")
                 }
 
                 if let problem {
@@ -95,7 +101,7 @@ struct AddSetFlow: View {
                 Button("Preview…") { previewing = true }
                     .keyboardShortcut(.defaultAction)
                     .buttonStyle(.borderedProminent)
-                    .disabled(candidate == nil || problem != nil || name.trimmingCharacters(in: .whitespaces).isEmpty)
+                    .disabled(candidate == nil || problem != nil || SetNaming.suggestion(for: name) != nil || name.trimmingCharacters(in: .whitespaces).isEmpty)
             }
             .padding(16)
         }

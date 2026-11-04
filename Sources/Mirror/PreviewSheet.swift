@@ -13,8 +13,10 @@ struct PreviewSheet: View {
         self.model = model
         self.startLabel = startLabel
         self.onStart = onStart
+        // A set that isn't saved yet keeps its edits in the controller until Start Backup.
         _controller = State(initialValue: PreviewController(set: set, provider: model.services.preview,
-                                                            inspector: model.services.inspector))
+                                                            inspector: model.services.inspector,
+                                                            persistsEdits: model.set(set.id) != nil))
     }
 
     /// For rendering screenshots with a ready-made controller.
