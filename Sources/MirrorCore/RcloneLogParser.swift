@@ -95,15 +95,35 @@ public enum RcloneLogParser {
         }
     }
 
+    /// Known rclone and oauth2 wordings of an expired or revoked sign-in. Verified present in the vendored
+    /// rclone binary's strings; still to be confirmed against real Google and OneDrive errors.
+    private static let authShapes = [
+        "couldn't fetch token",                           // rclone oauthutil
+        "token expired and there's no refresh token",     // rclone oauthutil
+        "no refresh token found",                         // rclone oauthutil
+        "oauth2: token expired and refresh token is not set",  // golang.org/x/oauth2
+    ]
+
+    private static func isAuthError(_ msg: String, removing object: String?) -> Bool {
+        var text = msg
+        if let object, !object.isEmpty { text = text.replacingOccurrences(of: object, with: "") }
+        if authShapes.contains(where: text.contains) { return true }
+        // `oauth2: cannot fetch token: 400 Bad Request\nResponse: {"error":"invalid_grant",...}`: the token
+        // endpoint's error code is only meaningful after the oauth2 prefix, never as a free substring.
+        if let r = text.range(of: "oauth2: ") { return text[r.upperBound...].contains("invalid_grant") }
+        return false
+    }
+
     /// Exit code refined by the log: `--max-delete` stops and expired sign-ins are only visible there.
-    /// Only the `msg` of error-level JSON lines is consulted, never `object`, so a file named
-    /// "token expired.txt" cannot change the outcome. Stderr text is deliberately not consulted: it can
-    /// carry user paths, and with `--log-file` rclone logs everything of interest to the file.
+    /// Only error-level lines count. For auth, the line's `object` is first removed from `msg` and then
+    /// only known rclone/oauth2 message shapes match (not free substrings), because real messages embed
+    /// paths ("open /x/token expired.txt: permission denied"). Stderr text is deliberately not consulted:
+    /// it can carry user paths, and with `--log-file` rclone logs everything of interest to the file.
     public static func outcome(exitCode: Int32, log: Data) -> RcloneResult.Outcome {
         guard exitCode != 0 else { return .success }
-        let errors = lines(log).filter(\.isError).compactMap(\.msg)
-        if errors.contains("Got fatal error on delete: --max-delete threshold reached") { return .safetyStop }
-        if errors.contains(where: { $0.contains("invalid_grant") || $0.contains("token expired") }) { return .authExpired }
+        let errorLines = lines(log).filter(\.isError)
+        if errorLines.contains(where: { $0.msg == "Got fatal error on delete: --max-delete threshold reached" }) { return .safetyStop }
+        if errorLines.contains(where: { line in line.msg.map { isAuthError($0, removing: line.object) } ?? false }) { return .authExpired }
         return outcome(exitCode: exitCode)
     }
 }
