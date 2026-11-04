@@ -11,6 +11,8 @@ private final class FakeSystem: OnboardingSystem {
     var notes: NotificationAccess = .notDetermined
     var enableError: (any Error)?
     func fullDiskAccessConfirmed() async -> Bool { fda }
+    var report: AccessReport?
+    func accessReport() -> AccessReport? { report }
     var checked = 0
     var kickOutcome: AccessConfirmation.Outcome?
     func checkFullDiskAccessNow() async -> AccessConfirmation.Outcome { checked += 1; return kickOutcome ?? (fda ? .confirmed : .notConfirmed) }
@@ -97,6 +99,18 @@ struct OnboardingModelTests {
         await m.firstCheckIfNeeded()
         await m.refresh()
         #expect(sys.checked == 1)
+    }
+
+    @Test func readingFoldersWithoutFullDiskAccessIsSaidApart() async {
+        let sys = FakeSystem(); sys.agent = .enabled
+        sys.report = AccessReport(folders: true, fullDiskAccess: false, checkedAt: Date())
+        let (m, _) = make(sys)
+        await m.refresh()
+        #expect(!m.isDone(.fullDiskAccess))
+        #expect(m.accessIsPartial)
+        sys.report = AccessReport(folders: false, fullDiskAccess: false, checkedAt: Date())
+        await m.refresh()
+        #expect(!m.accessIsPartial)
     }
 
     @Test func agentNeedingApprovalIsNotDone() async {

@@ -38,7 +38,7 @@ Mirror cannot read some folders, such as `~/Documents`, until you allow this.
 2. Click the plus button and choose `Mirror.app` from `/Applications`.
 3. Switch it on. macOS may ask you to quit and reopen Mirror.
 
-The background helper is inside the app, so this one permission covers both.
+The background helper is inside the app, so this one permission covers both. Mirror checks it by having the helper, started by macOS, read a file that only Full Disk Access can open. Reading Documents and iCloud Drive is not enough, because macOS can allow those on their own.
 
 Then allow it to run in the background. Open System Settings, then General, then Login Items & Extensions, and switch on Mirror under "Allow in the Background". Mirror's first-run screen walks through both steps.
 

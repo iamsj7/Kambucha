@@ -11,6 +11,7 @@ enum NotificationAccess: Equatable { case notDetermined, allowed, denied }
 protocol OnboardingSystem {
     /// Reads the agent's last report (`access.json`). False means not confirmed.
     func fullDiskAccessConfirmed() async -> Bool
+    func accessReport() -> AccessReport?
     /// Asks launchd to start the agent and waits (bounded) for its report.
     func checkFullDiskAccessNow() async -> AccessConfirmation.Outcome
     func agentStatus() -> SMAppService.Status
@@ -25,6 +26,7 @@ protocol OnboardingSystem {
 @MainActor
 struct LiveOnboardingSystem: OnboardingSystem {
     func fullDiskAccessConfirmed() async -> Bool { AgentAccess.isConfirmed(support: MirrorPaths.support) }
+    func accessReport() -> AccessReport? { AgentAccess.readReport(support: MirrorPaths.support) }
     func checkFullDiskAccessNow() async -> AccessConfirmation.Outcome { await AccessConfirmation.confirm(support: MirrorPaths.support) }
     func agentStatus() -> SMAppService.Status { AgentRegistration.status() }
     func enableAgent() throws { try AgentRegistration.enable() }
@@ -163,6 +165,8 @@ final class OnboardingModel {
     private(set) var hasRefreshed = false
     private(set) var checkFailed = false
     private(set) var kickFailed = false
+    /// The helper can read Documents and iCloud Drive, but not what only Full Disk Access opens.
+    private(set) var accessIsPartial = false
     /// The set just added here. The window goes straight to its preview, since nothing backs up until that's accepted.
     private(set) var setAwaitingPreview: UUID?
     @ObservationIgnored private var firstCheckDone = false
@@ -190,6 +194,7 @@ final class OnboardingModel {
     func refresh() async {
         var d: Set<OnboardingStep> = []
         if await system.fullDiskAccessConfirmed() { d.insert(.fullDiskAccess) }
+        accessIsPartial = system.accessReport().map { $0.folders && !$0.fullDiskAccess } ?? false
         let status = system.agentStatus()
         agentNeedsApproval = status == .requiresApproval
         if status == .enabled { d.insert(.agent) }
@@ -347,7 +352,8 @@ private struct StepRow: View {
     private var explanation: String {
         switch step {
         case .fullDiskAccess:
-            (model.checkFailed ? "Not confirmed yet. " : "") + "This comes after turning on background backups, because the background helper is what needs the access and Mirror checks through it. Click the button, switch on Mirror in the list, then choose Check Again."
+            (model.accessIsPartial ? "Mirror can read Documents and iCloud Drive, but Full Disk Access isn't on yet. "
+                : model.checkFailed ? "Not confirmed yet. " : "") + "This comes after turning on background backups, because the background helper is what needs the access and Mirror checks through it. Click the button, switch on Mirror in the list, then choose Check Again."
         case .agent:
             model.agentNeedsApproval
                 ? "macOS needs your approval. Switch on Mirror in Login Items, then come back."
@@ -363,7 +369,7 @@ private struct StepRow: View {
 
     private var doneText: String {
         switch step {
-        case .fullDiskAccess: "Mirror can read your folders."
+        case .fullDiskAccess: "The background helper has Full Disk Access."
         case .agent: "Backups will run in the background."
         case .notifications: "You'll hear about problems."
         case .firstSet: "Your first set is ready."

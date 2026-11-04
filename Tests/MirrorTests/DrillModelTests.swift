@@ -168,6 +168,9 @@ struct BoundedProcessTests {
 }
 
 struct AccessConfirmationTests {
+    /// Any readable file, standing in for the TCC database.
+    let probe = URL(fileURLWithPath: #filePath)
+
     func support() throws -> URL {
         let d = FileManager.default.temporaryDirectory.appendingPathComponent("mirror-test-\(UUID().uuidString)")
         try FileManager.default.createDirectory(at: d, withIntermediateDirectories: true)
@@ -176,20 +179,20 @@ struct AccessConfirmationTests {
 
     @Test func confirmsWhenTheKickedAgentWritesAFreshPassingReport() async throws {
         let s = try support()
-        let ok = await AccessConfirmation.confirm(support: s, timeout: 3, kick: { AgentAccess.writeReport(support: s, paths: [s]); return true })
+        let ok = await AccessConfirmation.confirm(support: s, timeout: 3, kick: { AgentAccess.writeReport(support: s, paths: [s], fullDiskProbe: probe); return true })
         #expect(ok == .confirmed)
     }
 
     @Test func aStalePassingReportIsNotEnoughAfterAKick() async throws {
         let s = try support()
-        AgentAccess.writeReport(support: s, paths: [s], now: Date().addingTimeInterval(-600))
+        AgentAccess.writeReport(support: s, paths: [s], fullDiskProbe: probe, now: Date().addingTimeInterval(-600))
         #expect(await AccessConfirmation.confirm(support: s, timeout: 0.6, kick: { true }) == .notConfirmed)
     }
 
     @Test func aFailingReportIsNotConfirmed() async throws {
         let s = try support()
         let missing = URL(fileURLWithPath: "/nonexistent-\(UUID().uuidString)")
-        #expect(await AccessConfirmation.confirm(support: s, timeout: 0.6, kick: { AgentAccess.writeReport(support: s, paths: [missing]); return true }) == .notConfirmed)
+        #expect(await AccessConfirmation.confirm(support: s, timeout: 0.6, kick: { AgentAccess.writeReport(support: s, paths: [missing], fullDiskProbe: probe); return true }) == .notConfirmed)
     }
 
     @Test func kickstartArgumentsNameTheAgentInTheUsersDomain() {
