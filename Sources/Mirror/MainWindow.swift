@@ -77,8 +77,8 @@ struct MainWindow: View {
             if let error = model.lastError { ErrorBar(message: error) { model.dismissError() } }
         }
         // The Dock icon shows only while this window is open; the app is otherwise a menu bar item.
-        .onAppear { DockPresence.windowOpened() }
-        .onDisappear { DockPresence.windowClosed() }
+        .onAppear { DockPresence.windowOpened(); model.windowAppeared() }
+        .onDisappear { DockPresence.windowClosed(); model.windowDisappeared() }
     }
 
     // MARK: Sidebar
@@ -280,9 +280,14 @@ extension AppModel {
     func destinationStatus(_ d: Destination, now: Date = Date()) -> DestinationStatus {
         let pairs = sets.flatMap { s in s.destinationIDs.contains(d.id) ? [PairID(set: s.id, destination: d.id)] : [] }
         let finished = pairs.compactMap { states[$0]?.lastFinished }.max()
-        if d.kind == .externalDrive, ExternalVolume.find(d, in: services.volumes.mounted()) == nil {
-            return DestinationStatus(symbol: "externaldrive.badge.xmark",
-                                     text: DestinationRules.notConnectedText(lastBackedUp: finished, now: now))
+        if d.kind == .externalDrive {
+            guard let volume = ExternalVolume.find(d, in: volumeCache.volumes) else {
+                return DestinationStatus(symbol: "externaldrive.badge.xmark",
+                                         text: DestinationRules.notConnectedText(lastBackedUp: finished, now: now))
+            }
+            if ExternalDriveSetup.needsConfirmation(d, volume: volume) {
+                return DestinationStatus(symbol: "exclamationmark.triangle", text: "Confirm this internal disk")
+            }
         }
         if d.encrypted && !d.recoveryKitConfirmed {
             return DestinationStatus(symbol: "exclamationmark.triangle", text: "Save your Recovery Kit")

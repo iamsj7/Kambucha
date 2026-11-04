@@ -7,7 +7,8 @@ import Observation
 
 /// Supplies the files a held deletion would remove, from a dry run. The engine implements it.
 public protocol DeletionDryRunProviding: Sendable {
-    func heldDeletions(set: BackupSet) async throws -> [String]
+    /// Every file a run to this one destination would delete, `.git` ones included.
+    func heldDeletions(set: BackupSet, destination: Destination) async throws -> [String]
 }
 
 /// Finds files already mirrored that new exclude rules would now skip, and moves them to the archive
@@ -18,44 +19,6 @@ public protocol MirroredExcludeInspecting: Sendable {
 }
 
 public enum ExcludeResolution: Sendable { case moveToArchive, leaveInPlace }
-
-// MARK: Preview acceptance
-
-/// Remembers which rule set the owner accepted for each backup set. A change to the rules, presets or
-/// switches makes the set unaccepted again, so the preview reopens. Stored as plain JSON, no secrets.
-public final class PreviewAcceptanceStore: Sendable {
-    private let url: URL
-    public init(root: URL) { url = root.appendingPathComponent("preview-accepted.json") }
-
-    public static func fingerprint(_ set: BackupSet) -> String {
-        let rules = set.rules.map { "\($0.action.rawValue):\($0.pattern)" }.joined(separator: "\n")
-        return ["presets=" + set.presets.sorted().joined(separator: ","), "secrets=\(set.backupSecrets)",
-                "git=\(set.backupGit)", rules].joined(separator: "|")
-    }
-
-    public func isAccepted(_ set: BackupSet) -> Bool { load()[set.id.uuidString] == Self.fingerprint(set) }
-
-    public func accept(_ set: BackupSet) {
-        var all = load()
-        all[set.id.uuidString] = Self.fingerprint(set)
-        write(all)
-    }
-
-    public func forget(_ id: UUID) {
-        var all = load()
-        all[id.uuidString] = nil
-        write(all)
-    }
-
-    private func load() -> [String: String] {
-        (try? JSONDecoder().decode([String: String].self, from: Data(contentsOf: url))) ?? [:]
-    }
-
-    private func write(_ all: [String: String]) {
-        try? FileManager.default.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
-        try? JSONEncoder().encode(all).write(to: url, options: .atomic)
-    }
-}
 
 // MARK: Preview
 
@@ -114,29 +77,55 @@ public final class PreviewController {
 
 // MARK: Deletion review
 
+/// One held destination's list. Deletions are reviewed and approved one destination at a time, so an approval can
+/// never cover more than the owner saw for that destination.
+public struct HeldDestination: Identifiable, Equatable, Sendable {
+    public var destination: Destination
+    public var files: [String] = []
+    public var isLoaded = false
+    public var loadError: String?
+    public var id: UUID { destination.id }
+    /// What the agent counts for the approval: deletions outside `.git` folders.
+    public var count: Int { AgentWire.nonGitCount(files) }
+}
+
 @MainActor @Observable
 public final class DeletionReview {
     public let set: BackupSet
-    public private(set) var files: [String] = []
-    public private(set) var isLoaded = false
-    public private(set) var loadError: String?
+    public private(set) var entries: [HeldDestination]
 
     @ObservationIgnored private let provider: any DeletionDryRunProviding
 
-    public init(set: BackupSet, provider: any DeletionDryRunProviding) { self.set = set; self.provider = provider }
-
-    public var count: Int { files.count }
-
-    public func load() async {
-        do { files = try await provider.heldDeletions(set: set); isLoaded = true; loadError = nil }
-        catch { loadError = SetupFailureText.message(for: error); isLoaded = false }
+    public init(set: BackupSet, destinations: [Destination], provider: any DeletionDryRunProviding) {
+        self.set = set; self.provider = provider
+        entries = destinations.map { HeldDestination(destination: $0) }
     }
 
-    /// The agent is told how many deletions were reviewed, so a bigger list later is held again.
-    /// Nil until a non-empty list has been shown.
-    public var allowOnceArguments: [String]? {
-        guard isLoaded, count > 0 else { return nil }
-        return ["--allow-deletes", set.id.uuidString, String(count)]
+    /// The destinations of `set` whose pair holds deletions.
+    nonisolated public static func heldDestinations(set: BackupSet, destinations: [Destination], states: [PairID: SetState]) -> [Destination] {
+        set.destinationIDs.compactMap { id in
+            (states[PairID(set: set.id, destination: id)]?.heldDeletions ?? 0) > 0 ? destinations.first { $0.id == id } : nil
+        }
+    }
+
+    public var isLoaded: Bool { entries.allSatisfy(\.isLoaded) }
+
+    public func load() async {
+        for i in entries.indices {
+            do {
+                entries[i].files = try await provider.heldDeletions(set: set, destination: entries[i].destination)
+                entries[i].isLoaded = true; entries[i].loadError = nil
+            } catch {
+                entries[i].isLoaded = false; entries[i].loadError = SetupFailureText.message(for: error)
+            }
+        }
+    }
+
+    /// `--allow-deletes <set> <destination> <count>`: the agent holds again if that pair's live count is larger.
+    /// Nil until that destination's list is shown and has something outside `.git` to approve.
+    public func allowOnceArguments(for destination: UUID) -> [String]? {
+        guard let e = entries.first(where: { $0.id == destination }), e.isLoaded, e.count > 0 else { return nil }
+        return ["--allow-deletes", set.id.uuidString, destination.uuidString, String(e.count)]
     }
 }
 
@@ -161,6 +150,19 @@ public enum DestinationRules {
         }
     }
 
+    /// Another destination that already names this drive. Identity is by volume UUID, so one drive is one destination.
+    public static func duplicateDrive(of volumeUUID: String, in destinations: [Destination], excluding: UUID?) -> Destination? {
+        guard !volumeUUID.isEmpty else { return nil }
+        return destinations.first {
+            $0.kind == .externalDrive && $0.id != excluding &&
+                $0.volumeUUID?.caseInsensitiveCompare(volumeUUID) == .orderedSame
+        }
+    }
+
+    public static func duplicateDriveMessage(_ existing: Destination) -> String {
+        "This drive is already a destination called \"\(existing.name)\"."
+    }
+
     public static func filesystemWarning(_ name: String) -> String? {
         name.lowercased().contains("exfat")
             ? "exFAT can't keep symbolic links as real links, stores timestamps to 2 second precision, and files named ._* are skipped. APFS is recommended."
@@ -179,10 +181,24 @@ public enum SetupFailureText {
         }
     }
 
+    public static func isBusy(_ error: any Error) -> Bool { (error as? AgentFailure) == .busy }
+
     public static func message(for error: any Error) -> String {
         switch error {
         case let e as RemoteSetupError: return message(e)
         case let e as GuardFailure: return message(e)
+        case let e as AgentFailure: return message(e)
+        case let e as LocalMirrorInspectorError:
+            switch e {
+            case .backupRunning: return "A backup is running. Try again when it finishes."
+            case .unsafePath: return "One of those files is not inside the backup, so Mirror left everything where it was."
+            }
+        case let e as RestoreError:
+            switch e {
+            case .overSource: return "That folder is, or holds, a folder Mirror backs up. Choose a different place to restore to."
+            case .destinationNotEmpty: return "That folder isn't empty. Choose an empty folder."
+            }
+        case is ArchiveError: return "That file isn't in the archive."
         case let e as AgentClientError:
             switch e {
             case .requestTooLarge: return "That text is too long to be a Recovery Kit."
@@ -190,6 +206,19 @@ public enum SetupFailureText {
             }
         case is CancellationError: return "Cancelled."
         default: return "Something went wrong: \(error.localizedDescription)"
+        }
+    }
+
+    private static func message(_ e: AgentFailure) -> String {
+        switch e {
+        case .busy: "Another Mirror action is using your sign-in. Wait for it to finish, then try again."
+        case .presenceRefused: "Touch ID or your password wasn't accepted, so Mirror did not continue."
+        case .untrustedCaller, .untrustedHelper: "The backup agent does not trust this copy of Mirror. Reinstall Mirror and try again."
+        case .configUnreadable: "The backup agent could not read Mirror's settings."
+        case .lockFailed: "Mirror could not start that action. Try again."
+        case .invalidRequest, .other: "The backup agent could not finish that. Try again."
+        case .cancelled: "Cancelled."
+        case .session, .setup, .kit, .drill, .keychain, .runner: "The backup agent could not finish that. Try again."
         }
     }
 
@@ -222,7 +251,7 @@ public enum SetupFailureText {
         case .iCloudUnavailable: "iCloud Drive isn't available."
         case .destinationOutsideRoot, .destinationUnclaimed: "The backup folder isn't safe to use."
         case .wrongDrive: "This isn't the drive this destination was set up with. Connect the right drive."
-        case .internalDiskNotConfirmed: "This looks like an internal disk and hasn't been confirmed. Remove the destination and add it again to confirm."
+        case .internalDiskNotConfirmed: "This looks like an internal disk and hasn't been confirmed. Open the destination in Mirror and confirm it to use this disk."
         case .sourceSuspiciouslyEmpty: "That folder looks empty compared with the last backup."
         }
     }
@@ -261,7 +290,7 @@ public enum SetDraftMerge {
             if latest[keyPath: k] != previouslySaved[keyPath: k] { out[keyPath: k] = latest[keyPath: k] }
         }
         take(\.isPaused); take(\.destinationIDs); take(\.presets); take(\.backupSecrets); take(\.backupGit)
-        take(\.deletion); take(\.archiveDays)
+        take(\.deletion); take(\.archiveDays); take(\.acceptedFingerprint)
         if latest.rules != previouslySaved.rules {
             // A rule still being typed (empty pattern) stays in the draft.
             out.rules = latest.rules + draft.rules.filter { $0.pattern.trimmingCharacters(in: .whitespaces).isEmpty }

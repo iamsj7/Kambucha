@@ -10,6 +10,7 @@ struct SetDetailView: View {
     @State private var showingPreview = false
     @State private var previewTask: Task<Void, Never>?
     @State private var lastSaved: BackupSet
+    @State private var network = NetworkStatus()
 
     init(model: AppModel, setID: UUID) {
         self.model = model
@@ -25,10 +26,17 @@ struct SetDetailView: View {
         c.rules.removeAll { $0.pattern.trimmingCharacters(in: .whitespaces).isEmpty }
         return c
     }
-    private var accepted: Bool { model.acceptance.isAccepted(Self.cleaned(draft)) }
+    private var accepted: Bool { Self.cleaned(draft).isPreviewAccepted }
 
     var body: some View {
         Form {
+            let running = model.progress.filter { $0.progress.pair.set == setID }
+            if !running.isEmpty {
+                Section("Backing Up") {
+                    ForEach(running) { ProgressRow(label: $0.label, progress: $0.progress) }
+                    NetworkUploadRow(network: network)
+                }
+            }
             if !accepted {
                 Section {
                     Label("Preview this set before its first backup. Changing rules asks again.", systemImage: "eye")
@@ -152,12 +160,15 @@ struct SetDetailView: View {
         .onChange(of: draft.backupSecrets) { requestPreview() }
         .onChange(of: draft.backupGit) { requestPreview() }
         .task { presets = (try? PresetCatalog.all()) ?? [] }
+        .onAppear { network.start() }
+        .onDisappear { network.stop() }
         .sheet(isPresented: $showingPreview, onDismiss: { if let s = model.set(setID) { draft = s } }) {
             PreviewSheet(model: model, set: Self.cleaned(draft), startLabel: "Start Backup") { updated in
-                draft = updated
-                model.save(set: updated)
-                model.acceptance.accept(updated)
-                model.runNow(updated.id)
+                var accepted = updated
+                accepted.acceptPreview()
+                draft = accepted
+                model.save(set: accepted)
+                model.runNow(accepted.id)
             }
         }
     }

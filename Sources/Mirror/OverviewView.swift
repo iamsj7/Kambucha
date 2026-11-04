@@ -1,4 +1,5 @@
 import SwiftUI
+import AppKit
 import MirrorCore
 
 /// A review item with the set it belongs to.
@@ -18,7 +19,7 @@ extension AppModel {
             let decided = Set(s.rules.map(\.pattern))
             for d in s.destinationIDs {
                 for item in states[PairID(set: s.id, destination: d)]?.reviewItems ?? []
-                where !decided.contains(OverviewRules.pattern(for: item)) && seen.insert("\(s.id)-\(item.id)").inserted {
+                where (item.kind == .unprovenFreed || !decided.contains(OverviewRules.pattern(for: item))) && seen.insert("\(s.id)-\(item.id)").inserted {
                     out.append(ReviewEntry(setID: s.id, setName: s.name, item: item))
                 }
             }
@@ -27,9 +28,19 @@ extension AppModel {
     }
 
     func resolve(_ entry: ReviewEntry, include: Bool) {
-        guard var s = set(entry.setID) else { return }
-        s.rules.append(UserRule(pattern: OverviewRules.pattern(for: entry.item), action: include ? .include : .exclude))
+        guard var s = set(entry.setID), let rule = ReviewActions.rule(for: entry.item, include: include) else { return }
+        // The owner just decided this here, so a set that was accepted stays accepted. A set that never was stays unaccepted.
+        let wasAccepted = s.isPreviewAccepted
+        s.rules.append(rule)
+        if wasAccepted { s.acceptPreview() }
         save(set: s)
+    }
+}
+
+extension AppModel {
+    func showInFinder(_ entry: ReviewEntry) {
+        guard let s = set(entry.setID) else { return }
+        NSWorkspace.shared.activateFileViewerSelecting([s.source.appendingPathComponent(entry.item.path)])
     }
 }
 
@@ -98,6 +109,9 @@ struct OverviewView: View {
 
             Section {
                 let entries = model.reviewEntries
+                if let waiting = ReviewActions.waitingText(count: entries.filter { $0.item.kind == .unprovenFreed }.count) {
+                    Label(waiting, systemImage: "icloud.and.arrow.down")
+                }
                 if entries.isEmpty {
                     Label("Nothing to review", systemImage: "checkmark.circle").foregroundStyle(.secondary)
                 }
@@ -152,7 +166,7 @@ struct ReviewItemRow: View {
         case .trackedInExcluded: "Tracked by git, inside an excluded folder"
         case .secretInExcluded: "Looks like a secret, inside an excluded folder"
         case .refusedByICloud: "iCloud won't accept this file"
-        case .unprovenFreed: "Only in iCloud, so Mirror couldn't confirm its contents"
+        case .unprovenFreed: ReviewActions.downloadingReason
         }
     }
 
@@ -163,12 +177,17 @@ struct ReviewItemRow: View {
                 Text("\(entry.setName). \(reason)").font(.caption).foregroundStyle(.secondary)
             }
             Spacer()
-            if entry.item.kind != .refusedByICloud {
-                Button("Include") { model.resolve(entry, include: true) }
-                    .accessibilityLabel("Include \(entry.item.path) in the backup")
+            if ReviewActions.showsInFinder(entry.item.kind) {
+                Button("Show in Finder") { model.showInFinder(entry) }
+                    .accessibilityLabel("Show \(entry.item.path) in Finder")
+            } else {
+                if entry.item.kind != .refusedByICloud {
+                    Button("Include") { model.resolve(entry, include: true) }
+                        .accessibilityLabel("Include \(entry.item.path) in the backup")
+                }
+                Button("Keep Excluded") { model.resolve(entry, include: false) }
+                    .accessibilityLabel("Keep \(entry.item.path) excluded")
             }
-            Button("Keep Excluded") { model.resolve(entry, include: false) }
-                .accessibilityLabel("Keep \(entry.item.path) excluded")
         }
         .accessibilityElement(children: .contain)
     }

@@ -78,7 +78,7 @@ enum DebugFixtures {
         func rule(for group: PreviewGroup, included: Bool) -> UserRule { UserRule(pattern: group.pattern, action: included ? .include : .exclude) }
     }
     private struct FakeDryRun: DeletionDryRunProviding {
-        func heldDeletions(set: BackupSet) async throws -> [String] {
+        func heldDeletions(set: BackupSet, destination: Destination) async throws -> [String] {
             (0..<240).map { "Old Builds/release-\($0 / 20)/app-\($0).zip" }
         }
     }
@@ -95,22 +95,7 @@ enum DebugFixtures {
     private static func spin(_ seconds: Double = 0.4) { RunLoop.main.run(until: Date().addingTimeInterval(seconds)) }
 
     private static func render<V: View>(_ view: V, size: CGSize, to url: URL) {
-        for (label, appearance) in [("light", NSAppearance.Name.aqua), ("dark", .darkAqua)] {
-            let host = NSHostingView(rootView: view.background(Color(nsColor: .windowBackgroundColor)))
-            host.appearance = NSAppearance(named: appearance)
-            let window = NSWindow(contentRect: NSRect(origin: .zero, size: size), styleMask: [.borderless], backing: .buffered, defer: false)
-            window.appearance = host.appearance
-            window.contentView = host
-            host.frame = NSRect(origin: .zero, size: size)
-            window.orderBack(nil)
-            spin()
-            host.layoutSubtreeIfNeeded()
-            guard let rep = host.bitmapImageRepForCachingDisplay(in: host.bounds) else { continue }
-            host.cacheDisplay(in: host.bounds, to: rep)
-            try? rep.representation(using: .png, properties: [:])?
-                .write(to: url.deletingLastPathComponent().appendingPathComponent("\(url.lastPathComponent)-\(label).png"))
-            window.orderOut(nil)
-        }
+        DebugRender.render(view, size: size, name: url.lastPathComponent, to: url.deletingLastPathComponent(), settle: 0.4)
     }
 
     /// Renders the main window and its sheets in light and dark to `<dir>/<name>-<appearance>.png`.
@@ -122,39 +107,69 @@ enum DebugFixtures {
         var onedrive = Destination(name: "OneDrive", kind: .oneDrive)
         onedrive.recoveryKitConfirmed = false
         dests.append(onedrive)
+        let ssd = Destination(name: "Backup SSD", kind: .externalDrive, encrypted: false, volumeUUID: "A")
+        let inner = Destination(name: "Archive", kind: .externalDrive, encrypted: false, volumeUUID: "B")
+        dests += [ssd, inner]
         try? store.saveDestinations(dests)
         var sets = (try? store.loadSets()) ?? []
         sets[0].rules = [UserRule(pattern: "*.log", action: .exclude)]
         sets[0].presets = ["node", "ios"]
+        sets[0].destinationIDs.append(ssd.id)
+        sets[1].acceptPreview()
         try? store.saveSets(sets)
         let docsPair = PairID(set: sets[1].id, destination: dests[0].id)
         var st = (try? store.state(for: docsPair)) ?? SetState()
         st.reviewItems = [ReviewItem(id: "r1", path: "vendor/config/.env", kind: .secretInExcluded),
-                          ReviewItem(id: "r2", path: "build/notes.tmp", kind: .refusedByICloud)]
+                          ReviewItem(id: "r2", path: "build/notes.tmp", kind: .refusedByICloud),
+                          ReviewItem(id: "r3", path: "Photos/holiday.mov", kind: .unprovenFreed)]
         try? store.save(st, for: docsPair)
         let services = AppServices(preview: FakePreview(), dryRun: FakeDryRun(), inspector: nil,
                                    volumes: FakeVolumes(), agent: .bundled(in: Bundle.main.bundleURL),
                                    archive: AppServices.live.archive)
+        // A live run on the first set, so its detail shows the progress row.
+        try? "\(getpid())\n".write(to: root.appendingPathComponent(AgentPresence.fileName), atomically: true, encoding: .utf8)
+        try? ProgressStore(root: root).write(TransferProgress(
+            pair: PairID(set: sets[0].id, destination: dests[0].id), phase: .transferring, bytesDone: 2_125_824_000,
+            bytesTotal: 5_000_000_000, filesDone: 412, filesTotal: 1_040, bytesPerSecond: 3_400_000, eta: 845, updated: Date()))
         let model = AppModel(support: root, services: services)
-        PreviewAcceptanceStore(root: root).accept(model.sets[1])
+        spin(0.5)
 
         func at(_ n: String) -> URL { dir.appendingPathComponent(n) }
-        render(MainWindow(model: model), size: CGSize(width: 900, height: 640), to: at("main-overview"))
+        // MainWindow itself shows onboarding until the real system checks pass, so the overview is rendered directly.
+        render(NavigationStack { OverviewView(model: model, select: { _ in }) }, size: CGSize(width: 700, height: 900), to: at("main-overview"))
         render(NavigationStack { SetDetailView(model: model, setID: model.sets[0].id) }, size: CGSize(width: 620, height: 2000), to: at("set-detail"))
         render(NavigationStack { DestinationDetailView(model: model, destination: dests[1]) }, size: CGSize(width: 620, height: 480), to: at("destination-drive"))
         render(NavigationStack { DestinationDetailView(model: model, destination: onedrive) }, size: CGSize(width: 620, height: 480), to: at("destination-onedrive"))
+        render(NavigationStack { DestinationDetailView(model: model, destination: ssd) }, size: CGSize(width: 620, height: 480), to: at("destination-ssd-running"))
+        render(NavigationStack { DestinationDetailView(model: model, destination: inner) }, size: CGSize(width: 620, height: 520), to: at("destination-internal-confirm"))
         render(AddDestinationFlow(model: model) { _ in }, size: CGSize(width: 540, height: 640), to: at("add-destination"))
         render(AddSetFlow(model: model) { _ in }, size: CGSize(width: 540, height: 380), to: at("add-set"))
         render(RecoveryKitPasteSheet(model: model, destination: onedrive) {}, size: CGSize(width: 540, height: 400), to: at("kit-paste"))
+
+        func reveal(_ fetch: @escaping (Destination) async throws -> String) -> KitRevealModel {
+            let m = KitRevealModel(destination: onedrive, fetch: fetch)
+            Task { await m.begin() }
+            spin(0.3)
+            return m
+        }
+        render(RecoveryKitSheet(model: model, destination: onedrive, reveal: reveal { _ in try await Task.sleep(for: .seconds(60)); return "" }),
+               size: CGSize(width: 540, height: 480), to: at("kit-touchid"))
+        render(RecoveryKitSheet(model: model, destination: onedrive, reveal: reveal { _ in throw AgentFailure.presenceRefused }),
+               size: CGSize(width: 540, height: 480), to: at("kit-refused"))
+        let unproven = KitRestoreModel(destination: onedrive) { _, _, accept in if !accept { throw RemoteSetupError.kitUnproven } }
+        unproven.text = "MIRROR RECOVERY KIT\n..."
+        Task { await unproven.submit() }
+        spin(0.3)
+        render(RecoveryKitPasteSheet(model: model, destination: onedrive, flow: unproven), size: CGSize(width: 540, height: 520), to: at("kit-unproven"))
 
         let pc = PreviewController(set: model.sets[0], provider: FakePreview(), inspector: nil)
         Task { await pc.load() }
         spin(0.3)
         render(PreviewSheet(model: model, controller: pc) { _ in }, size: CGSize(width: 680, height: 560), to: at("preview"))
-        let review = DeletionReview(set: model.sets[0], provider: FakeDryRun())
+        let review = DeletionReview(set: model.sets[0], destinations: [dests[0], dests[1]], provider: FakeDryRun())
         Task { await review.load() }
         spin(0.3)
-        render(DeletionReviewSheet(model: model, review: review), size: CGSize(width: 560, height: 460), to: at("deletion-review"))
+        render(DeletionReviewSheet(model: model, review: review), size: CGSize(width: 600, height: 560), to: at("deletion-review"))
     }
 
     /// Renders each fixture in light and dark to `<dir>/<name>-<appearance>.png`.
@@ -162,21 +177,7 @@ enum DebugFixtures {
         try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
         for name in Name.allCases {
             let model = AppModel(support: make(name))
-            for (label, appearance) in [("light", NSAppearance.Name.aqua), ("dark", .darkAqua)] {
-                let host = NSHostingView(rootView: MenuBarPanel(model: model).background(Color(nsColor: .windowBackgroundColor)))
-                host.appearance = NSAppearance(named: appearance)
-                let size = host.fittingSize
-                host.frame = NSRect(origin: .zero, size: size)
-                let window = NSWindow(contentRect: host.frame, styleMask: [.titled], backing: .buffered, defer: false)
-                window.appearance = host.appearance
-                window.contentView = host
-                window.layoutIfNeeded()
-                host.layoutSubtreeIfNeeded()
-                guard let rep = host.bitmapImageRepForCachingDisplay(in: host.bounds) else { continue }
-                host.cacheDisplay(in: host.bounds, to: rep)
-                try? rep.representation(using: .png, properties: [:])?
-                    .write(to: dir.appendingPathComponent("\(name.rawValue)-\(label).png"))
-            }
+            DebugRender.render(MenuBarPanel(model: model), size: nil, name: name.rawValue, to: dir, settle: 0)
         }
     }
 
@@ -196,17 +197,30 @@ enum DebugFixtures {
             ForEach(rows.indices, id: \.self) { ProgressRow(label: rows[$0].0, progress: rows[$0].1) }
             NetworkUploadRow(network: net)
         }.padding().frame(width: 320)
+        DebugRender.render(view, size: nil, name: "progress", to: dir, settle: 0)
+    }
+}
+
+/// One renderer for every debug snapshot: the view in a window, light then dark, to `<name>-<appearance>.png`.
+/// A nil size uses the view's fitting size.
+@MainActor
+enum DebugRender {
+    static func render<V: View>(_ view: V, size: CGSize?, name: String, to dir: URL, settle: Double) {
         for (label, appearance) in [("light", NSAppearance.Name.aqua), ("dark", .darkAqua)] {
             let host = NSHostingView(rootView: view.background(Color(nsColor: .windowBackgroundColor)))
             host.appearance = NSAppearance(named: appearance)
-            host.frame = NSRect(origin: .zero, size: host.fittingSize)
-            let window = NSWindow(contentRect: host.frame, styleMask: [.titled], backing: .buffered, defer: false)
+            let frame = NSRect(origin: .zero, size: size ?? host.fittingSize)
+            let window = NSWindow(contentRect: frame, styleMask: [.borderless], backing: .buffered, defer: false)
             window.appearance = host.appearance
             window.contentView = host
+            host.frame = frame
+            window.orderBack(nil)
+            RunLoop.main.run(until: Date().addingTimeInterval(settle))
             window.layoutIfNeeded(); host.layoutSubtreeIfNeeded()
             guard let rep = host.bitmapImageRepForCachingDisplay(in: host.bounds) else { continue }
             host.cacheDisplay(in: host.bounds, to: rep)
-            try? rep.representation(using: .png, properties: [:])?.write(to: dir.appendingPathComponent("progress-\(label).png"))
+            try? rep.representation(using: .png, properties: [:])?.write(to: dir.appendingPathComponent("\(name)-\(label).png"))
+            window.orderOut(nil)
         }
     }
 }
