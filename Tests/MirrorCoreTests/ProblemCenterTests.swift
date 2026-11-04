@@ -154,7 +154,36 @@ private struct StuckNotifier: Notifying {
     }
 }
 
+/// Answers yes after `delay`, on a dispatch timer.
+private struct SlowNotifier: Notifying {
+    let delay: Double
+    func post(_: Problem, pair: PairID, setName: String, detail: String) async -> Bool {
+        await withCheckedContinuation { continuation in
+            DispatchQueue.global().asyncAfter(deadline: .now() + delay) { continuation.resume(returning: true) }
+        }
+    }
+}
+
 @Suite struct ProblemCenterTimeoutTests {
+    /// No wall clock is read: the same answer loses to a shorter timeout and beats a longer one, so
+    /// the value must be what decides, and load can only delay the answer. A timer that ignored the
+    /// value would give the same result both ways, whatever constant it used.
+    private func deliveredInTime(_ timeout: Duration) async throws -> Bool? {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent("pc-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: root) }
+        let center = ProblemCenter(root: root, notifier: SlowNotifier(delay: 2), postTimeout: timeout)
+        try await center.raise(.uploadStalled, pair: PairID(set: UUID(), destination: UUID()), setName: "x", detail: "")
+        return try center.active().first?.notified
+    }
+
+    @Test func aTimeoutShorterThanTheAnswerGivesUpOnIt() async throws {
+        #expect(try await deliveredInTime(.milliseconds(100)) == false)
+    }
+
+    @Test func aTimeoutLongerThanTheAnswerWaitsForIt() async throws {
+        #expect(try await deliveredInTime(.seconds(120)) == true)
+    }
+
     @Test func aStuckNotifierCostsOnlyTheTimeoutAndIsRetriedLater() async throws {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent("pc-\(UUID().uuidString)")
         defer { try? FileManager.default.removeItem(at: root) }
