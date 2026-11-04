@@ -175,8 +175,10 @@ public struct SystemVolumes: VolumeLocating {
         return media.map { "\(base)#\($0)" } ?? base
     }
 
-    static func bsdName(_ device: String) -> String? {
-        device.hasPrefix("/dev/") ? String(device.dropFirst("/dev/".count)) : nil
+    /// `diskNsM` from any form a mount source takes: `/dev/disk5s1`, `/dev/rdisk5s1`, `disk5s1`, or FSKit's
+    /// `exfat://disk5s1/Name`. The first match, as a volume's name can come after it and look like one.
+    static func bsdName(_ source: String) -> String? {
+        source.firstMatch(of: /(?:^|[^A-Za-z0-9])r?(disk[0-9]+(?:s[0-9]+)*)/).map { String($0.1) }
     }
 
     /// The I/O Registry ID of the volume's media object. Nil if it can't be read, which only costs the distinction.

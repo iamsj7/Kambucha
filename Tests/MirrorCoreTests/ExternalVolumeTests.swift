@@ -316,9 +316,42 @@ private func has(_ a: [String], _ f: String, _ v: String) -> Bool {
         #expect(SystemVolumes.mountID(device: "/dev/disk10s1", fsid: "1-2", media: nil) == "/dev/disk10s1@1-2")
     }
 
-    @Test func aDeviceNameNeedsItsDevPrefixRemovedForDiskArbitration() {
-        #expect(SystemVolumes.bsdName("/dev/disk10s1") == "disk10s1")
-        #expect(SystemVolumes.bsdName("disk10s1") == nil)
+    @Test(arguments: [("/dev/disk10s1", "disk10s1"), ("disk10s1", "disk10s1"), ("/dev/rdisk4s2", "disk4s2"),
+                      ("exfat://disk5s1/My Drive", "disk5s1"), ("msdos://disk6s1/disk9s9", "disk6s1"), ("//dev/disk7", "disk7")])
+    func theDiskIsFoundInAnyMountSourceForm(source: String, disk: String) {
+        #expect(SystemVolumes.bsdName(source) == disk)
+    }
+
+    @Test(arguments: ["map auto_home", "devfs", "//user@server/share", "", "exfat://mydisk/x"])
+    func aSourceNamingNoDiskGivesNoName(source: String) {
+        #expect(SystemVolumes.bsdName(source) == nil)
+    }
+
+    /// The reason for all of it: on exFAT the mount source isn't a `/dev/` path, so a reconnection went unnoticed.
+    @Test func aReconnectedRealExFATDriveIsANewConnection() throws {
+        let dir = FileManager.default.temporaryDirectory.appendingPathComponent("mirror-exfat-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let image = dir.appendingPathComponent("t.dmg")
+        func hdiutil(_ args: [String]) throws -> String {
+            let p = Process(); p.executableURL = URL(fileURLWithPath: "/usr/bin/hdiutil"); p.arguments = args
+            let out = Pipe(); p.standardOutput = out; p.standardError = Pipe()
+            try p.run(); let data = out.fileHandleForReading.readDataToEndOfFile(); p.waitUntilExit()
+            return String(decoding: data, as: UTF8.self)
+        }
+        _ = try hdiutil(["create", "-size", "20m", "-fs", "ExFAT", "-volname", "MIRROREX", image.path])
+        func attached() throws -> VolumeInfo? {
+            let attach = try hdiutil(["attach", image.path, "-nobrowse", "-plist"])
+            defer { if let dev = Self.devNode(attach) { _ = try? hdiutil(["detach", "-force", dev]) } }
+            return SystemVolumes(includeHidden: true).mounted().first { $0.name == "MIRROREX" }
+        }
+        let first = try #require(try attached())
+        let second = try #require(try attached())
+        #expect(first.fileSystem == "exfat")
+        #expect(first.uuid == second.uuid)
+        #expect(first.mountID.contains("#"), "mount ID: \(first.mountID)")
+        #expect(first.mountID != second.mountID)
+        #expect(ExternalVolume.needsFullPass(lastSeenMountID: first.mountID, volume: second, lastFullPass: Date(), now: Date()))
     }
 
     @Test func fullPassOnlyWhenTheMountChanges() throws {
