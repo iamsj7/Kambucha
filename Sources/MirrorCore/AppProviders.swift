@@ -204,6 +204,8 @@ public struct LocalMirrorInspector: MirroredExcludeInspecting {
                 root = ExternalVolume.backupRoot(on: v)
             case .googleDrive, .oneDrive: continue
             }
+            // A folder of this name that the marker gives to another set is that backup's, unless the owner took it over.
+            if (try? RootMarker.load(backupRoot: root))?.claims(set.id) == false, set.adoptsBackupIn?.contains(id) != true { continue }
             let mirror = root.appendingPathComponent("Sets", isDirectory: true).appendingPathComponent(set.name, isDirectory: true)
             var isDir: ObjCBool = false
             guard FileManager.default.fileExists(atPath: mirror.path, isDirectory: &isDir), isDir.boolValue else { continue }

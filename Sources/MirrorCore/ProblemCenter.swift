@@ -76,6 +76,14 @@ public struct ActiveProblem: Codable, Equatable, Sendable {
     }
 }
 
+/// A problem about a destination as a whole still sits on one pair. A paused set wouldn't show it.
+public enum ProblemAnchor {
+    public static func set(for destination: UUID, in sets: [BackupSet]) -> BackupSet? {
+        let using = sets.filter { $0.destinationIDs.contains(destination) }
+        return using.first { !$0.isPaused } ?? using.first
+    }
+}
+
 public struct ProblemCenterError: Error, Equatable { public var message: String }
 
 /// Tracks open problems per pair in `<root>/problems.json`. A problem notifies once until cleared;

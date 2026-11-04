@@ -196,6 +196,16 @@ private struct InspectorWorld {
     }
 }
 
+@Test func aFolderLeftByAnotherSetIsNotThisSetsToArchive() async throws {
+    var w = try InspectorWorld()
+    try FileManager.default.createDirectory(at: w.mirror, withIntermediateDirectories: true)
+    try RootMarker(sets: [UUID(): "Docs"]).save(backupRoot: w.backupRoot)
+    let inspector = w.inspector(list: { _, _ in ["a.log"] })
+    #expect(try await inspector.mirroredFiles(matching: [], set: w.set).isEmpty)
+    w.set.adoptsBackupIn = [w.dest.id]
+    #expect(try await inspector.mirroredFiles(matching: [], set: w.set) == ["a.log"])
+}
+
 @Test func inspectorListsWhatTheRulesWouldNowSkipInTheICloudMirror() async throws {
     let w = try InspectorWorld()
     try w.box.write("Sets/Docs/build/out.o", under: w.backupRoot)

@@ -98,6 +98,7 @@ struct SetDetailView: View {
                             Text("Exclude").tag(UserRule.Action.exclude)
                         }
                         .labelsHidden().frame(width: 100)
+                        .onChange(of: rule.action) { if !rule.pattern.isEmpty { requestPreview() } }
                         TextField("Pattern", text: $rule.pattern, prompt: Text("For example *.log or /Drafts"))
                             .labelsHidden()
                             .onSubmit { requestPreview(after: 0) }
@@ -180,7 +181,6 @@ struct SetDetailView: View {
         .onChange(of: draft.presets) { requestPreview() }
         .onChange(of: draft.backupSecrets) { requestPreview() }
         .onChange(of: draft.backupGit) { requestPreview() }
-        .onChange(of: draft.rules.map(\.action)) { requestPreview() }
         .task { presets = (try? PresetCatalog.all()) ?? [] }
         .onAppear { network.start() }
         .onDisappear { network.stop() }

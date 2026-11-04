@@ -208,8 +208,10 @@ struct ArchiveView: View {
             model.loadConfig()
             model.resetFolder()
             await model.reload()
-            await model.reloadLatest()
+            if model.mode == .latest { await model.reloadLatest() }
         }
+        // Each look at a cloud is an agent launch and a network trip, so this waits until it's asked for.
+        .onChange(of: model.mode) { _, mode in if mode == .latest { Task { await model.reloadLatest() } } }
         .sheet(isPresented: $showDrill, onDismiss: { drill?.discard(); drill = nil; model.loadConfig() }) {
             if let drill { DrillSheet(model: drill) }
         }
