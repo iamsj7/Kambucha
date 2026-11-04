@@ -205,10 +205,10 @@ private final class Written: @unchecked Sendable {
         #expect(FileManager.default.fileExists(atPath: r.mirror.appendingPathComponent("p/new.txt").path))
 
         // Too small an approval changes nothing. The reviewed count goes through.
-        record = try await r.run(RunCommand(setID: r.set.id, approvedDeletions: 199, force: true))
+        record = try await r.run(RunCommand(setID: r.set.id, approvedDeletions: 199, approvedDestination: r.destination.id, force: true))
         #expect(record.status == .held)
         #expect(FileManager.default.fileExists(atPath: r.mirror.appendingPathComponent("p/f3.txt").path))
-        record = try await r.run(RunCommand(setID: r.set.id, approvedDeletions: 200, force: true))
+        record = try await r.run(RunCommand(setID: r.set.id, approvedDeletions: 200, approvedDestination: r.destination.id, force: true))
         #expect(record.status == .success)
         #expect(!FileManager.default.fileExists(atPath: r.mirror.appendingPathComponent("p/f3.txt").path))
         #expect(r.archived("f3.txt"))

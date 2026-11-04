@@ -14,13 +14,17 @@ import Foundation
         #expect(RunCommand.parse(["--run-now", id.uuidString]) == RunCommand(setID: id, force: true))
     }
 
-    @Test func allowDeletesNeedsSetAndCount() {
-        #expect(RunCommand.parse(["--allow-deletes", id.uuidString, "240"])
-            == RunCommand(setID: id, approvedDeletions: 240, force: true))
-        #expect(RunCommand.parse(["--allow-deletes", id.uuidString]) == nil)
-        #expect(RunCommand.parse(["--allow-deletes", id.uuidString, "many"]) == nil)
-        #expect(RunCommand.parse(["--allow-deletes", id.uuidString, "-1"]) == nil)
-        #expect(RunCommand.parse(["--allow-deletes", "not-a-uuid", "3"]) == nil)
+    @Test func allowDeletesNeedsSetDestinationAndCount() {
+        let d = UUID()
+        #expect(RunCommand.parse(["--allow-deletes", id.uuidString, d.uuidString, "240"])
+            == RunCommand(setID: id, approvedDeletions: 240, approvedDestination: d, force: true))
+        #expect(RunCommand.parse(["--allow-deletes", id.uuidString, "240"]) == nil)   // the old form names no pair
+        #expect(RunCommand.parse(["--allow-deletes", id.uuidString, d.uuidString]) == nil)
+        #expect(RunCommand.parse(["--allow-deletes", id.uuidString, d.uuidString, "many"]) == nil)
+        #expect(RunCommand.parse(["--allow-deletes", id.uuidString, d.uuidString, "-1"]) == nil)
+        #expect(RunCommand.parse(["--allow-deletes", "not-a-uuid", d.uuidString, "3"]) == nil)
+        #expect(RunCommand.parse(["--allow-deletes", id.uuidString, "not-a-uuid", "3"]) == nil)
+        #expect(RunCommand.parse(["--allow-deletes", id.uuidString, d.uuidString, "3", "extra"]) == nil)
         #expect(RunCommand.parse(["--allow-deletes"]) == nil)
     }
 
@@ -28,8 +32,9 @@ import Foundation
         #expect(RunCommand.parse(["--run-now", "--full-speed"]) == RunCommand(force: true, fullSpeed: true))
         #expect(RunCommand.parse(["--full-speed", "--run-now", id.uuidString])
             == RunCommand(setID: id, force: true, fullSpeed: true))
-        #expect(RunCommand.parse(["--allow-deletes", id.uuidString, "2", "--full-speed"])
-            == RunCommand(setID: id, approvedDeletions: 2, force: true, fullSpeed: true))
+        let d = UUID()
+        #expect(RunCommand.parse(["--allow-deletes", id.uuidString, d.uuidString, "2", "--full-speed"])
+            == RunCommand(setID: id, approvedDeletions: 2, approvedDestination: d, force: true, fullSpeed: true))
         #expect(RunCommand.parse(["--full-speed"]) == nil)   // a scheduled pass stays at background priority
     }
 

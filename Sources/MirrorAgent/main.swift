@@ -24,7 +24,7 @@ if args.count > 1, args[1] == "--probe" {
 }
 #endif
 guard let command = RunCommand.parse(Array(args.dropFirst())) else {
-    FileHandle.standardError.write(Data("usage: MirrorAgent [--run-now [set-id] | --allow-deletes <set-id> <count>] [--full-speed]\n".utf8))
+    FileHandle.standardError.write(Data("usage: MirrorAgent [--run-now [set-id] | --allow-deletes <set-id> <destination-id> <count>] [--full-speed]\n".utf8))
     exit(64)
 }
 exit(await BackupRun.run(command))

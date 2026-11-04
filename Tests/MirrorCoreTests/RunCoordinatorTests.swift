@@ -534,7 +534,7 @@ private final class Harness: @unchecked Sendable {
         var s = try h.state; s.heldDeletions = 1000; try h.store.save(s, for: h.pair)
         try FileManager.default.removeItem(at: h.source.appendingPathComponent("flowapp"))
         h.rclone.script(dryDeletions: (0..<900).map { "f\($0)" })
-        await h.run(RunCommand(setID: h.set.id, approvedDeletions: 1000, force: true))
+        await h.run(RunCommand(setID: h.set.id, approvedDeletions: 1000, approvedDestination: h.iCloudDest.id, force: true))
         guard case .mirror = h.rclone.realSyncs.first?.mode else { Issue.record("expected mirror"); return }
         #expect(try h.state.heldDeletions == 0)
     }
@@ -839,7 +839,7 @@ private final class Harness: @unchecked Sendable {
         let h = try Harness(); try h.prime(); h.change("flowapp/a.txt")
         h.rclone.script(dryDeletions: manyDeletions())
         await h.run()
-        await h.run(RunCommand(setID: h.set.id, approvedDeletions: 500, force: true))
+        await h.run(RunCommand(setID: h.set.id, approvedDeletions: 500, approvedDestination: h.iCloudDest.id, force: true))
         #expect(h.rclone.realSyncs.last?.mode == .mirror(maxDelete: 500))
         #expect(h.rclone.realSyncs.last?.destination == h.mirror)
         #expect(try h.state.heldDeletions == 0)
@@ -854,7 +854,7 @@ private final class Harness: @unchecked Sendable {
         let h = try Harness(); try h.prime(); h.change("flowapp/a.txt")
         h.rclone.script(dryDeletions: manyDeletions())
         await h.run()
-        await h.run(RunCommand(setID: h.set.id, approvedDeletions: 499, force: true))
+        await h.run(RunCommand(setID: h.set.id, approvedDeletions: 499, approvedDestination: h.iCloudDest.id, force: true))
         #expect(h.rclone.realSyncs.last?.mode == .copyOnly)
         #expect(try h.state.heldDeletions == 500)
     }
@@ -862,7 +862,7 @@ private final class Harness: @unchecked Sendable {
     @Test func approvalDoesNothingForAPairThatIsNotHeld() async throws {
         let h = try Harness(); try h.prime()
         h.rclone.script(dryDeletions: manyDeletions())
-        await h.run(RunCommand(setID: h.set.id, approvedDeletions: 500, force: true))
+        await h.run(RunCommand(setID: h.set.id, approvedDeletions: 500, approvedDestination: h.iCloudDest.id, force: true))
         #expect(h.rclone.realSyncs.last?.mode == .copyOnly)
     }
 
@@ -1471,7 +1471,7 @@ private final class Harness: @unchecked Sendable {
     @Test func approvalBelowTheThresholdStillCoversOnlyTheReviewedCount() async throws {
         let h = try Harness(); try await held(h)
         h.rclone.script(dryDeletions: ["a", "b", "c"])
-        await h.run(RunCommand(setID: h.set.id, approvedDeletions: 2, force: true))
+        await h.run(RunCommand(setID: h.set.id, approvedDeletions: 2, approvedDestination: h.iCloudDest.id, force: true))
         #expect(h.rclone.realSyncs.last?.mode == .copyOnly)
     }
 
@@ -1917,7 +1917,7 @@ private final class Harness: @unchecked Sendable {
         h.rclone.script(dryDeletions: plain)
         await h.run()
         h.rclone.script(dryDeletions: plain + ["p/.git/x", "p/.git/y"])
-        await h.run(RunCommand(setID: h.set.id, approvedDeletions: 500, force: true))
+        await h.run(RunCommand(setID: h.set.id, approvedDeletions: 500, approvedDestination: h.iCloudDest.id, force: true))
         #expect(h.rclone.realSyncs.last?.mode == .mirror(maxDelete: 502))
     }
 }
@@ -3122,5 +3122,58 @@ private struct GoneBeforeTidy: RcloneRunning {
         h.change("flowapp/a.txt", id: 11)
         await h.run(presets: [node])
         #expect(h.rclone.realSyncs.count == 2)
+    }
+}
+
+@Suite struct RunWiringApprovalTests {
+    /// iCloud and a cloud destination, both holding.
+    private func twoHolding(_ h: Harness) async throws -> (cloud: Destination, pair: PairID) {
+        let cloud = try h.addCloud()
+        try h.save(extra: [cloud])
+        try h.prime()
+        let pair = PairID(set: h.set.id, destination: cloud.id)
+        try h.prime(pair, kind: .googleDrive)
+        h.setSession(cloud, FakeSession(endpoint: "crypt:"))
+        try h.cloudMarker(at: "crypt:.mirror-root")
+        for p in [h.pair, pair] {
+            var s = try h.state(p)
+            s.heldDeletions = 300
+            try h.store.save(s, for: p)
+        }
+        h.rclone.script(dryDeletions: (0..<300).map { "d\($0)" })
+        return (cloud, pair)
+    }
+
+    private func mode(_ h: Harness, to prefix: String) -> SyncMode? {
+        h.rclone.realSyncs.last { $0.destination.hasPrefix(prefix) }?.mode
+    }
+
+    @Test func anApprovalCoversOnlyTheNamedDestination() async throws {
+        let h = try Harness()
+        let (cloud, pair) = try await twoHolding(h)
+        await h.run(RunCommand(setID: h.set.id, approvedDeletions: 300, approvedDestination: cloud.id, force: true))
+        #expect(mode(h, to: "crypt:") != .copyOnly)
+        #expect(mode(h, to: h.mirror) == .copyOnly)
+        #expect(try h.state(pair).heldDeletions == 0)
+        #expect(try h.state.heldDeletions == 300)
+    }
+
+    @Test func anApprovalNamingNoDestinationCoversNothing() async throws {
+        let h = try Harness()
+        _ = try await twoHolding(h)
+        await h.run(RunCommand(setID: h.set.id, approvedDeletions: 300, force: true))
+        #expect(mode(h, to: "crypt:") == .copyOnly)
+        #expect(mode(h, to: h.mirror) == .copyOnly)
+    }
+
+    @Test func theApprovedCountIsTheNonGitCount() async throws {
+        let h = try Harness(); try h.prime()
+        var s = try h.state
+        s.heldDeletions = 300
+        try h.store.save(s, for: h.pair)
+        let files = (0..<300).map { "d\($0)" } + (0..<50).map { "p/.git/o\($0)" }
+        h.rclone.script(dryDeletions: files)
+        await h.run(RunCommand(setID: h.set.id, approvedDeletions: AgentWire.nonGitCount(files), approvedDestination: h.iCloudDest.id, force: true))
+        #expect(h.rclone.realSyncs.last?.mode == .mirror(maxDelete: 350))
     }
 }

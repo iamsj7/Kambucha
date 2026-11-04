@@ -72,15 +72,19 @@ public struct RunPlanner {
 /// One agent invocation.
 public struct RunCommand: Codable, Equatable, Sendable {
     public var setID: UUID?
-    /// The deletion count the owner reviewed. It applies only to pairs holding deletions, and only up to this count.
+    /// The deletion count the owner reviewed, outside `.git` folders. It applies only to `approvedDestination`
+    /// of this set, only while that pair holds deletions, and only up to this count.
     public var approvedDeletions: Int?
+    public var approvedDestination: UUID?
     /// A manual run: the whole set, with or without changes.
     public var force: Bool
     /// The `--full-speed` flag, or the Full Speed setting.
     public var fullSpeed: Bool
 
-    public init(setID: UUID? = nil, approvedDeletions: Int? = nil, force: Bool = false, fullSpeed: Bool = false) {
-        self.setID = setID; self.approvedDeletions = approvedDeletions; self.force = force; self.fullSpeed = fullSpeed
+    public init(setID: UUID? = nil, approvedDeletions: Int? = nil, approvedDestination: UUID? = nil, force: Bool = false,
+                fullSpeed: Bool = false) {
+        self.setID = setID; self.approvedDeletions = approvedDeletions; self.approvedDestination = approvedDestination
+        self.force = force; self.fullSpeed = fullSpeed
     }
 
     /// Normal priority and more rclone concurrency: Back Up Now and Full Speed. A drive gets the same by itself.
@@ -89,7 +93,7 @@ public struct RunCommand: Codable, Equatable, Sendable {
     /// Scheduled passes stay in the background.
     public var taskPriority: TaskPriority { isFast ? .medium : .background }
 
-    /// No argument is a scheduled pass; `--run-now [set-id]` and `--allow-deletes <set-id> <count>` are
+    /// No argument is a scheduled pass; `--run-now [set-id]` and `--allow-deletes <set-id> <destination-id> <count>` are
     /// manual, and either may add `--full-speed`. Nil for anything else, so a malformed approval
     /// never becomes a run.
     public static func parse(_ arguments: [String]) -> RunCommand? {
@@ -104,8 +108,9 @@ public struct RunCommand: Codable, Equatable, Sendable {
             guard let id = UUID(uuidString: rest[1]) else { return nil }
             return RunCommand(setID: id, force: true, fullSpeed: fullSpeed)
         case "--allow-deletes":
-            guard rest.count == 3, let id = UUID(uuidString: rest[1]), let count = Int(rest[2]), count >= 0 else { return nil }
-            return RunCommand(setID: id, approvedDeletions: count, force: true, fullSpeed: fullSpeed)
+            guard rest.count == 4, let id = UUID(uuidString: rest[1]), let destination = UUID(uuidString: rest[2]),
+                  let count = Int(rest[3]), count >= 0 else { return nil }
+            return RunCommand(setID: id, approvedDeletions: count, approvedDestination: destination, force: true, fullSpeed: fullSpeed)
         default:
             return nil
         }

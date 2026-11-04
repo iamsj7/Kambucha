@@ -346,7 +346,7 @@ public final class RunCoordinator: Sendable {
         }
 
         let job = Job(pair: pair, set: set, destination: destination,
-                      approved: loaded.heldDeletions > 0 ? command.approvedDeletions : nil,
+                      approved: loaded.heldDeletions > 0 && command.approvedDestination == pair.destination ? command.approvedDeletions : nil,
                       profile: .profile(for: destination, fileSystem: volume?.fileSystem), isLocal: Self.isLocal(destination.kind),
                       volume: volume, pathGuard: volume.map { .forVolume($0, iCloudDrive: pathGuard.iCloudDrive) } ?? pathGuard)
         priority(job.isFast(command))
