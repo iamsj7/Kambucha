@@ -51,7 +51,7 @@ public struct DestinationProfile: Equatable, Sendable {
         case .externalDrive:
             let symlinks = ExternalVolume.supportsSymlinks(fileSystem: fileSystem ?? "")
             return DestinationProfile(kind: .externalDrive, encrypted: false, modifyWindow: symlinks ? "1ms" : "2s",
-                                      extraFlags: [], maxDuration: nil, fullPassInterval: 0,
+                                      extraFlags: [], maxDuration: nil, fullPassInterval: 7 * day,
                                       linksAsFiles: !symlinks, trackRenames: symlinks,
                                       excludeAppleDouble: !symlinks)
         }
@@ -99,6 +99,13 @@ public struct CheckRequest: Equatable, Sendable {
     public var linksAsFiles = false
     /// Set from `DestinationProfile.excludeAppleDouble`.
     public var excludeAppleDouble = false
+
+    /// The same link handling and `._*` exclusion as the sync used, from its profile.
+    public func applying(_ profile: DestinationProfile) -> CheckRequest {
+        var r = self
+        r.linksAsFiles = profile.linksAsFiles; r.excludeAppleDouble = profile.excludeAppleDouble
+        return r
+    }
     public init(source: URL, destination: String, filterFile: URL?, filesFrom: URL?, sizeOnly: Bool,
                 oneWay: Bool, cryptCheck: Bool, context: RcloneContext, logFile: URL, linksAsFiles: Bool = false,
                 excludeAppleDouble: Bool = false) {
@@ -144,9 +151,10 @@ public enum RcloneCommand {
         if r.sizeOnly { a.append("--size-only") }
         // rclone doesn't combine --files-from with --filter-from.
         if let list = r.filesFrom { a += ["--files-from", list.path] }
-        else if let f = r.filterFile {
+        else {
+            // Excluded even with no filter file, as the whole-tree Deep check has none.
             if r.excludeAppleDouble { a += ["--filter", "- ._*"] }
-            a += ["--filter-from", f.path]
+            if let f = r.filterFile { a += ["--filter-from", f.path] }
         }
         a += common(logFile: r.logFile, context: r.context)
         return a

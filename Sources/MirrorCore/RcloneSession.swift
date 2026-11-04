@@ -2,7 +2,7 @@ import Foundation
 
 /// Errors never carry a secret, a token or rclone's output, which can echo either.
 public enum RcloneSessionError: Error, Equatable, Codable, Sendable {
-    case notSignedIn, invalidSignIn, encryptionKeysMissing, encryptionNotSupported, alreadyOpen
+    case notSignedIn, invalidSignIn, encryptionKeysMissing, encryptionNotSupported, alreadyOpen, unsupportedKind
     case plaintextIntoEncryptedRoot
     case invalidSecret, versionUnavailable
     case obscureFailed(exitCode: Int32)
@@ -51,8 +51,8 @@ public final class RcloneSession {
             guard !destination.encrypted else { throw RcloneSessionError.encryptionNotSupported }
             return (MirrorPaths.backupRoot.path, RcloneContext(configPath: "/dev/null", environment: [:]))
         case .externalDrive:
-            // Needs the mounted volume, which the caller resolves. Not wired yet (Task 21 "Wiring for later").
-            throw RcloneSessionError.encryptionNotSupported
+            // A drive has no sign-in, config or secrets. The caller resolves the live volume's path instead.
+            throw RcloneSessionError.unsupportedKind
         case .googleDrive, .oneDrive:
             break
         }

@@ -77,6 +77,8 @@ public struct SetState: Codable, Equatable, Sendable {
     public var lastDeepCheck: Date?
     public var lastFinished: Date?
     public var lastDrill: Date?
+    /// External drives: the `VolumeInfo.mountID` of the connection that last got a full pass.
+    public var lastSeenMountID: String?
     public var lastFileCount: Int?
     public var consecutiveFailures = 0
     public var heldDeletions = 0

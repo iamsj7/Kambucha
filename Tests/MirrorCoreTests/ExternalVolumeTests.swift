@@ -38,6 +38,33 @@ private func has(_ a: [String], _ f: String, _ v: String) -> Bool {
         #expect(ExternalVolume.find(Destination(name: "x", kind: .iCloudFolder, volumeUUID: "AAAA"), in: [volume()]) == nil)
     }
 
+    @Test func mountPointWithSuffixIsStillTheSameDrive() throws {
+        // macOS mounts a second "SSD" at /Volumes/SSD 1. Identity is the UUID, not the path.
+        let e = try Env(mountName: "SSD 1")
+        let vol = volume("AAAA", name: "SSD", at: e.mount)
+        let d = Destination(name: "SSD", kind: .externalDrive, volumeUUID: "AAAA")
+        #expect(ExternalVolume.find(d, in: [volume("BBBB", name: "SSD"), vol])?.mountPoint == e.mount)
+        let set = BackupSet(name: "A", source: e.src)
+        try PathGuard.forVolume(vol, iCloudDrive: e.icloud).validateRun(
+            set, destination: d, marker: RootMarker(sets: [set.id: "A"]), sampleFileCount: 5, state: SetState(), volume: vol)
+        #expect(ExternalVolume.backupRoot(on: vol).path.hasSuffix("SSD 1/Mac Backup"))
+    }
+
+    @Test func guardRefusesTheBootVolumeOnItsOwn() throws {
+        let e = try Env()
+        let set = BackupSet(name: "A", source: e.src)
+        let dest = Destination(name: "Mac", kind: .externalDrive, volumeUUID: "ROOT")
+        let marker = RootMarker(sets: [set.id: "A"])
+        for vol in [VolumeInfo(uuid: "ROOT", name: "Macintosh HD", mountPoint: URL(fileURLWithPath: "/"), fileSystem: "apfs", freeBytes: 1),
+                    VolumeInfo(uuid: "ROOT", name: "Data", mountPoint: URL(fileURLWithPath: "/System/Volumes/Data"), fileSystem: "apfs", freeBytes: 1),
+                    VolumeInfo(uuid: "ROOT", name: "flagged", mountPoint: e.mount, fileSystem: "apfs", freeBytes: 1, isSystem: true)] {
+            let g = PathGuard.forVolume(vol, iCloudDrive: e.icloud)
+            do { try g.validateRun(set, destination: dest, marker: marker, sampleFileCount: 5, state: SetState(), volume: vol)
+                 Issue.record("accepted \(vol.mountPoint.path)") }
+            catch { #expect(error as? GuardFailure == .wrongDrive) }
+        }
+    }
+
     @Test func lockedDriveIsNotConnected() {
         // A locked drive never mounts, so it is absent from the list and find gives nil.
         let d = Destination(name: "SSD", kind: .externalDrive, volumeUUID: "AAAA")
@@ -92,10 +119,40 @@ private func has(_ a: [String], _ f: String, _ v: String) -> Bool {
         #expect(check(false).contains("--links") && check(false).contains("/s"))
     }
 
-    @Test func fitsComparesBytesToFreeSpace() {
-        #expect(ExternalVolume.fits(bytesToCopy: 1_000, volume: volume(free: 1_000)))
-        #expect(!ExternalVolume.fits(bytesToCopy: 1_001, volume: volume(free: 1_000)))
-        #expect(ExternalVolume.fits(bytesToCopy: 0, volume: volume(free: 0)))
+    @Test func checkOnExFATAlwaysExcludesAppleDouble() {
+        let p = DestinationProfile.profile(for: Destination(name: "x", kind: .externalDrive), fileSystem: "exfat")
+        func check(filter: Bool, profile: DestinationProfile) -> [String] {
+            RcloneCommand.arguments(CheckRequest(
+                source: URL(fileURLWithPath: "/s"), destination: "/d", filterFile: filter ? URL(fileURLWithPath: "/f") : nil,
+                filesFrom: nil, sizeOnly: true, oneWay: false, cryptCheck: false,
+                context: RcloneContext(configPath: "/dev/null", environment: [:]), logFile: URL(fileURLWithPath: "/lg")).applying(profile))
+        }
+        #expect(check(filter: true, profile: p).contains("- ._*"))
+        #expect(check(filter: false, profile: p).contains("- ._*"))   // whole-tree check has no filter file
+        #expect(check(filter: false, profile: p).contains(":local,links:/s"))
+        #expect(!check(filter: true, profile: p).contains("--links"))
+        let apfs = DestinationProfile.profile(for: Destination(name: "x", kind: .externalDrive), fileSystem: "apfs")
+        #expect(!check(filter: true, profile: apfs).contains("- ._*") && check(filter: true, profile: apfs).contains("--links"))
+    }
+
+    @Test func fitsKeepsAReserveAndCountsTheArchive() {
+        let gb: Int64 = 1_000_000_000
+        // Small drive: reserve is the 1 GB floor.
+        let small = VolumeInfo(uuid: "A", name: "S", mountPoint: URL(fileURLWithPath: "/Volumes/S"), fileSystem: "apfs",
+                               freeBytes: 10 * gb, totalBytes: 20 * gb)
+        #expect(ExternalVolume.reserve(for: small) == gb)
+        #expect(ExternalVolume.fits(bytesToCopy: 9 * gb, archiveBytes: 0, volume: small))
+        #expect(!ExternalVolume.fits(bytesToCopy: 9 * gb + 1, archiveBytes: 0, volume: small))
+        #expect(!ExternalVolume.fits(bytesToCopy: 8 * gb, archiveBytes: 2 * gb, volume: small))
+        #expect(ExternalVolume.fits(bytesToCopy: 8 * gb, archiveBytes: gb, volume: small))
+        // Big drive: 2% of 4 TB is 80 GB, which beats the floor.
+        let big = VolumeInfo(uuid: "B", name: "B", mountPoint: URL(fileURLWithPath: "/Volumes/B"), fileSystem: "apfs",
+                             freeBytes: 500 * gb, totalBytes: 4_000 * gb)
+        #expect(ExternalVolume.reserve(for: big) == 80 * gb)
+        #expect(ExternalVolume.fits(bytesToCopy: 420 * gb, archiveBytes: 0, volume: big))
+        #expect(!ExternalVolume.fits(bytesToCopy: 421 * gb, archiveBytes: 0, volume: big))
+        // Nothing to copy still needs the reserve free.
+        #expect(!ExternalVolume.fits(bytesToCopy: 0, archiveBytes: 0, volume: volume(free: 0)))
     }
 
     @Test func symlinkSupportFollowsFileSystem() {
@@ -126,12 +183,107 @@ private func has(_ a: [String], _ f: String, _ v: String) -> Bool {
         #expect(plist?["StartOnMount"] as? Bool == true)
     }
 
-    @Test func systemVolumesReportsTheStartupVolume() {
-        let root = SystemVolumes().mounted().first { $0.mountPoint.path == "/" }
-        #expect(root != nil)
-        #expect(root?.fileSystem == "apfs")
-        #expect(root?.uuid.isEmpty == false)
-        #expect((root?.freeBytes ?? 0) > 0)
+    @Test func systemVolumesNeverOffersTheBootVolume() {
+        let found = SystemVolumes().mounted()
+        #expect(!found.contains { $0.mountPoint.path == "/" })
+        #expect(!found.contains { $0.mountPoint.path.hasPrefix("/System/Volumes") })
+        #expect(found.allSatisfy { !$0.uuid.isEmpty && !$0.isSystem })
+    }
+
+    /// A real disk image through the real classifier. Not a real SSD: images report external and ejectable with
+    /// no internal flag, which is what a USB SSD is expected to look like, but that is not verified on one.
+    @Test func realDiskImageIsOfferedAndTheBootVolumeIsNot() throws {
+        let dir = FileManager.default.temporaryDirectory.appendingPathComponent("mirror-ev-img-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let image = dir.appendingPathComponent("t.dmg")
+        func hdiutil(_ args: [String]) throws -> String {
+            let p = Process(); p.executableURL = URL(fileURLWithPath: "/usr/bin/hdiutil"); p.arguments = args
+            let out = Pipe(); p.standardOutput = out; p.standardError = Pipe()
+            try p.run(); let data = out.fileHandleForReading.readDataToEndOfFile(); p.waitUntilExit()
+            return String(decoding: data, as: UTF8.self)
+        }
+        _ = try hdiutil(["create", "-size", "20m", "-fs", "APFS", "-volname", "MirrorEV", image.path])
+        let attach = try hdiutil(["attach", image.path, "-nobrowse", "-plist"])
+        defer { if let dev = Self.devNode(attach) { _ = try? hdiutil(["detach", "-force", dev]) } }
+        let volumes = SystemVolumes(includeHidden: true).mounted()
+        let img = volumes.first { $0.name == "MirrorEV" }
+        #expect(img != nil)
+        #expect(img?.fileSystem == "apfs" && img?.totalBytes ?? 0 > 0 && img?.mountID.isEmpty == false)
+        #expect(!volumes.contains { $0.mountPoint.path == "/" || $0.mountPoint.path.hasPrefix("/System/Volumes") })
+        #expect(SystemVolumes().mounted().allSatisfy { $0.name != "MirrorEV" })   // hidden mounts are skipped by default
+    }
+
+    private static func devNode(_ plist: String) -> String? {
+        guard let d = try? PropertyListSerialization.propertyList(from: Data(plist.utf8), format: nil) as? [String: Any],
+              let e = d["system-entities"] as? [[String: Any]] else { return nil }
+        return e.compactMap { $0["dev-entry"] as? String }.first.map { String($0.prefix { !$0.isNumber } + $0.drop { !$0.isNumber }.prefix { $0.isNumber }) }
+    }
+
+    private func traits(_ path: String = "/Volumes/SSD", root: Bool = false, local: Bool = true, builtIn: Bool = false,
+                        ejectable: Bool = true, readOnly: Bool = false, tm: Bool = false) -> VolumeTraits {
+        VolumeTraits(path: path, isRootFileSystem: root, isLocal: local, isInternal: builtIn, isEjectable: ejectable,
+                     isReadOnly: readOnly, isTimeMachine: tm)
+    }
+
+    @Test func classificationOffersOnlyWritableLocalExternalVolumes() {
+        #expect(SystemVolumes.isBackupTarget(traits()))
+        #expect(SystemVolumes.isBackupTarget(traits(builtIn: false, ejectable: false)))   // fixed external
+        #expect(SystemVolumes.isBackupTarget(traits(builtIn: true, ejectable: true)))     // ejectable internal slot
+        #expect(!SystemVolumes.isBackupTarget(traits("/", root: true, builtIn: true, ejectable: false)))
+        #expect(!SystemVolumes.isBackupTarget(traits("/System/Volumes/Data", builtIn: true, ejectable: false)))
+        #expect(!SystemVolumes.isBackupTarget(traits("/System/Volumes/VM")))
+        #expect(!SystemVolumes.isBackupTarget(traits(builtIn: true, ejectable: false)))   // internal disk
+        #expect(!SystemVolumes.isBackupTarget(traits(local: false)))                       // network share
+        #expect(!SystemVolumes.isBackupTarget(traits(readOnly: true)))                     // installer, DMG
+        #expect(!SystemVolumes.isBackupTarget(traits(tm: true)))                           // Time Machine
+    }
+
+    @Test func driveWithoutUUIDIsReportedUnsupported() {
+        struct Fake: VolumeLocating {
+            func mounted() -> [VolumeInfo] { [] }
+            func unsupported() -> [UnsupportedVolume] {
+                [UnsupportedVolume(name: "NoUUID", mountPoint: URL(fileURLWithPath: "/Volumes/NoUUID"), reason: .noVolumeUUID)]
+            }
+        }
+        #expect(Fake().unsupported().first?.reason == .noVolumeUUID)
+        struct Plain: VolumeLocating { func mounted() -> [VolumeInfo] { [] } }
+        #expect(Plain().unsupported().isEmpty)
+        let (ok, bad) = SystemVolumes.partition([("A", traits(), "UUID-1"), ("B", traits("/Volumes/B"), nil)])
+        #expect(ok == [0] && bad.map(\.index) == [1] && bad.first?.reason == .noVolumeUUID)
+    }
+
+    @Test func fileSystemNameFallbackReadsMacOSExtendedAsHFS() {
+        #expect(SystemVolumes.normalizedFileSystem(statfsName: nil, description: "Mac OS Extended (Journaled)") == "hfs")
+        #expect(SystemVolumes.normalizedFileSystem(statfsName: nil, description: "APFS (Encrypted)") == "apfs")
+        #expect(SystemVolumes.normalizedFileSystem(statfsName: nil, description: "ExFAT") == "exfat")
+        #expect(SystemVolumes.normalizedFileSystem(statfsName: nil, description: "MS-DOS (FAT32)") == "msdos")
+        #expect(SystemVolumes.normalizedFileSystem(statfsName: "hfs", description: "whatever") == "hfs")
+        #expect(ExternalVolume.supportsSymlinks(fileSystem: SystemVolumes.normalizedFileSystem(
+            statfsName: nil, description: "Mac OS Extended (Journaled)")))
+    }
+
+    // MARK: Full pass once per connection
+
+    @Test func fullPassOnlyWhenTheMountChanges() throws {
+        let now = Date(timeIntervalSince1970: 1_800_000_000)
+        let v = VolumeInfo(uuid: "A", name: "S", mountPoint: URL(fileURLWithPath: "/Volumes/S"), fileSystem: "apfs",
+                           freeBytes: 1, mountID: "/dev/disk5s1@1")
+        // Never recorded: first connection.
+        #expect(ExternalVolume.needsFullPass(lastSeenMountID: nil, volume: v, lastFullPass: nil, now: now))
+        // Same mount, recent pass: the 30 minute wake-ups are ordinary runs.
+        #expect(!ExternalVolume.needsFullPass(lastSeenMountID: "/dev/disk5s1@1", volume: v, lastFullPass: now.addingTimeInterval(-1800), now: now))
+        // Unplugged and plugged back in.
+        var again = v; again.mountID = "/dev/disk7s1@2"
+        #expect(ExternalVolume.needsFullPass(lastSeenMountID: "/dev/disk5s1@1", volume: again, lastFullPass: now.addingTimeInterval(-1800), now: now))
+        // Same mount for over a week: weekly backstop, since a mount ID can repeat.
+        #expect(ExternalVolume.needsFullPass(lastSeenMountID: "/dev/disk5s1@1", volume: v, lastFullPass: now.addingTimeInterval(-8 * 86_400), now: now))
+        // Unknown mount ID never claims "same connection".
+        var unknown = v; unknown.mountID = ""
+        #expect(ExternalVolume.needsFullPass(lastSeenMountID: "", volume: unknown, lastFullPass: now.addingTimeInterval(-60), now: now))
+        #expect(DestinationProfile.profile(for: Destination(name: "x", kind: .externalDrive), fileSystem: "apfs").fullPassInterval == 7 * 86_400)
+        var s = SetState(); #expect(s.lastSeenMountID == nil); s.lastSeenMountID = "x"
+        #expect(try JSONDecoder().decode(SetState.self, from: JSONEncoder().encode(s)).lastSeenMountID == "x")
     }
 
     // MARK: PathGuard
@@ -139,8 +291,8 @@ private func has(_ a: [String], _ f: String, _ v: String) -> Bool {
     private struct Env {
         let base = FileManager.default.temporaryDirectory.appendingPathComponent("mirror-ev-\(UUID().uuidString)")
         let mount: URL, src: URL, icloud: URL
-        init() throws {
-            mount = base.appendingPathComponent("Volumes/SSD"); src = base.appendingPathComponent("src")
+        init(mountName: String = "SSD") throws {
+            mount = base.appendingPathComponent("Volumes/\(mountName)"); src = base.appendingPathComponent("src")
             icloud = base.appendingPathComponent("iCloud")
             for u in [mount.appendingPathComponent("Mac Backup/Sets/A"), src, icloud] {
                 try FileManager.default.createDirectory(at: u, withIntermediateDirectories: true)

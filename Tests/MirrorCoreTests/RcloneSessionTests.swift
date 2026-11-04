@@ -103,6 +103,12 @@ private func cryptName(_ endpoint: String) -> String {
 }
 
 @Suite struct RcloneSessionTests {
+    @Test func externalDriveHasNoSessionAndSaysSo() throws {
+        let f = try Fixture()
+        let (s, _) = try f.session(.externalDrive, signedIn: false, vaulted: false)
+        #expect(throws: RcloneSessionError.unsupportedKind) { try s.open() }
+    }
+
     @Test func cryptEnvHasRequiredKeys() throws {
         let f = try Fixture()
         let (s, _) = try f.session(.googleDrive)

@@ -44,7 +44,9 @@ public struct PathGuard: Sendable {
         try checkSource(set)
         if destination.kind == .externalDrive {
             // The backup root must sit on the mounted drive whose UUID the destination names.
-            guard let volume, let uuid = destination.volumeUUID,
+            let mount = volume?.mountPoint.standardizedFileURL.path ?? "/"
+            guard let volume, !volume.isSystem, mount != "/", !mount.hasPrefix("/System/Volumes"),
+                  let uuid = destination.volumeUUID,
                   volume.uuid.caseInsensitiveCompare(uuid) == .orderedSame,
                   Self.strictlyInsideCanonical(backupRoot, volume.mountPoint) else { throw GuardFailure.wrongDrive }
         }
