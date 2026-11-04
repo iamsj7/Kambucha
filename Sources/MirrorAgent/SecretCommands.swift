@@ -20,7 +20,7 @@ enum SecretCommands {
         // Never derive the executable path from argv: resolve it from the enclosing bundle.
         let rclone = Bundle.main.bundleURL.appendingPathComponent("Contents/Helpers/rclone")
         let service = AgentService(secrets: KeychainStore(), binary: rclone, trust: SignedCodeTrust(),
-                                   presence: DevicePresence(), support: MirrorPaths.support)
+                                   presence: DevicePresence(), support: MirrorPaths.support, notifier: UNNotifier())
         let task = Task {
             await service.respond(subcommand: subcommand, input: { FileHandle.standardInput.readDataToEndOfFile() })
         }

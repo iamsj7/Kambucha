@@ -3,11 +3,6 @@ import Observation
 import AppKit
 import MirrorCore
 
-/// A notifier that never posts: the app only reads problems; the agent raises them.
-private struct SilentNotifier: Notifying {
-    func post(_ problem: Problem, pair: PairID, setName: String, detail: String) async -> Bool { false }
-}
-
 /// One row of the menu bar panel.
 struct SetRow: Identifiable, Equatable {
     var id: UUID
@@ -44,7 +39,7 @@ private struct Snapshot: Sendable {
             }
         }
         let records = (try? RunRecordStore(root: support).recent(limit: 200)) ?? []
-        let problems = (try? ProblemCenter(root: support, notifier: SilentNotifier()).active()) ?? []
+        let problems = (try? ProblemCenter(root: support, notifier: NoNotifier()).active()) ?? []
         let running = AgentPresence.isRunning(support: support)
         // Progress belongs to a live agent only; a file left by a killed one is ignored.
         let live = running ? ((try? ProgressStore(root: support).all(now: Date())) ?? []) : []

@@ -47,6 +47,16 @@ private final class FakePresence: UserPresence, @unchecked Sendable {
 
 private final class ReadFlag: @unchecked Sendable { var read = false }
 
+private final class Posts: Notifying, @unchecked Sendable {
+    private let lock = NSLock()
+    private var list: [Problem] = []
+    var posted: [Problem] { lock.withLock { list } }
+    func post(_ problem: Problem, pair: PairID, setName: String, detail: String) async -> Bool {
+        lock.withLock { list.append(problem) }
+        return true
+    }
+}
+
 private struct ServiceRig {
     let tmp: TempDir
     let secrets = MemorySecrets()
@@ -55,13 +65,14 @@ private struct ServiceRig {
     let support: URL
     let trust = FakeTrust()
     let presence = FakePresence()
+    let notifier = Posts()
     let drive = Destination(name: "Drive", kind: .googleDrive)
     init() throws {
         tmp = try TempDir()
         work = try tmp.sub("work")
         support = try tmp.sub("support")
         service = AgentService(secrets: secrets, binary: try fakeCloudRclone(in: tmp.url), trust: trust, presence: presence,
-                               support: support, workDir: work)
+                               support: support, workDir: work, notifier: notifier)
     }
     var config: ConfigStore { ConfigStore(root: support) }
     var lockFile: URL { support.appendingPathComponent("locks/secrets.lock") }
@@ -127,6 +138,41 @@ private struct ServiceRig {
         let failed = try await rig.send(.drill(destination: rig.drive, kitText: kitText, relativePath: "Sets/D/note.txt", original: original))
         #expect(failed.drillPassed == false)
         #expect(rig.workIsEmpty)
+    }
+
+    @Test func aDrillThatFailsIsRecordedAndNotifiedAndAPassClearsIt() async throws {
+        let rig = try ServiceRig()
+        try await rig.connected()
+        let kitText = try #require(try await rig.send(.recoveryKit(destination: rig.drive)).kitText)
+        var paused = BackupSet(name: "P", source: rig.tmp.url, destinationIDs: [rig.drive.id]); paused.isPaused = true
+        let set = BackupSet(name: "D", source: rig.tmp.url, destinationIDs: [rig.drive.id])
+        try rig.config.saveSets([paused, set])
+        _ = try rig.store(confirmed: true)
+        let pair = PairID(set: set.id, destination: rig.drive.id)
+        let center = ProblemCenter(root: rig.support, notifier: rig.notifier)
+        try center.store(.drillDue, pair: pair, setName: "D", detail: "Drive")
+
+        let original = rig.tmp.url.appendingPathComponent("note.txt")
+        try "other words".write(to: original, atomically: true, encoding: .utf8)
+        let failed = try await rig.send(.drill(destination: rig.drive, kitText: kitText, relativePath: "Sets/D/note.txt", original: original))
+        #expect(failed.drillPassed == false)
+        #expect(try center.active().first { $0.problem == .drillFailed }?.pair == pair)   // a set that isn't paused speaks for it
+        #expect(rig.notifier.posted == [.drillFailed])
+
+        try "the words".write(to: original, atomically: true, encoding: .utf8)
+        let passed = try await rig.send(.drill(destination: rig.drive, kitText: kitText, relativePath: "Sets/D/note.txt", original: original))
+        #expect(passed.drillPassed == true)
+        #expect(try center.active().isEmpty)
+    }
+
+    @Test func aDrillThatCouldntTellRaisesNothing() async throws {
+        let rig = try ServiceRig()
+        let set = BackupSet(name: "D", source: rig.tmp.url, destinationIDs: [rig.drive.id])
+        try rig.config.saveSets([set])
+        _ = try rig.store(confirmed: true)
+        let r = try await rig.send(.drill(destination: rig.drive, kitText: "nothing", relativePath: "a", original: rig.tmp.url))
+        #expect(r.failure != nil)
+        #expect(try ProblemCenter(root: rig.support, notifier: rig.notifier).active().isEmpty)
     }
 
     @Test func restoreFromKitGoesThroughTheAgent() async throws {

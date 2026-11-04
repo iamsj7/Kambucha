@@ -1761,6 +1761,8 @@ private final class Harness: @unchecked Sendable {
         let session = FakeSession(endpoint: "c:"); h.setSession(d, session)
         try h.cloudMarker(at: "c:.mirror-root")
         let p = PairID(set: h.set.id, destination: d.id); try h.prime(p, kind: .googleDrive)
+        var drilled = try h.state(p); drilled.lastDrill = h.now   // no reminder to tell apart from the hold
+        try h.store.save(drilled, for: p)
         h.change("flowapp/a.txt")
         h.rclone.script(dryDeletions: (0..<500).map { "f\($0)" })
         final class Seen: @unchecked Sendable { var closes = -1 }
@@ -4270,5 +4272,64 @@ private struct LeavesAfterOneMoreLook: RcloneRunning {
     }
     func capture(_ arguments: [String], context: RcloneContext) async throws -> RcloneCapture {
         try await wrapping.capture(arguments, context: context)
+    }
+}
+
+/// Spec section 8a: after the first backup to an encrypted destination, then every 6 months.
+@Suite struct DrillReminderTests {
+    private func primedCloud(_ h: Harness) throws -> (Destination, PairID) {
+        let d = try h.addCloud(); try h.save(extra: [d])
+        let p = PairID(set: h.set.id, destination: d.id); try h.prime(p, kind: .googleDrive)
+        try h.prime()
+        return (d, p)
+    }
+
+    @Test func aFinishedBackupToAnEncryptedDestinationMakesTheDrillDue() async throws {
+        let h = try Harness()
+        let (d, p) = try primedCloud(h)
+        await h.run()
+        let open = try h.problems.active().filter { $0.problem == .drillDue }
+        #expect(open.map(\.pair) == [p])
+        #expect(open.first?.detail == d.name)
+        #expect(h.notifier.posted.filter { $0 == .drillDue }.count == 1)
+    }
+
+    @Test func theReminderIsSaidOnce() async throws {
+        let h = try Harness()
+        _ = try primedCloud(h)
+        await h.run(); await h.run()
+        #expect(h.notifier.posted.filter { $0 == .drillDue }.count == 1)
+    }
+
+    @Test func aRecentDrillMeansNoReminderAndClearsAnOpenOne() async throws {
+        let h = try Harness()
+        let (_, p) = try primedCloud(h)
+        try h.problems.store(.drillDue, pair: p, setName: "x", detail: "d")
+        var st = try h.state(p); st.lastDrill = h.now
+        try h.store.save(st, for: p)
+        await h.run()
+        #expect(try !h.active.contains(.drillDue))
+    }
+
+    @Test func nothingFinishedYetMeansNothingIsDue() async throws {
+        let h = try Harness()
+        let d = try h.addCloud(kit: false); try h.save(extra: [d]); try h.prime()   // waits for its Recovery Kit
+        await h.run()
+        #expect(try !h.active.contains(.drillDue))
+    }
+
+    @Test func aStoppedDestinationDoesNotAlsoNagAboutADrill() async throws {
+        let h = try Harness()
+        let (d, _) = try primedCloud(h)
+        h.setSession(d, FakeSession(endpoint: "x:", openError: RcloneSessionError.notSignedIn))
+        h.change("flowapp/a.txt")
+        await h.run()
+        #expect(try h.active.contains(.signInExpired) && !h.active.contains(.drillDue))
+    }
+
+    @Test func anUnencryptedDestinationIsNeverDue() async throws {
+        let h = try Harness(); try h.prime()
+        await h.run()
+        #expect(try !h.active.contains(.drillDue))
     }
 }

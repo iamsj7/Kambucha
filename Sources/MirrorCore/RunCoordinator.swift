@@ -219,7 +219,24 @@ public final class RunCoordinator: Sendable {
         for volume in drives.finished where !drives.troubled.contains(volume.uuid) && isThere(volume) {
             await problems.announceSafeToEject(volumeName: volume.name, volumeUUID: volume.uuid)
         }
+        await remindDrills(sets: sets, destinations: destinations)
         return true
+    }
+
+    /// Spec section 8a. A reminder only: it blocks nothing, and it's said once until a drill passes.
+    private func remindDrills(sets: [BackupSet], destinations: [Destination]) async {
+        for destination in destinations where destination.encrypted {
+            let using = sets.filter { $0.destinationIDs.contains(destination.id) }
+            guard let anchor = ProblemAnchor.set(for: destination.id, in: sets) else { continue }
+            let states = using.map { (try? store.state(for: PairID(set: $0.id, destination: destination.id))) ?? SetState() }
+            // A destination that's stopped has more pressing news, and a drill couldn't reach it anyway.
+            if states.contains(where: { $0.stoppedBy != nil }) { continue }
+            if DrillSchedule.isDue(destination, states: states, now: clock()) {
+                await raise(.drillDue, PairID(set: anchor.id, destination: destination.id), anchor, detail: destination.name)
+            } else {
+                for set in using { clear([.drillDue], PairID(set: set.id, destination: destination.id)) }
+            }
+        }
     }
 
     /// What this wake-up did on each drive, as a drive is safe to eject only once all its pairs are through.

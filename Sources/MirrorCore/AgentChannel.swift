@@ -132,18 +132,21 @@ public struct AgentService: Sendable {
     private let support: URL
     private let workDir: URL
     private let recovery: AgentRecovery
+    private let notifier: any Notifying
 
-    public init(secrets: any SecretStoring, binary: URL, trust: any AgentTrust, presence: any UserPresence, support: URL) {
+    public init(secrets: any SecretStoring, binary: URL, trust: any AgentTrust, presence: any UserPresence, support: URL,
+                notifier: any Notifying) {
         self.init(secrets: secrets, binary: binary, trust: trust, presence: presence, support: support,
-                  workDir: RcloneSession.interactiveWorkDir)
+                  workDir: RcloneSession.interactiveWorkDir, notifier: notifier)
     }
     init(secrets: any SecretStoring, binary: URL, trust: any AgentTrust, presence: any UserPresence, support: URL, workDir: URL,
          volumes: any VolumeLocating = SystemVolumes(), iCloudDrive: URL = MirrorPaths.iCloudDrive,
-         presets: @escaping @Sendable () throws -> [Preset] = { try PresetCatalog.all() }) {
+         presets: @escaping @Sendable () throws -> [Preset] = { try PresetCatalog.all() },
+         notifier: any Notifying = NoNotifier()) {
         recovery = AgentRecovery(store: ConfigStore(root: support), tokenLock: MirrorPaths.tokenLock(support: support), secrets: secrets, binary: binary, trust: trust, workDir: workDir,
                                  volumes: volumes, iCloudDrive: iCloudDrive, presets: presets)
         self.secrets = secrets; self.binary = binary; self.trust = trust; self.presence = presence
-        self.support = support; self.workDir = workDir
+        self.support = support; self.workDir = workDir; self.notifier = notifier
     }
 
     /// `input` is a closure so a refused caller's stdin is never even read.
@@ -211,7 +214,26 @@ public struct AgentService: Sendable {
             return AgentResponse()
         case .drill(_, let kitText, let relativePath, let original):
             let kit = try RecoveryKit(parsing: kitText)
-            return AgentResponse(drillPassed: try await drill(destination, kit: kit, relativePath: relativePath, original: original))
+            let passed = try await drill(destination, kit: kit, relativePath: relativePath, original: original)
+            await recordDrill(destination, passed: passed)
+            return AgentResponse(drillPassed: passed)
+        }
+    }
+
+    /// A kit that opens nothing alerts at once (spec section 8a). A drill that couldn't tell never gets here.
+    /// The verdict stands whether or not the record can be saved.
+    private func recordDrill(_ destination: Destination, passed: Bool) async {
+        let center = ProblemCenter(root: support, notifier: notifier)
+        let sets = (try? ConfigStore(root: support).loadSets()) ?? []
+        if passed {
+            for set in sets where set.destinationIDs.contains(destination.id) {
+                let pair = PairID(set: set.id, destination: destination.id)
+                try? center.clear(.drillFailed, pair: pair)
+                try? center.clear(.drillDue, pair: pair)
+            }
+        } else if let anchor = ProblemAnchor.set(for: destination.id, in: sets) {
+            try? await center.raise(.drillFailed, pair: PairID(set: anchor.id, destination: destination.id), setName: anchor.name,
+                                    detail: destination.name)
         }
     }
 

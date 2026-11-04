@@ -160,7 +160,7 @@ When you sign in you may see "Google hasn't verified this app". That is expected
 
 The Recovery Kit holds your passphrase, your salt and your Google client ID and secret. Without it, nobody can open the backup. With it, anyone can. Keep it like a house key.
 
-Some time after the first backup, Mirror asks you to paste the Recovery Kit as a test. It uses only what is in the Kit to download and decrypt one small file. It asks again every 6 months. Do it. It is the only way to know the Kit works.
+Some time after the first backup, Mirror asks you to paste the Recovery Kit as a test. It uses only what is in the Kit to download and decrypt one small file. It asks again every 6 months, with one notification, and the reminder blocks nothing. Do it. It is the only way to know the Kit works. If the Kit does not open the backup, Mirror alerts you at once and shows "Needs Attention" until a test passes.
 
 If Google ever shows "Sign-in expired", choose Reconnect on that destination. Only that destination pauses.
 

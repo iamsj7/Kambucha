@@ -45,6 +45,12 @@ public extension Notifying {
     func postSafeToEject(volumeName: String, volumeUUID: String) async -> Bool { false }
 }
 
+/// For a process that only reads problems, or a test that doesn't care.
+public struct NoNotifier: Notifying {
+    public init() {}
+    public func post(_ problem: Problem, pair: PairID, setName: String, detail: String) async -> Bool { false }
+}
+
 public struct ActiveProblem: Codable, Equatable, Sendable {
     public var problem: Problem
     public var pair: PairID
