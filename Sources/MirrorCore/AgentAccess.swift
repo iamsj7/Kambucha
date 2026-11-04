@@ -39,61 +39,9 @@ public enum AgentAccess {
 
     /// Confirmed only by a passing report no older than `maxAge` (and not older than `notBefore`, when given).
     public static func isConfirmed(support: URL, now: Date = Date(), maxAge: TimeInterval = 2 * 3600, notBefore: Date? = nil) -> Bool {
-        guard let r = readReport(support: support), r.passed, now.timeIntervalSince(r.checkedAt) <= maxAge else { return false }
+        guard let r = readReport(support: support), r.passed, r.checkedAt <= now,   // a clock set ahead can't pre-confirm
+              now.timeIntervalSince(r.checkedAt) <= maxAge else { return false }
         if let notBefore, r.checkedAt < notBefore { return false }
         return true
-    }
-}
-
-/// Path-aware matching of rclone filter lines (`+ pattern` / `- pattern`, first match wins, no match
-/// means included), for paths relative to the set root.
-public struct FilterMatcher: Sendable {
-    private let rules: [(include: Bool, regex: NSRegularExpression)]
-
-    public init(lines: [String]) {
-        rules = lines.compactMap { line in
-            guard line.count > 2, let sign = line.first, sign == "+" || sign == "-", line.dropFirst().first == " " else { return nil }
-            guard let re = Self.regex(String(line.dropFirst(2))) else { return nil }
-            return (sign == "+", re)
-        }
-    }
-
-    public func isExcluded(_ path: String) -> Bool {
-        let range = NSRange(path.startIndex..., in: path)
-        for r in rules where r.regex.firstMatch(in: path, range: range) != nil { return !r.include }
-        return false
-    }
-
-    /// rclone glob: `*` and `?` stay inside one path component, `**` crosses them, `{a,b}` alternates,
-    /// `[..]` is a class, `\x` is literal. A leading `/` anchors to the root; otherwise any depth.
-    /// Case-insensitive, which can only skip more files than rclone does.
-    static func regex(_ glob: String) -> NSRegularExpression? {
-        var p = Array(glob)
-        var out = ""
-        if p.first == "/" { out = "^"; p.removeFirst() } else { out = "^(?:.*/)?" }
-        var i = 0, depth = 0
-        while i < p.count {
-            let c = p[i]
-            switch c {
-            case "*":
-                if i + 1 < p.count, p[i + 1] == "*" {
-                    i += 1
-                    if i + 1 < p.count, p[i + 1] == "/" { out += "(?:.*/)?"; i += 1 } else { out += ".*" }
-                } else { out += "[^/]*" }
-            case "?": out += "[^/]"
-            case "{": out += "(?:"; depth += 1
-            case "}": if depth > 0 { out += ")"; depth -= 1 } else { out += "\\}" }
-            case ",": out += depth > 0 ? "|" : ","
-            case "[":
-                if let close = p[i...].firstIndex(of: "]") { out += String(p[i...close]); i = close } else { out += "\\[" }
-            case "\\":
-                i += 1
-                if i < p.count { out += NSRegularExpression.escapedPattern(for: String(p[i])) }
-            default: out += NSRegularExpression.escapedPattern(for: String(c))
-            }
-            i += 1
-        }
-        guard depth == 0 else { return nil }
-        return try? NSRegularExpression(pattern: out + "$", options: [.caseInsensitive])
     }
 }

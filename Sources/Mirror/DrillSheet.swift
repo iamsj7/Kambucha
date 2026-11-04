@@ -27,6 +27,7 @@ extension DrillOutcome {
 @MainActor @Observable
 final class DrillModel {
     typealias Runner = @Sendable (Destination, String, String, URL) async throws -> Bool
+    typealias Candidates = (Destination) async -> DrillCandidate?
     enum Phase: Equatable { case idle, running, finished(DrillOutcome), nothingToTest }
 
     let destinations: [Destination]
@@ -37,11 +38,11 @@ final class DrillModel {
     @ObservationIgnored var now: () -> Date = Date.init
     @ObservationIgnored private let store: ConfigStore
     @ObservationIgnored private let sets: [BackupSet]
-    @ObservationIgnored private let candidate: (Destination) -> DrillCandidate?
+    @ObservationIgnored private let candidate: Candidates
     @ObservationIgnored private let run: Runner
 
     init(destinations: [Destination], sets: [BackupSet] = [], store: ConfigStore = ConfigStore(root: MirrorPaths.support),
-         candidate: @escaping (Destination) -> DrillCandidate?, run: @escaping Runner) {
+         candidate: @escaping Candidates, run: @escaping Runner) {
         self.destinations = destinations; self.store = store; self.candidate = candidate; self.run = run
         self.sets = sets.isEmpty ? ((try? store.loadSets()) ?? []) : sets
         selected = destinations.first?.id
@@ -55,7 +56,7 @@ final class DrillModel {
         phase = .running
         // A Kit that doesn't parse is refused here, before the agent is spawned.
         guard (try? RecoveryKit(parsing: kitText)) != nil else { kitText = ""; phase = .finished(.badKit); return }
-        guard let file = candidate(dest) else { phase = .nothingToTest; return }
+        guard let file = await candidate(dest) else { phase = .nothingToTest; return }
         let text = kitText
         let result: Result<Bool, any Error>
         do { result = .success(try await run(dest, text, file.relativePath, file.original)) }
@@ -86,53 +87,71 @@ final class DrillModel {
 }
 
 enum DrillFilePicker {
-    /// A small, plain, top-level file of the first set that uses the destination, one that has been
-    /// backed up and hasn't changed since. Only top-level files are considered, and anything the backup
-    /// would leave out is skipped: secret patterns, macOS and git files, the set's exclude rules and its
-    /// stack presets' excludes, matched on the path with the set's real filter. A file the backup excluded would compare as missing and look like a bad
-    /// Kit, and a secret must never be chosen. `nil` when nothing qualifies.
-    static func candidate(sets: [BackupSet], store: ConfigStore = ConfigStore(root: MirrorPaths.support)) -> (Destination) -> DrillCandidate? {
+    /// Lists the set's backed-up files, relative to its source, or nil if it can't.
+    typealias Lister = @Sendable (BackupSet) async -> [String]?
+
+    /// A small, plain file of the first set that uses the destination, one that has been backed up and
+    /// hasn't changed since. The candidates come from rclone itself, run with the set's real filter, so
+    /// every rule (paths, classes, includes) is applied exactly as a backup applies it. Secrets, `.git`
+    /// and hidden files are then removed separately, so no user include can bring one back. Any failure
+    /// means nothing suitable (nil), which the sheet shows as "Nothing to test", never as a bad Kit.
+    static func candidate(sets: [BackupSet], store: ConfigStore = ConfigStore(root: MirrorPaths.support),
+                          list: @escaping Lister = rcloneLister(binary: bundledRclone)) -> (Destination) async -> DrillCandidate? {
         { dest in
             for set in sets where set.destinationIDs.contains(dest.id) {
                 let finished = (try? store.state(for: PairID(set: set.id, destination: dest.id)))?.lastFinished
-                if let c = pick(in: set, finishedBefore: finished) { return c }
+                if let c = await pick(in: set, finishedBefore: finished, list: list) { return c }
             }
             return nil
         }
     }
 
-    private static let plainExtensions: Set<String> = ["txt", "md", "rtf", "csv", "json", "yaml", "yml", "xml", "html", "swift", "py", "js", "ts"]
+    static var bundledRclone: URL { Bundle.main.bundleURL.appendingPathComponent("Contents/Helpers/rclone") }
 
-    /// The set's real filter lines (user rules first, then secrets, git, macOS and preset excludes) plus
-    /// the presets' per-project excludes applied at the root, matched path-aware with `FilterMatcher`.
-    /// Secrets are always skipped here, whatever the set's secrets switch says. Nil if presets can't load.
-    static func filter(for set: BackupSet, loadPresets: () throws -> [Preset]) -> FilterMatcher? {
-        guard let presets = try? loadPresets() else { return nil }
-        var lines = FilterBuilder(presets: presets).lines(for: set, projects: [], scope: nil)
-        lines += PresetCatalog.secretPatterns.map { "- \($0)" }
-        lines += [".git/**", ".git"].map { "- \($0)" }
-        lines += presets.filter { set.presets.contains($0.id) }.flatMap(\.ambiguousExclude)
-            .map { "- " + ($0.hasSuffix("/") ? $0 + "**" : $0) }
-        return FilterMatcher(lines: lines)
+    /// `rclone lsf -R --files-only --max-depth 3 --filter-from <set filter> --config /dev/null <source>`.
+    /// Needs no secrets and runs under a hard time limit.
+    static func rcloneLister(binary: URL, timeout: TimeInterval = 20) -> Lister {
+        { set in
+            guard let presets = try? PresetCatalog.all() else { return nil }
+            let lines = FilterBuilder(presets: presets).lines(for: set, projects: [], scope: nil)
+            let dir = FileManager.default.temporaryDirectory.appendingPathComponent("mirror-drill-\(UUID().uuidString)", isDirectory: true)
+            do { try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700]) }
+            catch { return nil }
+            defer { try? FileManager.default.removeItem(at: dir) }
+            let filter = dir.appendingPathComponent("drill.filter")
+            guard (try? FilterBuilder(presets: presets).write(lines, to: filter)) != nil else { return nil }
+            guard let r = await BoundedProcess.output(binary, ["lsf", "-R", "--files-only", "--max-depth", "3",
+                                                               "--filter-from", filter.path, "--config", "/dev/null", set.source.path],
+                                                      timeout: timeout), r.code == 0 else { return nil }
+            return String(decoding: r.output, as: UTF8.self).split(separator: "\n").map(String.init)
+        }
     }
 
-    static func pick(in set: BackupSet, finishedBefore finished: Date?,
-                     loadPresets: () throws -> [Preset] = PresetCatalog.all) -> DrillCandidate? {
-        guard let finished, let matcher = filter(for: set, loadPresets: loadPresets) else { return nil }
-        let keys: [URLResourceKey] = [.isRegularFileKey, .fileSizeKey, .contentModificationDateKey]
-        let files = (try? FileManager.default.contentsOfDirectory(at: set.source, includingPropertiesForKeys: keys,
-                                                                  options: [.skipsHiddenFiles])) ?? []
-        let usable = files.sorted { $0.lastPathComponent < $1.lastPathComponent }.filter { url in
-            let name = url.lastPathComponent
-            guard !name.hasPrefix("."), !matcher.isExcluded(name),   // top-level files: the relative path is the name
-                  let v = try? url.resourceValues(forKeys: Set(keys)), v.isRegularFile == true,
+    private static let plainExtensions: Set<String> = ["txt", "md", "rtf", "csv", "json", "yaml", "yml", "xml", "html", "swift", "py", "js", "ts"]
+
+    /// Hidden anywhere in the path (covers `.git`, `.env`, `.DS_Store`) or any component that is a secret pattern.
+    static func isForbidden(_ path: String) -> Bool {
+        path.split(separator: "/").contains { part in
+            part.hasPrefix(".") || PresetCatalog.secretPatterns.contains { fnmatch($0, String(part), FNM_CASEFOLD) == 0 }
+        }
+    }
+
+    static func pick(in set: BackupSet, finishedBefore finished: Date?, list: Lister) async -> DrillCandidate? {
+        guard let finished, let listed = await list(set) else { return nil }
+        let keys: Set<URLResourceKey> = [.isRegularFileKey, .fileSizeKey, .contentModificationDateKey]
+        let usable = listed.filter { !isForbidden($0) }.compactMap { rel -> (String, URL)? in
+            let url = set.source.appendingPathComponent(rel)
+            guard let v = try? url.resourceValues(forKeys: keys), v.isRegularFile == true,
                   let size = v.fileSize, size > 0, size <= 256 * 1024,
                   let modified = v.contentModificationDate, modified < finished.addingTimeInterval(-60),
-                  !Dataless.isDataless(url) else { return false }
-            return true
+                  !Dataless.isDataless(url) else { return nil }
+            return (rel, url)
         }
-        let best = usable.first { plainExtensions.contains($0.pathExtension.lowercased()) } ?? usable.first
-        return best.map { DrillCandidate(relativePath: "\(MirrorPaths.mirrorPath(set))/\($0.lastPathComponent)", original: $0) }
+        func rank(_ c: (String, URL)) -> (Int, Int, String) {
+            (plainExtensions.contains(c.1.pathExtension.lowercased()) ? 0 : 1, c.0.split(separator: "/").count, c.0)
+        }
+        guard let best = usable.min(by: { rank($0) < rank($1) }) else { return nil }
+        return DrillCandidate(relativePath: "\(MirrorPaths.mirrorPath(set))/\(best.0)", original: best.1)
     }
 }
 

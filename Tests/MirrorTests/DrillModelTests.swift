@@ -79,33 +79,66 @@ struct DrillModelTests {
     }
 }
 
+private let vendoredRclone = URL(fileURLWithPath: #filePath)
+    .deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
+    .appendingPathComponent("vendor/rclone/rclone")
+
+func drillFolder(_ files: [String]) throws -> URL {
+    let d = FileManager.default.temporaryDirectory.appendingPathComponent("mirror-test-\(UUID().uuidString)")
+    for f in files {
+        let u = d.appendingPathComponent(f)
+        try FileManager.default.createDirectory(at: u.deletingLastPathComponent(), withIntermediateDirectories: true)
+        try Data("hello".utf8).write(to: u)
+        try FileManager.default.setAttributes([.modificationDate: Date(timeIntervalSince1970: 1_000_000)], ofItemAtPath: u.path)
+    }
+    return d
+}
+
 @MainActor
 struct DrillPickerTests {
-    func folder(_ files: [String]) throws -> URL {
-        let d = FileManager.default.temporaryDirectory.appendingPathComponent("mirror-test-\(UUID().uuidString)")
-        try FileManager.default.createDirectory(at: d, withIntermediateDirectories: true)
-        for f in files { try Data("hello".utf8).write(to: d.appendingPathComponent(f)) }
-        for f in files { try FileManager.default.setAttributes([.modificationDate: Date(timeIntervalSince1970: 1_000_000)], ofItemAtPath: d.appendingPathComponent(f).path) }
-        return d
-    }
     let finished = Date(timeIntervalSince1970: 2_000_000)
+    func fake(_ names: [String]?) -> DrillFilePicker.Lister { { _ in names } }
 
-    @Test func skipsSecretsExcludesAndGitFiles() throws {
-        let d = try folder([".env", "a.pem", "id_rsa", "key.properties", ".DS_Store", ".gitignore", "build.log", "notes.txt"])
+    @Test func prefersPlainTextAndShallowFiles() async throws {
+        let d = try drillFolder(["a.bin", "b.dat", "z.md", "sub/a.txt"])
+        let c = await DrillFilePicker.pick(in: BackupSet(name: "S", source: d), finishedBefore: finished,
+                                           list: fake(["a.bin", "b.dat", "sub/a.txt", "z.md"]))
+        #expect(c?.original.lastPathComponent == "z.md")
+        #expect(c?.relativePath == "Sets/S/z.md")
+    }
+
+    @Test func secretsGitAndHiddenAreSkippedEvenIfListed() async throws {
+        let d = try drillFolder([".env", "a.pem", "id_rsa", "key.properties", ".gitignore", "sub/prod.key", ".git/config", "ok.txt"])
+        let listed = [".env", "a.pem", "id_rsa", "key.properties", ".gitignore", "sub/prod.key", ".git/config", "keys/x.p12", "ok.txt"]
+        let c = await DrillFilePicker.pick(in: BackupSet(name: "S", source: d), finishedBefore: finished, list: fake(listed))
+        #expect(c?.original.lastPathComponent == "ok.txt")
+        #expect(await DrillFilePicker.pick(in: BackupSet(name: "S", source: d), finishedBefore: finished,
+                                           list: fake([".env", "a.pem", ".git/config", "sub/prod.key"])) == nil)
+    }
+
+    @Test func listerFailureMeansNothingSuitable() async throws {
+        let d = try drillFolder(["notes.txt"])
+        #expect(await DrillFilePicker.pick(in: BackupSet(name: "S", source: d), finishedBefore: finished, list: fake(nil)) == nil)
+        #expect(await DrillFilePicker.pick(in: BackupSet(name: "S", source: d), finishedBefore: nil, list: fake(["notes.txt"])) == nil)
+    }
+
+    @Test func realRcloneAppliesPathClassAndIncludeRules() async throws {
+        let d = try drillFolder(["build/out.txt", "xkeep.dat", "ykeep.dat", "notes/readme.txt", "prod.pem", "app.log"])
         var set = BackupSet(name: "S", source: d)
-        set.rules = [UserRule(pattern: "*.log", action: .exclude)]
-        let c = DrillFilePicker.pick(in: set, finishedBefore: finished)
-        #expect(c?.original.lastPathComponent == "notes.txt")
+        set.rules = [UserRule(pattern: "/prod.pem", action: .include),        // an include must not bring a secret back
+                     UserRule(pattern: "/build/**", action: .exclude),        // path rule
+                     UserRule(pattern: "/[!x]*.dat", action: .exclude),       // class: in rclone `!` is not negation, so this hits xkeep.dat
+                     UserRule(pattern: "*.log", action: .exclude)]
+        let listed = await DrillFilePicker.rcloneLister(binary: vendoredRclone)(set)
+        #expect(Set(listed ?? []) == ["ykeep.dat", "notes/readme.txt", "prod.pem"])   // rclone's own answer, not ours
+        let c = await DrillFilePicker.pick(in: set, finishedBefore: finished, list: DrillFilePicker.rcloneLister(binary: vendoredRclone))
+        #expect(c?.original.lastPathComponent == "readme.txt")   // plain text first; never prod.pem
     }
 
-    @Test func prefersPlainTextOverOtherFiles() throws {
-        let d = try folder(["a.bin", "b.dat", "z.md"])
-        #expect(DrillFilePicker.pick(in: BackupSet(name: "S", source: d), finishedBefore: finished)?.original.lastPathComponent == "z.md")
-    }
-
-    @Test func nothingSuitableIsNil() throws {
-        let d = try folder([".env", "x.key"])
-        #expect(DrillFilePicker.pick(in: BackupSet(name: "S", source: d), finishedBefore: finished) == nil)
+    @Test func missingRcloneMeansNothingSuitable() async throws {
+        let d = try drillFolder(["notes.txt"])
+        let listed = await DrillFilePicker.rcloneLister(binary: URL(fileURLWithPath: "/nonexistent/rclone"))(BackupSet(name: "S", source: d))
+        #expect(listed == nil)
     }
 
     @Test func discardClearsTheKit() throws {
@@ -114,41 +147,6 @@ struct DrillPickerTests {
         m.kitText = "secret"
         m.discard()
         #expect(m.kitText.isEmpty && m.phase == .idle)
-    }
-}
-
-@MainActor
-struct DrillPathRuleTests {
-    func folder(_ files: [String]) throws -> URL {
-        let d = FileManager.default.temporaryDirectory.appendingPathComponent("mirror-test-\(UUID().uuidString)")
-        try FileManager.default.createDirectory(at: d, withIntermediateDirectories: true)
-        for f in files {
-            let u = d.appendingPathComponent(f)
-            try Data("hello".utf8).write(to: u)
-            try FileManager.default.setAttributes([.modificationDate: Date(timeIntervalSince1970: 1_000_000)], ofItemAtPath: u.path)
-        }
-        return d
-    }
-    let finished = Date(timeIntervalSince1970: 2_000_000)
-
-    @Test func anchoredAndGlobstarRulesApply() throws {
-        let d = try folder(["build", "app.log", "notes.txt"])
-        var set = BackupSet(name: "S", source: d)
-        set.rules = [UserRule(pattern: "/build", action: .exclude), UserRule(pattern: "**/*.log", action: .exclude)]
-        #expect(DrillFilePicker.pick(in: set, finishedBefore: finished)?.original.lastPathComponent == "notes.txt")
-    }
-
-    @Test func anIncludeRuleBeforeAnExcludeWins() throws {
-        let d = try folder(["keep.log"])
-        var set = BackupSet(name: "S", source: d)
-        set.rules = [UserRule(pattern: "/keep.log", action: .include), UserRule(pattern: "*.log", action: .exclude)]
-        #expect(DrillFilePicker.pick(in: set, finishedBefore: finished)?.original.lastPathComponent == "keep.log")
-    }
-
-    @Test func presetLoadFailureMeansNothingSuitable() throws {
-        let d = try folder(["notes.txt"])
-        struct Boom: Error {}
-        #expect(DrillFilePicker.pick(in: BackupSet(name: "S", source: d), finishedBefore: finished, loadPresets: { throw Boom() }) == nil)
     }
 }
 
@@ -178,23 +176,38 @@ struct AccessConfirmationTests {
 
     @Test func confirmsWhenTheKickedAgentWritesAFreshPassingReport() async throws {
         let s = try support()
-        let ok = await AccessConfirmation.confirm(support: s, timeout: 3, kick: { AgentAccess.writeReport(support: s, paths: [s]) })
-        #expect(ok)
+        let ok = await AccessConfirmation.confirm(support: s, timeout: 3, kick: { AgentAccess.writeReport(support: s, paths: [s]); return true })
+        #expect(ok == .confirmed)
     }
 
     @Test func aStalePassingReportIsNotEnoughAfterAKick() async throws {
         let s = try support()
         AgentAccess.writeReport(support: s, paths: [s], now: Date().addingTimeInterval(-600))
-        #expect(!(await AccessConfirmation.confirm(support: s, timeout: 0.6, kick: {})))
+        #expect(await AccessConfirmation.confirm(support: s, timeout: 0.6, kick: { true }) == .notConfirmed)
     }
 
     @Test func aFailingReportIsNotConfirmed() async throws {
         let s = try support()
         let missing = URL(fileURLWithPath: "/nonexistent-\(UUID().uuidString)")
-        #expect(!(await AccessConfirmation.confirm(support: s, timeout: 0.6, kick: { AgentAccess.writeReport(support: s, paths: [missing]) })))
+        #expect(await AccessConfirmation.confirm(support: s, timeout: 0.6, kick: { AgentAccess.writeReport(support: s, paths: [missing]); return true }) == .notConfirmed)
     }
 
     @Test func kickstartArgumentsNameTheAgentInTheUsersDomain() {
         #expect(AccessConfirmation.kickstartArguments(uid: 501) == ["kickstart", "gui/501/com.shaikjaleel.mirror.agent"])
+    }
+
+    @Test func aFailedKickstartReturnsAtOnce() async throws {
+        let s = try support()
+        let start = Date()
+        #expect(await AccessConfirmation.confirm(support: s, timeout: 15, kick: { false }) == .kickFailed)
+        #expect(Date().timeIntervalSince(start) < 2)
+    }
+}
+
+struct BoundedOutputTests {
+    @Test func capturesStdoutAndTimesOut() async {
+        let r = await BoundedProcess.output(URL(fileURLWithPath: "/bin/echo"), ["hi"], timeout: 5)
+        #expect(r?.code == 0 && String(decoding: r?.output ?? Data(), as: UTF8.self) == "hi\n")
+        #expect(await BoundedProcess.output(URL(fileURLWithPath: "/bin/sleep"), ["30"], timeout: 0.3) == nil)
     }
 }

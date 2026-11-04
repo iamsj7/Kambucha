@@ -12,7 +12,8 @@ private final class FakeSystem: OnboardingSystem {
     var enableError: (any Error)?
     func fullDiskAccessConfirmed() async -> Bool { fda }
     var checked = 0
-    func checkFullDiskAccessNow() async -> Bool { checked += 1; return fda }
+    var kickOutcome: AccessConfirmation.Outcome?
+    func checkFullDiskAccessNow() async -> AccessConfirmation.Outcome { checked += 1; return kickOutcome ?? (fda ? .confirmed : .notConfirmed) }
     func agentStatus() -> SMAppService.Status { agent }
     func enableAgent() throws { if let enableError { throw enableError }; agent = .enabled }
     func notificationAccess() async -> NotificationAccess { notes }
@@ -37,10 +38,10 @@ struct OnboardingModelTests {
         let sys = FakeSystem()
         let (m, root) = make(sys)
         await m.refresh()
-        #expect(!m.isComplete && m.current == .fullDiskAccess)
-        sys.fda = true; await m.refresh()
-        #expect(m.current == .agent)
+        #expect(!m.isComplete && m.current == .agent)
         m.enableAgent(); await m.refresh()
+        #expect(m.current == .fullDiskAccess)
+        sys.fda = true; await m.refresh()
         #expect(m.current == .notifications)
         await m.allowNotifications()
         #expect(m.current == .firstSet && !m.isComplete)
@@ -65,13 +66,37 @@ struct OnboardingModelTests {
     }
 
     @Test func checkNowKicksTheAgentAndConfirms() async {
-        let sys = FakeSystem()
+        let sys = FakeSystem(); sys.agent = .enabled
         let (m, _) = make(sys)
         await m.checkAccessNow()
         #expect(sys.checked == 1 && !m.isDone(.fullDiskAccess) && !m.isChecking)
         sys.fda = true
         await m.checkAccessNow()
         #expect(m.isDone(.fullDiskAccess))
+    }
+
+    @Test func checkNowNeedsTheAgentFirstAndNeverKicksWithoutIt() async {
+        let sys = FakeSystem()
+        let (m, _) = make(sys)
+        await m.checkAccessNow()
+        #expect(sys.checked == 0 && m.message != nil)
+    }
+
+    @Test func aFailedKickIsAClearMessage() async {
+        let sys = FakeSystem(); sys.agent = .enabled; sys.kickOutcome = .kickFailed
+        let (m, _) = make(sys)
+        await m.checkAccessNow()
+        #expect(m.message != nil && m.kickFailed && !m.isChecking)
+    }
+
+    @Test func theFirstCheckHappensOnceOnly() async {
+        let sys = FakeSystem(); sys.agent = .enabled
+        let (m, _) = make(sys)
+        await m.refresh()
+        await m.firstCheckIfNeeded()
+        await m.firstCheckIfNeeded()
+        await m.refresh()
+        #expect(sys.checked == 1)
     }
 
     @Test func agentNeedingApprovalIsNotDone() async {

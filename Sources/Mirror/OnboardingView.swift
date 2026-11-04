@@ -12,7 +12,7 @@ protocol OnboardingSystem {
     /// Reads the agent's last report (`access.json`). False means not confirmed.
     func fullDiskAccessConfirmed() async -> Bool
     /// Asks launchd to start the agent and waits (bounded) for its report.
-    func checkFullDiskAccessNow() async -> Bool
+    func checkFullDiskAccessNow() async -> AccessConfirmation.Outcome
     func agentStatus() -> SMAppService.Status
     func enableAgent() throws
     func notificationAccess() async -> NotificationAccess
@@ -25,7 +25,7 @@ protocol OnboardingSystem {
 @MainActor
 struct LiveOnboardingSystem: OnboardingSystem {
     func fullDiskAccessConfirmed() async -> Bool { AgentAccess.isConfirmed(support: MirrorPaths.support) }
-    func checkFullDiskAccessNow() async -> Bool { await AccessConfirmation.confirm(support: MirrorPaths.support) }
+    func checkFullDiskAccessNow() async -> AccessConfirmation.Outcome { await AccessConfirmation.confirm(support: MirrorPaths.support) }
     func agentStatus() -> SMAppService.Status { AgentRegistration.status() }
     func enableAgent() throws { try AgentRegistration.enable() }
 
@@ -74,32 +74,66 @@ enum BoundedProcess {
     }
 }
 
+extension BoundedProcess {
+    /// Like `run`, but also returns what the process wrote to stdout (via a temp file, so a full pipe can't stall it).
+    static func output(_ executable: URL, _ arguments: [String], timeout: TimeInterval) async -> (code: Int32, output: Data)? {
+        let file = FileManager.default.temporaryDirectory.appendingPathComponent("mirror-out-\(UUID().uuidString)")
+        guard FileManager.default.createFile(atPath: file.path, contents: nil, attributes: [.posixPermissions: 0o600]),
+              let handle = try? FileHandle(forWritingTo: file) else { return nil }
+        defer { try? handle.close(); try? FileManager.default.removeItem(at: file) }
+        let code: Int32? = await Task.detached {
+            let p = Process()
+            p.executableURL = executable
+            p.arguments = arguments
+            p.standardInput = FileHandle.nullDevice; p.standardOutput = handle; p.standardError = FileHandle.nullDevice
+            do { try p.run() } catch { return nil }
+            let deadline = Date().addingTimeInterval(timeout)
+            while p.isRunning {
+                if Date() >= deadline {
+                    p.terminate()
+                    try? await Task.sleep(for: .milliseconds(200))
+                    if p.isRunning { kill(p.processIdentifier, SIGKILL) }
+                    return nil
+                }
+                try? await Task.sleep(for: .milliseconds(25))
+            }
+            return p.terminationStatus
+        }.value
+        guard let code else { return nil }
+        return (code, (try? Data(contentsOf: file)) ?? Data())
+    }
+}
+
 /// Proves the launchd agent's own Full Disk Access. A child of this app can inherit the app's grant,
 /// so instead launchd is asked to start the agent, which writes `access.json` at the start of each
-/// run (`AgentAccess.writeReport`). Only a fresh, passing report counts.
+/// run (`AgentAccess.writeReport`). Only a fresh, passing report counts. Kicking starts a real run,
+/// so callers do it only on the owner's request and on the first onboarding check.
 enum AccessConfirmation {
+    enum Outcome: Equatable { case confirmed, notConfirmed, kickFailed }
+
     static func kickstartArguments(uid: uid_t) -> [String] { ["kickstart", "gui/\(uid)/\(MirrorCore.agentLabel)"] }
 
-    static func launchctlKick(uid: uid_t = getuid(), timeout: TimeInterval = 5) async {
-        _ = await BoundedProcess.run(URL(fileURLWithPath: "/bin/launchctl"), kickstartArguments(uid: uid), timeout: timeout)
+    /// True when launchctl accepted the request. It fails at once if the agent isn't registered.
+    static func launchctlKick(uid: uid_t = getuid(), timeout: TimeInterval = 5) async -> Bool {
+        await BoundedProcess.run(URL(fileURLWithPath: "/bin/launchctl"), kickstartArguments(uid: uid), timeout: timeout) == 0
     }
 
     /// Kicks, then waits up to `timeout` seconds (15 in the app) for a report written after the kick.
     static func confirm(support: URL, timeout: TimeInterval = 15,
-                        kick: () async -> Void = { await launchctlKick() }) async -> Bool {
+                        kick: () async -> Bool = { await launchctlKick() }) async -> Outcome {
         let started = Date()
-        await kick()
+        guard await kick() else { return .kickFailed }
         let deadline = started.addingTimeInterval(timeout)
         while true {
-            if AgentAccess.isConfirmed(support: support, notBefore: started.addingTimeInterval(-1)) { return true }
-            if Date() >= deadline { return false }
+            if AgentAccess.isConfirmed(support: support, notBefore: started.addingTimeInterval(-1)) { return .confirmed }
+            if Date() >= deadline { return .notConfirmed }
             try? await Task.sleep(for: .milliseconds(250))
         }
     }
 }
 
 enum OnboardingStep: Int, CaseIterable, Identifiable {
-    case fullDiskAccess, agent, notifications, firstSet
+    case agent, fullDiskAccess, notifications, firstSet
     var id: Int { rawValue }
     var title: String {
         switch self {
@@ -127,6 +161,8 @@ final class OnboardingModel {
     private(set) var message: String?
     private(set) var isChecking = false
     private(set) var checkFailed = false
+    private(set) var kickFailed = false
+    @ObservationIgnored private var firstCheckDone = false
 
     @ObservationIgnored private let system: any OnboardingSystem
     @ObservationIgnored private let store: ConfigStore
@@ -158,14 +194,33 @@ final class OnboardingModel {
         done = d
     }
 
-    /// Starts the agent through launchd and waits up to 15 seconds for its access report.
+    /// Asks launchd to start the agent and waits up to 15 seconds for its access report. This starts a
+    /// real run, so it is only called from "Check Again" and the first check. Needs the agent registered.
     func checkAccessNow() async {
         guard !isChecking else { return }
+        guard system.agentStatus() == .enabled else {
+            message = "Turn on background backups first. Mirror checks Full Disk Access through that helper."
+            return
+        }
         isChecking = true
-        let ok = await system.checkFullDiskAccessNow()
+        let outcome = await system.checkFullDiskAccessNow()
         isChecking = false
-        checkFailed = !ok
-        if ok { done.insert(.fullDiskAccess) } else { done.remove(.fullDiskAccess) }
+        checkFailed = outcome != .confirmed
+        kickFailed = outcome == .kickFailed
+        switch outcome {
+        case .confirmed: done.insert(.fullDiskAccess); message = nil
+        case .notConfirmed: done.remove(.fullDiskAccess)
+        case .kickFailed:
+            done.remove(.fullDiskAccess)
+            message = "Mirror couldn't start its background helper. Check that it is turned on in Login Items, then try again."
+        }
+    }
+
+    /// The one automatic check, once the helper is on and Full Disk Access isn't confirmed yet.
+    func firstCheckIfNeeded() async {
+        guard !firstCheckDone, system.agentStatus() == .enabled, !isDone(.fullDiskAccess) else { return }
+        firstCheckDone = true
+        await checkAccessNow()
     }
 
     func openFullDiskAccess() { system.openFullDiskAccessPane() }
@@ -252,10 +307,11 @@ struct OnboardingView: View {
             // Grants happen in System Settings, so look again once a second while this is open.
             while !Task.isCancelled {
                 await model.refresh()
+                await model.firstCheckIfNeeded()
                 try? await Task.sleep(for: .seconds(1))
             }
         }
-        .onChange(of: scenePhase) { if scenePhase == .active, !model.isDone(.fullDiskAccess) { Task { await model.checkAccessNow() } } }
+        .onChange(of: scenePhase) { if scenePhase == .active { Task { await model.refresh() } } }   // reads only; never kicks
     }
 }
 
@@ -285,7 +341,7 @@ private struct StepRow: View {
     private var explanation: String {
         switch step {
         case .fullDiskAccess:
-            (model.checkFailed ? "Not confirmed yet. " : "") + "macOS protects folders like Documents and Desktop. Mirror needs Full Disk Access to back them up. Click the button, then switch on Mirror in the list."
+            (model.checkFailed ? "Not confirmed yet. " : "") + "This comes after turning on background backups, because the background helper is what needs the access and Mirror checks through it. Click the button, switch on Mirror in the list, then choose Check Again."
         case .agent:
             model.agentNeedsApproval
                 ? "macOS needs your approval. Switch on Mirror in Login Items, then come back."
