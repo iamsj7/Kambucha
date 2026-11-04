@@ -125,4 +125,56 @@ struct PathGuardTests {
         #expect(PathGuard.sanitizedComponent("a/b:c") == "a-b-c")
         #expect(PathGuard.sanitizedComponent("..") == "Set")
     }
+
+    @Test func rejectsSourceContainingICloudOrRoot() throws {
+        let e = try Env()
+        let s = e.set("A", e.base)
+        fails(.sourceContainsBackupRoot) { try e.guardian.validateNewSet(s, existing: []) }
+        fails(.sourceContainsBackupRoot) {
+            try e.guardian.validateRun(s, destination: dest, marker: RootMarker(sets: [s.id: "A"]),
+                                       sampleFileCount: 1, state: SetState())
+        }
+    }
+
+    @Test func caseVariantPathsAreCaught() throws {
+        let e = try Env()
+        let up = e.set("A", e.icloud.deletingLastPathComponent().appendingPathComponent("ICLOUD/Docs"))
+        // Only meaningful where the volume is case-insensitive (default APFS); the guard must not rely on it.
+        _ = try e.dir("iCloud/Docs")
+        fails(.sourceInsideICloud) { try e.guardian.validateNewSet(up, existing: []) }
+        fails(.destinationOutsideRoot) {
+            try e.guardian.assertInsideRoot(e.base.appendingPathComponent("ICLOUD/MAC BACKUP/../x"))
+        }
+        try e.guardian.assertInsideRoot(e.base.appendingPathComponent("ICLOUD/MAC BACKUP/Sets/A"))
+        _ = try e.dir("src/Proj/sub")
+        let a = e.set("A", try e.dir("src/Proj")), b = e.set("B", e.base.appendingPathComponent("SRC/proj/sub"))
+        fails(.setsOverlap("A")) { try e.guardian.validateNewSet(b, existing: [a]) }
+    }
+
+    @Test func rejectsDuplicateSetNames() throws {
+        let e = try Env()
+        let a = e.set("Work", try e.dir("one"))
+        let b = e.set("work", try e.dir("two"))
+        fails(.setNameTaken("Work")) { try e.guardian.validateNewSet(b, existing: [a]) }
+        var same = a; same.source = try e.dir("three")
+        try e.guardian.validateNewSet(same, existing: [a])
+    }
+
+    @Test func symlinkedSourceIntoICloudRejected() throws {
+        let e = try Env()
+        let target = try e.dir("iCloud/Docs")
+        let link = e.base.appendingPathComponent("link")
+        try FileManager.default.createSymbolicLink(at: link, withDestinationURL: target)
+        fails(.sourceInsideICloud) { try e.guardian.validateNewSet(e.set("A", link), existing: []) }
+    }
+
+    @Test func symlinkedMirrorFolderEscapingRootRejected() throws {
+        let e = try Env()
+        let outside = try e.dir("outside")
+        _ = try e.dir("iCloud/Mac Backup/Sets")
+        try FileManager.default.createSymbolicLink(at: e.root.appendingPathComponent("Sets/A"),
+                                                   withDestinationURL: outside)
+        let s = e.set("A", try e.dir("src"))
+        fails(.destinationOutsideRoot) { try e.guardian.validateNewSet(s, existing: []) }
+    }
 }

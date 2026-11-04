@@ -1,7 +1,7 @@
 import Foundation
 
 public enum GuardFailure: Error, Equatable {
-    case sourceMissing, sourceUnreadable, sourceInsideICloud, setsOverlap(String)
+    case sourceMissing, sourceUnreadable, sourceInsideICloud, sourceContainsBackupRoot, setsOverlap(String), setNameTaken(String)
     case iCloudUnavailable, destinationOutsideRoot, destinationUnclaimed
     case sourceSuspiciouslyEmpty(now: Int, last: Int)
 }
@@ -25,6 +25,7 @@ public struct PathGuard: Sendable {
         try checkSource(set)
         let mine = Self.resolved(set.source)
         for other in existing where other.id != set.id {
+            if other.name.caseInsensitiveCompare(set.name) == .orderedSame { throw GuardFailure.setNameTaken(other.name) }
             let theirs = Self.resolved(other.source)
             if Self.isSameOrInside(mine, theirs) || Self.isSameOrInside(theirs, mine) {
                 throw GuardFailure.setsOverlap(other.name)
@@ -74,7 +75,7 @@ public struct PathGuard: Sendable {
         }
         let url = backupRoot.appendingPathComponent(MirrorPaths.mirrorPath(set), isDirectory: true)
         let sets = Self.resolved(backupRoot.appendingPathComponent("Sets", isDirectory: true))
-        guard Self.resolved(url).deletingLastPathComponent().path == sets.path else {
+        guard Self.resolved(url).deletingLastPathComponent().path.lowercased() == sets.path.lowercased() else {
             throw GuardFailure.destinationOutsideRoot
         }
         return url
@@ -93,13 +94,18 @@ public struct PathGuard: Sendable {
         if Self.isSameOrInside(Self.resolved(set.source), Self.resolved(iCloudDrive)) {
             throw GuardFailure.sourceInsideICloud
         }
+        let src = Self.resolved(set.source)
+        if Self.isSameOrInside(Self.resolved(iCloudDrive), src) || Self.isSameOrInside(Self.resolved(backupRoot), src) {
+            throw GuardFailure.sourceContainsBackupRoot
+        }
     }
 
     static func resolved(_ url: URL) -> URL { url.standardizedFileURL.resolvingSymlinksInPath().standardizedFileURL }
 
     /// True when `child` equals `parent` or lies beneath it, compared by whole path components.
     static func isSameOrInside(_ child: URL, _ parent: URL) -> Bool {
-        let c = child.pathComponents, p = parent.pathComponents
+        // Case-insensitive: default APFS is, and over-matching on a case-sensitive volume only errs safe.
+        let c = child.pathComponents.map { $0.lowercased() }, p = parent.pathComponents.map { $0.lowercased() }
         return c.count >= p.count && Array(c.prefix(p.count)) == p
     }
 }
