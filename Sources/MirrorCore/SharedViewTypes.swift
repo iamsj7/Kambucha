@@ -21,9 +21,12 @@ public struct PreviewGroup: Identifiable, Equatable, Sendable {
 public struct PreviewResult: Equatable, Sendable {
     public var includedBytes: Int64; public var skippedBytes: Int64; public var includedFiles: Int
     public var groups: [PreviewGroup]; public var decisions: [ReviewItem]
-    public init(includedBytes: Int64, skippedBytes: Int64, includedFiles: Int, groups: [PreviewGroup], decisions: [ReviewItem]) {
+    /// What the preview couldn't look at, said plainly. None of it stops a backup.
+    public var warnings: [String]
+    public init(includedBytes: Int64, skippedBytes: Int64, includedFiles: Int, groups: [PreviewGroup], decisions: [ReviewItem],
+                warnings: [String] = []) {
         self.includedBytes = includedBytes; self.skippedBytes = skippedBytes; self.includedFiles = includedFiles
-        self.groups = groups; self.decisions = decisions
+        self.groups = groups; self.decisions = decisions; self.warnings = warnings
     }
 }
 

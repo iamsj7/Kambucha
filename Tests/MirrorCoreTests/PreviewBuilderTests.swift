@@ -68,6 +68,27 @@ import Foundation
         #expect(r.decisions.first?.kind == .secretInExcluded)
     }
 
+    @Test func oneBadRepoIsAWarningAndTheOthersStillCount() async throws {
+        let box = try ArchiveSandbox(); let set = try fixture(box)
+        // `app` is a real repo with a file tracked in `dist/`; `broken/.git` is a folder git can't read.
+        try box.write("broken/package.json", "{}", under: set.source)
+        try box.write("broken/dist/out.js", "o", under: set.source)
+        try box.write("broken/.git/junk", "not a repo", under: set.source)
+        let app = set.source.appendingPathComponent("app")
+        for arguments in [["init", "-q"], ["add", "-f", "dist/out.js"]] {
+            let git = Process()
+            git.executableURL = URL(fileURLWithPath: "/usr/bin/git")
+            git.arguments = ["-C", app.path] + arguments
+            try git.run(); git.waitUntilExit()
+            #expect(git.terminationStatus == 0)
+        }
+        let r = try await builder().build(set: set)
+        #expect(r.warnings.count == 1)
+        #expect(r.warnings.first?.contains("broken") == true)
+        #expect(r.decisions.map(\.kind) == [.trackedInExcluded])
+        #expect(r.includedFiles > 0)
+    }
+
     @Test func newExclusionOfMirroredFilesReported() async throws {
         let box = try ArchiveSandbox(); let set = try fixture(box)
         let mirror = try box.dir("mirror")

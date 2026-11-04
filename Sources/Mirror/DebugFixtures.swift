@@ -73,7 +73,8 @@ enum DebugFixtures {
             return PreviewResult(includedBytes: inc.reduce(0) { $0 + $1.bytes }, skippedBytes: all.filter { !$0.included }.reduce(0) { $0 + $1.bytes },
                                  includedFiles: inc.reduce(0) { $0 + $1.fileCount }, groups: all,
                                  decisions: [ReviewItem(id: "1", path: "vendor/config/.env", kind: .secretInExcluded),
-                                             ReviewItem(id: "2", path: "vendor/autoload.php", kind: .trackedInExcluded)])
+                                             ReviewItem(id: "2", path: "vendor/autoload.php", kind: .trackedInExcluded)],
+                                 warnings: ["Git couldn't read \"old-client/site\", so files it tracks in excluded folders aren't listed here."])
         }
         func rule(for group: PreviewGroup, included: Bool) -> UserRule { UserRule(pattern: group.pattern, action: included ? .include : .exclude) }
     }
