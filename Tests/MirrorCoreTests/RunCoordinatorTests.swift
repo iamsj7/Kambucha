@@ -1849,15 +1849,106 @@ private final class Harness: @unchecked Sendable {
 
     @Test func aWholeSetOverflowIsProvenInTheSameRunWithOneHash() async throws {
         let h = try Harness(); try h.prime(); h.change("flowapp/a.txt", rescan: true)
-        let m = h.backupRoot.appendingPathComponent("Sets/x/flowapp")
+        let m = h.backupRoot.appendingPathComponent("Sets/x")
         try FileManager.default.createDirectory(at: m, withIntermediateDirectories: true)
-        try Data().write(to: m.appendingPathComponent("a.txt"))
+        for name in many() { try Data().write(to: m.appendingPathComponent(name)) }   // so the deep check hashes them
         h.rclone.script(copied: many(), planned: many())
         await h.run()
         #expect(try h.state.hashWholeSet == false)
         #expect(h.rclone.checks.contains { $0.logFile.lastPathComponent == "deep-size.log" })
         #expect(!h.rclone.checks.contains { $0.logFile.lastPathComponent == "quick-hash.log" })
         #expect(try h.latest()?.status == .success)
+    }
+
+    /// Nothing clears unless a hash of that file passed.
+    private func flagged(_ h: Harness, mirrored: [String] = [], freed: [String] = []) throws {
+        try h.prime()
+        var s = try h.state; s.hashWholeSet = true; try h.store.save(s, for: h.pair)
+        let m = h.backupRoot.appendingPathComponent("Sets/x/flowapp")
+        try FileManager.default.createDirectory(at: m, withIntermediateDirectories: true)
+        for name in mirrored + freed {
+            try Data().write(to: m.appendingPathComponent(name))
+            try Data().write(to: h.source.appendingPathComponent("flowapp/\(name)"))
+        }
+        h.freed = Set(freed)
+    }
+
+    @Test func aFileTheDeepCheckDidNotHashStaysOwed() async throws {
+        let h = try Harness(); try flagged(h)
+        var s = try h.state; s.verifyOwed = ["flowapp/a.txt"]; s.mismatched = ["flowapp/a.txt"]; try h.store.save(s, for: h.pair)
+        await h.run()   // a.txt isn't in the mirror, so the deep check's list can't have held it
+        #expect(try h.state.verifyOwed == ["flowapp/a.txt"])
+        #expect(try h.state.mismatched == ["flowapp/a.txt"])
+        #expect(try h.state.freedSince.isEmpty)   // owed, but not evicted: the next run can hash it
+    }
+
+    @Test func evictedFilesTheFlagStoodForAreOwedAfterItsDeepCheck() async throws {
+        let h = try Harness()
+        let names = (0..<(RunCoordinator.freedSample + 5)).map { "e\($0).txt" }
+        try flagged(h, freed: names)
+        await h.run()
+        let s = try h.state
+        #expect(s.hashWholeSet == false)
+        #expect(s.verifyOwed.count == 5)   // the rest were sampled, so hashed
+        #expect(Set(s.freedSince.keys) == Set(s.verifyOwed))
+    }
+
+    @Test func aRoutineDeepCheckOwesNothingForEvictedFiles() async throws {
+        let h = try Harness(); try h.prime()
+        let m = h.backupRoot.appendingPathComponent("Sets/x/flowapp")
+        try FileManager.default.createDirectory(at: m, withIntermediateDirectories: true)
+        let names = (0..<(RunCoordinator.freedSample + 5)).map { "e\($0).txt" }
+        for name in names {
+            try Data().write(to: m.appendingPathComponent(name))
+            try Data().write(to: h.source.appendingPathComponent("flowapp/\(name)"))
+        }
+        h.freed = Set(names)
+        var s = try h.state
+        s.lastFullPass = h.now.addingTimeInterval(-25 * hour); s.lastDeepCheck = h.now.addingTimeInterval(-31 * 24 * hour)
+        try h.store.save(s, for: h.pair)
+        await h.run()
+        #expect(try h.state.verifyOwed.isEmpty)
+        #expect(h.downloader.requested.isEmpty)
+    }
+
+    @Test func aWholeSetDeepRunPastTheFreedBoundKeepsTheFlag() async throws {
+        let h = try Harness()
+        let names = (0...RunCoordinator.maxFreed).map { "k\($0)" }
+        try flagged(h, freed: names)
+        h.change("flowapp/a.txt", rescan: true)
+        var s = try h.state
+        s.verifyOwed = names.map { "flowapp/\($0)" }
+        for name in names.dropLast() { s.freedSince["flowapp/\(name)"] = h.now }
+        try h.store.save(s, for: h.pair)
+        await h.run()
+        let after = try h.state
+        #expect(after.freedSince.count == RunCoordinator.maxFreed)
+        #expect(after.hashWholeSet)
+        #expect(after.isBackedUp == false)
+    }
+
+    @Test func aFullFreedListWaitsInsteadOfRepeatingDeepChecks() async throws {
+        let h = try Harness(); try h.prime()
+        var s = try h.state
+        s.hashWholeSet = true
+        for i in 0..<RunCoordinator.maxFreed {
+            s.freedSince["flowapp/k\(i)"] = h.now; s.verifyOwed.append("flowapp/k\(i)")
+        }
+        try h.store.save(s, for: h.pair)
+        h.freed = Set((0..<RunCoordinator.maxFreed).map { "k\($0)" })
+        await h.run()
+        #expect(h.rclone.allCalls == 0)
+        #expect(try h.state.hashWholeSet)
+    }
+
+    @Test func anOverflowClassifiesEvictedFilesBeforeDroppingThem() async throws {
+        let h = try Harness(); try h.prime(); h.change("flowapp/a.txt")
+        h.freed = ["old.txt"]
+        h.rclone.script(real: [.permanent], planned: many() + ["old.txt"])
+        await h.run()
+        #expect(try h.state.freedSince.keys.sorted() == ["flowapp/old.txt"])
+        #expect(try h.state.verifyOwed == ["flowapp/old.txt"])
+        #expect(try h.state.hashWholeSet)
     }
 
     @Test func theFreedListIsBoundedAndTheFlagCoversTheRest() async throws {

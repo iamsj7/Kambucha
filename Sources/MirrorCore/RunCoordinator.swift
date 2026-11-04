@@ -431,7 +431,7 @@ public final class RunCoordinator: Sendable {
         }
 
         // Saved first, so a kill during the sync can't lose a hold or what it was about to copy.
-        owe(planned, state: &state)
+        owe(planned, job, set: set, state: &state)
         try persist(state, pair)
 
         var perSlice: [LogSummary] = []
@@ -440,7 +440,7 @@ public final class RunCoordinator: Sendable {
             Self.add(result.summary, to: &tally.summary)
             perSlice.append(result.summary)
             // Whatever came of it: a failed sync can still have copied files.
-            owe(Self.touched(by: result.summary).map { Self.inSet($0, slice) }, state: &state)
+            owe(Self.touched(by: result.summary).map { Self.inSet($0, slice) }, job, set: set, state: &state)
             try persist(state, pair)
             switch result.outcome {
             case .success:
@@ -468,7 +468,7 @@ public final class RunCoordinator: Sendable {
         // A deep check hashes every file on disk, so a Quick hash beside it would do the work twice.
         let deepDue = plan.isDeepDue && plan.isDailyPass && !holding
         let deepFollows = scope == .wholeSet && (state.hashWholeSet || deepDue)
-        var awaitingDeep: (slice: Slice, result: VerifyResult)?
+        var awaitingDeep: (slice: Slice, result: VerifyResult, names: [String])?
         for (slice, summary) in zip(slices, perSlice) {
             // Carried files that have since left the source, or the rules, have nothing to prove.
             let owed = Self.within(slice, carried).filter {
@@ -481,8 +481,8 @@ public final class RunCoordinator: Sendable {
             Self.merge(result, of: slice, into: &verified)
             guard result.checksClean else { continue }   // a mismatch stays owed, or the next run would call it clean
             // With a deep check to come nothing has been hashed yet, so nothing is proven yet either.
-            if deepFollows { awaitingDeep = (slice, result); continue }
-            prove(slice, result, mirror: mirrorRoot(set), state: &state)
+            if deepFollows { awaitingDeep = (slice, result, names); continue }
+            prove(slice, result, job, set: set, state: &state)
             try persist(state, pair)
         }
         tally.filesChecked = verified.matchingFiles
@@ -494,9 +494,25 @@ public final class RunCoordinator: Sendable {
             verified.differences += deep.differences
             verified.checksClean = verified.checksClean && deep.checksClean
             verified.differingPaths += deep.differingPaths
-            if deep.checksClean {
-                if let awaitingDeep { prove(awaitingDeep.slice, awaitingDeep.result, mirror: mirrorRoot(set), state: &state) }
+            if verified.checksClean {
+                // Lowered first, so whatever the steps below can't hold raises it again and it stays up.
+                let flagged = state.hashWholeSet
+                state.hashWholeSet = false
+                if let awaitingDeep {
+                    var result = awaitingDeep.result
+                    // Nothing clears unless a hash of that file passed, so what the deep check left out stays.
+                    let hashed = deep.hashedPaths
+                    result.skippedFreed += awaitingDeep.names.filter { name in
+                        !result.skippedFreed.contains(name) && hashed.map { !$0.contains(Self.mirrorName(name)) } ?? false
+                    }
+                    prove(awaitingDeep.slice, result, job, set: set, state: &state)
+                }
                 track(deep.audit, mirror: mirrorRoot(set), state: &state)
+                if flagged {
+                    // The flag may have stood for any of these, and no hash reached them.
+                    let live = deep.unhashedFreed.filter { Self.existsInSource($0, set.source) && !matcher.isExcluded($0) }
+                    owe(keepFreed(live, state: &state), job, set: set, state: &state)
+                }
             }
             flagFreed(state: &state)
             deepRan = true
@@ -505,14 +521,12 @@ public final class RunCoordinator: Sendable {
             tally.verification = "Quick check found \(verified.differences) differences"
             // A deep check can name files no earlier run owed. What's gone from the source is the sync's to remove.
             let named = Set(verified.differingPaths).filter { Self.existsInSource($0, set.source) }
-            owe(Array(named), state: &state)
+            owe(Array(named), job, set: set, state: &state)
             if await changedDuringRun(set, verified, since: batch.latestEventID) { throw Stop.changedDuringRun }
             state.mismatched = Set(state.mismatched).union(named).sorted()
             throw Stop.verificationFailed(differences: verified.differences)
         }
         tally.verification = deepRan ? "Quick and deep checks passed" : "Quick check passed"
-        // The list gave up on what it couldn't hold, and only a whole-set check that ran can stand in for it.
-        if deepRan { state.hashWholeSet = false }
 
         try await reconcileUploads(job, set: set, state: &state, tally: &tally)
         finish(job, plan: plan, scope: scope, batch: batch, verified: verified, holding: holding, deepRan: deepRan, state: &state)
@@ -520,9 +534,9 @@ public final class RunCoordinator: Sendable {
     }
 
     /// Adds to what's owed. Past the bound the flag takes over from the list, except for files only
-    /// the list can speak for: an evicted file a whole-set check can't hash, and a recorded mismatch.
-    /// The flag is the record of an overflow, so no caller has to carry one.
-    private func owe(_ paths: [String], state: inout SetState) {
+    /// the list can speak for: an evicted file, which a whole-set check can't hash, and a recorded
+    /// mismatch. The flag is the record of an overflow, so no caller has to carry one.
+    private func owe(_ paths: [String], _ job: Job, set: BackupSet, state: inout SetState) {
         guard !paths.isEmpty else { return }
         let all = Set(state.verifyOwed).union(paths)
         guard all.count > Self.maxOwed else {
@@ -530,26 +544,19 @@ public final class RunCoordinator: Sendable {
             return
         }
         state.hashWholeSet = true
+        if job.isLocal {
+            let mirror = mirrorRoot(set)
+            _ = keepFreed(all.sorted().filter { verifier.isFreed(mirror.appendingPathComponent($0)) }, state: &state)
+        }
         state.verifyOwed = all.intersection(Set(state.freedSince.keys).union(state.mismatched)).sorted()
     }
 
-    /// A slice passed its checks: what it owed is proven, and its audit carries on in the upload
-    /// tracking. Two things prove nothing and stay owed: a file the audit couldn't find, and one
-    /// iCloud evicted, which was never hashed. Past its bound, the flag stands in for an evicted file.
-    private func prove(_ slice: Slice, _ result: VerifyResult, mirror: URL, state: inout SetState) {
-        let prefix = slice.folder.map { $0 + "/" } ?? ""
-        let freed = result.skippedFreed.map { Self.inSet($0, slice) }
-        let unhashed = Set(freed)
-        state.verifyOwed.removeAll { $0.hasPrefix(prefix) }
-        state.mismatched.removeAll { $0.hasPrefix(prefix) && !unhashed.contains($0) }
-        track(result.audit, mirror: mirror, state: &state)
-        let root = mirror.path + "/"
-        let lost = result.audit.missing.map { $0.hasPrefix(root) ? String($0.dropFirst(root.count)) : $0 }
-        let missing = Self.within(slice, lost).filter { Self.existsInSource($0, slice.source) }.map { Self.inSet($0, slice) }
-
+    /// Enters evicted files in their list and returns those it held. Past the bound the flag stands
+    /// in for the rest, and the next deep check names them again.
+    private func keepFreed(_ paths: [String], state: inout SetState) -> [String] {
         let now = clock()
         var kept: [String] = []
-        for path in freed {
+        for path in paths {
             if state.freedSince[path] != nil || state.freedSince.count < Self.maxFreed {
                 state.freedSince[path] = state.freedSince[path] ?? now
                 kept.append(path)
@@ -557,7 +564,28 @@ public final class RunCoordinator: Sendable {
                 state.hashWholeSet = true
             }
         }
-        owe(missing + kept, state: &state)
+        return kept
+    }
+
+    /// A slice passed its checks: what it owed is proven, and its audit carries on in the upload
+    /// tracking. What wasn't hashed proves nothing and stays owed, as does a file the audit couldn't
+    /// find. Only one that's really evicted waits for iCloud. The others can be hashed next run.
+    private func prove(_ slice: Slice, _ result: VerifyResult, _ job: Job, set: BackupSet, state: inout SetState) {
+        let mirror = mirrorRoot(set)
+        let prefix = slice.folder.map { $0 + "/" } ?? ""
+        let unproven = result.skippedFreed.map { Self.inSet($0, slice) }
+        let unhashed = Set(unproven)
+        state.verifyOwed.removeAll { $0.hasPrefix(prefix) }
+        state.mismatched.removeAll { $0.hasPrefix(prefix) && !unhashed.contains($0) }
+        track(result.audit, mirror: mirror, state: &state)
+        let root = mirror.path + "/"
+        let lost = result.audit.missing.map { $0.hasPrefix(root) ? String($0.dropFirst(root.count)) : $0 }
+        let missing = Self.within(slice, lost).filter { Self.existsInSource($0, slice.source) }.map { Self.inSet($0, slice) }
+
+        let evicted = unproven.filter { job.isLocal && verifier.isFreed(mirror.appendingPathComponent($0)) }
+        let kept = keepFreed(evicted, state: &state)
+        let onDisk = unproven.filter { !Set(evicted).contains($0) }
+        owe(missing + kept + onDisk, job, set: set, state: &state)
         let owed = Set(state.verifyOwed)
         state.freedSince = state.freedSince.filter { owed.contains($0.key) }
     }
@@ -1004,10 +1032,14 @@ public final class RunCoordinator: Sendable {
         return lstat(url.path, &st) == 0
     }
 
+    /// What a local mirror calls a path from rclone's log.
+    private static func mirrorName(_ path: String) -> String {
+        path.hasSuffix(".rclonelink") ? String(path.dropLast(".rclonelink".count)) : path
+    }
+
     /// Rclone's `x.rclonelink` is a link called `x` in the source.
     private static func existsInSource(_ path: String, _ source: URL) -> Bool {
-        let name = path.hasSuffix(".rclonelink") ? String(path.dropLast(".rclonelink".count)) : path
-        return exists(source.appendingPathComponent(name))
+        exists(source.appendingPathComponent(mirrorName(path)))
     }
 
     private static func describe(_ scope: RunScope) -> String {
