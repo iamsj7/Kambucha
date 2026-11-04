@@ -4,6 +4,13 @@ import Foundation
 
 private let hour: TimeInterval = 3600
 
+/// For a second set saved straight to the store, which `Harness.save` doesn't see.
+private func accepted(_ set: BackupSet) -> BackupSet {
+    var s = set
+    s.acceptPreview()
+    return s
+}
+
 private final class FakeRclone: RcloneRunning, @unchecked Sendable {
     private let lock = NSLock()
     private var _syncs: [SyncRequest] = [], _checks: [CheckRequest] = []
@@ -265,7 +272,9 @@ private final class Harness: @unchecked Sendable {
     func session(_ d: Destination) -> FakeSession? { lock.withLock { _sessions[d.id] } }
     func setSession(_ d: Destination, _ s: FakeSession) { lock.withLock { _sessions[d.id] = s } }
 
-    func save(extra: [Destination] = []) throws {
+    /// Accepted, as nearly every test wants a set that may run.
+    func save(extra: [Destination] = [], accepted: Bool = true) throws {
+        set.acceptedFingerprint = accepted ? set.previewFingerprint : nil
         try store.saveSets([set])
         try store.saveDestinations([iCloudDest] + extra)
     }
@@ -591,7 +600,7 @@ private final class Harness: @unchecked Sendable {
         let h = try Harness()
         var other = BackupSet(name: "y", source: h.source.appendingPathComponent("flowapp"))
         other.isPaused = true
-        try h.store.saveSets([h.set, other])
+        try h.store.saveSets([h.set, accepted(other)])
         await h.run()
         #expect(h.rclone.allCalls == 0)
         #expect(try RootMarker.load(backupRoot: h.backupRoot) == nil)
@@ -1142,7 +1151,7 @@ private final class Harness: @unchecked Sendable {
         try Data().write(to: second.source.appendingPathComponent("p/f"))
         second.destinationIDs = [google.id]
         h.set.destinationIDs = [google.id, drive.id]
-        try h.store.saveSets([h.set, second]); try h.store.saveDestinations([google, drive])
+        try h.store.saveSets([h.set, accepted(second)]); try h.store.saveDestinations([google, drive])
         h.setSession(google, FakeSession(endpoint: "g:Mac Backup")); h.setSession(drive, FakeSession(endpoint: "o:Mac Backup"))
         let marker = try JSONEncoder().encode(RootMarker(sets: [h.set.id: "x", second.id: "y"]))
         h.files.put(marker, at: "g:Mac Backup/.mirror-root"); h.files.put(marker, at: "o:Mac Backup/.mirror-root")
@@ -1227,7 +1236,7 @@ private final class Harness: @unchecked Sendable {
         var other = BackupSet(name: "y", source: h.root.appendingPathComponent("src2"))
         try FileManager.default.createDirectory(at: other.source, withIntermediateDirectories: true)
         other.destinationIDs = [h.iCloudDest.id]
-        try h.store.saveSets([h.set, other])
+        try h.store.saveSets([h.set, accepted(other)])
         await h.run(RunCommand(setID: h.set.id, force: true))
         #expect(h.rclone.realSyncs.map(\.destination) == [h.mirror])
         #expect(try h.latest()?.trigger == .manual)
@@ -1531,7 +1540,7 @@ private final class Harness: @unchecked Sendable {
         var second = BackupSet(name: "y", source: h.root.appendingPathComponent("src2"))
         try FileManager.default.createDirectory(at: second.source.appendingPathComponent("p"), withIntermediateDirectories: true)
         second.destinationIDs = [d.id]; h.set.destinationIDs = [d.id]
-        try h.store.saveSets([h.set, second]); try h.store.saveDestinations([d])
+        try h.store.saveSets([h.set, accepted(second)]); try h.store.saveDestinations([d])
         h.setSession(d, FakeSession(endpoint: "c:"))
         let a = PairID(set: h.set.id, destination: d.id), b = PairID(set: second.id, destination: d.id)
         try h.prime(a, kind: .googleDrive); try h.prime(b, kind: .googleDrive)
@@ -1852,7 +1861,7 @@ private final class Harness: @unchecked Sendable {
         var other = BackupSet(name: "y", source: h.root.appendingPathComponent("src2"))
         try FileManager.default.createDirectory(at: other.source.appendingPathComponent("p"), withIntermediateDirectories: true)
         other.destinationIDs = [h.iCloudDest.id]
-        try h.store.saveSets([h.set, other])
+        try h.store.saveSets([h.set, accepted(other)])
         let sets = h.support.appendingPathComponent("sets.json")
         h.rclone.onRealSync = { try? Data("not json".utf8).write(to: sets) }
         let ok = await h.run()
@@ -2798,7 +2807,8 @@ private struct CancelledCapture: RcloneRunning {
         try Data("b".utf8).write(to: other.appendingPathComponent("p/b.txt"))
         var second = BackupSet(name: "y", source: other)
         second.destinationIDs = [d.id]
-        try h.store.saveSets([h.set, second])
+        second.acceptPreview()
+        try h.store.saveSets([h.set, accepted(second)])
         await h.run(RunCommand(force: true))
         #expect(h.notifier.ejects == ["DRIVE-1"])
 
@@ -3046,5 +3056,71 @@ private struct GoneBeforeTidy: RcloneRunning {
         h.volumes.set([])
         await h.run()
         #expect(h.notifier.posted == [.driveOverdue])
+    }
+}
+
+@Suite struct RunWiringPreviewTests {
+    private let node = Preset(id: "node", name: "Node", markers: ["package.json"], alwaysExclude: ["node_modules/"], ambiguousExclude: [])
+
+    @Test func aSetWhosePreviewWasNeverAcceptedIsNotBackedUp() async throws {
+        let h = try Harness(); try h.prime(); h.change("flowapp/a.txt")
+        try h.save(accepted: false)
+        await h.run()
+        let record = try #require(try h.latest())
+        #expect(record.status == .skipped && record.scope == "waiting for preview")
+        #expect(h.rclone.allCalls == 0)
+        #expect(try h.state.lastEventID == 5)
+    }
+
+    @Test func backUpNowCantGetRoundIt() async throws {
+        let h = try Harness(); try h.prime()
+        try h.save(accepted: false)
+        await h.run(RunCommand(force: true, fullSpeed: true))
+        #expect(h.rclone.allCalls == 0)
+        #expect(try h.latest()?.scope == "waiting for preview")
+    }
+
+    @Test func aRuleChangedSinceTheAcceptanceAsksAgain() async throws {
+        let h = try Harness(); try h.prime(); h.change("flowapp/a.txt")
+        try h.save()
+        var sets = try h.store.loadSets()
+        sets[0].rules.append(UserRule(pattern: "*.log", action: .exclude))
+        try h.store.saveSets(sets)
+        await h.run()
+        #expect(h.rclone.allCalls == 0)
+    }
+
+    @Test func aRenameOrPauseIsNotARuleChange() async throws {
+        var s = BackupSet(name: "a", source: URL(fileURLWithPath: "/tmp/a"))
+        s.acceptPreview()
+        s.name = "b"; s.archiveDays = 7
+        #expect(s.isPreviewAccepted)
+    }
+
+    @Test func anOlderSetsFileReadsAsNotAccepted() throws {
+        let h = try Harness()
+        let url = h.support.appendingPathComponent("sets.json")
+        var json = try #require(try JSONSerialization.jsonObject(with: Data(contentsOf: url)) as? [[String: Any]])
+        json[0]["acceptedFingerprint"] = nil
+        try JSONSerialization.data(withJSONObject: json).write(to: url)
+        #expect(try h.store.loadSets().first?.isPreviewAccepted == false)
+    }
+
+    @Test func aPresetTheAgentAddsDoesNotUnacceptTheSet() async throws {
+        let h = try Harness(); try h.prime()
+        var s = try h.state
+        s.knownProjects = []
+        try h.store.save(s, for: h.pair)
+        try Data("{}".utf8).write(to: h.source.appendingPathComponent("flowapp/package.json"))
+        h.change("flowapp/package.json")
+        await h.run(presets: [node])
+        let set = try #require(try h.store.loadSets().first)
+        #expect(set.presets == ["node"])
+        #expect(set.isPreviewAccepted)
+        #expect(h.rclone.realSyncs.count == 1)
+
+        h.change("flowapp/a.txt", id: 11)
+        await h.run(presets: [node])
+        #expect(h.rclone.realSyncs.count == 2)
     }
 }

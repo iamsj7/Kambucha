@@ -31,6 +31,9 @@ public struct BackupSet: Codable, Equatable, Identifiable, Sendable {
     public var archiveDays = 30
     public var isPaused = false
     public var destinationIDs: [UUID] = []
+    /// `previewFingerprint` as it was when the owner accepted the preview. The agent starts no backup of a set
+    /// unless this equals the current fingerprint, so changing rules, stacks or switches asks again.
+    public var acceptedFingerprint: String?
     public init(id: UUID = UUID(), name: String, source: URL, presets: Set<String> = [],
                 destinationIDs: [UUID] = []) {
         self.id = id; self.name = name; self.source = source; self.presets = presets

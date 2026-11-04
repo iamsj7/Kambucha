@@ -123,6 +123,7 @@ private final class Written: @unchecked Sendable {
             try FileManager.default.createDirectory(at: iCloud, withIntermediateDirectories: true)
             var s = BackupSet(name: "x", source: source)
             s.destinationIDs = [destination.id]
+            s.acceptPreview()
             set = s
             store = ConfigStore(root: support)
             records = RunRecordStore(root: support)
@@ -270,6 +271,7 @@ private final class Written: @unchecked Sendable {
         let drive = Destination(name: "SSD", kind: .externalDrive, volumeUUID: volume.uuid, internalDiskConfirmed: confirmed)
         var set = r.set
         set.destinationIDs = [drive.id]
+        set.acceptPreview()
         try r.store.saveSets([set]); try r.store.saveDestinations([drive])
         let c = RunCoordinator(store: r.store, records: r.records, problems: r.problems, rclone: r.rclone, feed: RescanFeed(),
                                verifier: Verifier(rclone: r.rclone, auditor: AllUploaded()),

@@ -320,6 +320,12 @@ public final class RunCoordinator: Sendable {
             record()
             return .carryOn
         }
+        // The app's check is only a courtesy: anything can start the agent, so the rule lives here.
+        if !set.isPreviewAccepted {
+            tally.status = .skipped; tally.scope = "waiting for preview"
+            record()
+            return .carryOn
+        }
         // A locked drive doesn't mount, so this covers it too. Only ever from the live list, never a stored path.
         var volume: VolumeInfo?
         if destination.kind == .externalDrive {
@@ -983,7 +989,10 @@ public final class RunCoordinator: Sendable {
         if !added.isEmpty {
             var sets = try store.loadSets()
             if let index = sets.firstIndex(where: { $0.id == set.id }) {
+                // The owner accepted the rules, and new projects getting their presets is one of them.
+                let accepted = sets[index].isPreviewAccepted
                 sets[index].presets.formUnion(added)
+                if accepted { sets[index].acceptPreview() }
                 try store.saveSets(sets)
             }
             set.presets.formUnion(added)
