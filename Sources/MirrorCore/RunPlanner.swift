@@ -90,6 +90,9 @@ public struct RunCommand: Codable, Equatable, Sendable {
     /// Normal priority and more rclone concurrency: Back Up Now and Full Speed. A drive gets the same by itself.
     public var isFast: Bool { force || fullSpeed }
 
+    /// Nobody asked for this run, so launchd started it. Full Speed is a setting, not a request.
+    public var isScheduled: Bool { setID == nil && approvedDeletions == nil && approvedDestination == nil && !force }
+
     /// Scheduled passes stay in the background.
     public var taskPriority: TaskPriority { isFast ? .medium : .background }
 

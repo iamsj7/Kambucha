@@ -96,19 +96,22 @@ struct AgentRecovery: Sendable {
     private func restore(_ r: AgentWire.RestoreRequest) async throws -> AgentWire.Response {
         let (set, destination) = try resolve(set: r.set, destination: r.destination)
         try ArchiveScope.checkName(set.name)
-        guard r.to.hasPrefix("/"), !r.to.contains("\0"), Self.isInside(set, r.path) else { throw AgentFailure.invalidRequest }
+        // `..` is refused outright. `PathGuard` resolves it, but only after the name has already been trusted.
+        guard r.to.hasPrefix("/"), !r.to.contains("\0"), !r.to.split(separator: "/").contains(".."),
+              Self.isInside(set, r.path) else { throw AgentFailure.invalidRequest }
         let sources = ((try? store.loadSets()) ?? [set]).map(\.source)
         try await withAccess(destination) { access in
             let from = ArchiveScope.join(access.endpoint, r.path)
             // The endpoint pins it: the backup root, or the crypt remote, whose names and contents are decrypted.
             let service = RestoreService(rclone: rclone, backupRoot: access.endpoint)
             let manifest = access.localRoot.flatMap { try? SymlinkManifest.read(set: set.name, backupRoot: $0) }
-            let inMirror = "\(MirrorPaths.mirrorPath(set))/"
+            let mirror = MirrorPaths.mirrorPath(set)
+            let inMirror = r.path == mirror || r.path.hasPrefix(mirror + "/")
             let result = try await service.restore(
                 from: from, context: access.context, to: URL(fileURLWithPath: r.to), sources: sources,
                 asFile: try await isFile(from, context: access.context),
-                manifest: r.path.hasPrefix(inMirror) ? manifest : nil,
-                manifestSubpath: r.path.hasPrefix(inMirror) ? String(r.path.dropFirst(inMirror.count)) : "")
+                manifest: inMirror ? manifest : nil,
+                manifestSubpath: inMirror ? String(r.path.dropFirst(mirror.count + 1)) : "")
             switch result.outcome {
             case .success: break
             case .authExpired: throw RcloneSessionError.notSignedIn

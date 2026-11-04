@@ -101,7 +101,7 @@ public final class RunCoordinator: Sendable {
             let due = dueDrivePairs()
             if due.isEmpty { return true }
             only = due
-        } else if command == RunCommand() {
+        } else if command.isScheduled {
             noteFullPass()
         }
         writePID()
@@ -130,7 +130,7 @@ public final class RunCoordinator: Sendable {
 
     /// Scheduled, and too soon after the last full pass to be the interval.
     private func isMountWake(_ command: RunCommand) -> Bool {
-        guard mountWakeWindow > 0, command == RunCommand(),
+        guard mountWakeWindow > 0, command.isScheduled,
               let data = try? Data(contentsOf: paths.lastPassFile),
               let last = try? JSONDecoder().decode(Date.self, from: data) else { return false }
         let gap = clock().timeIntervalSince(last)
@@ -567,8 +567,9 @@ public final class RunCoordinator: Sendable {
             decision = .hold(count: countable)
         }
         // An empty source deleting anything is never routine, whatever the count says.
-        if sample == 0, !deletions.isEmpty, job.approved.map({ deletions.count > $0 }) ?? true {
-            decision = .hold(count: deletions.count)
+        // Counted as the gate and the review list count. Losing only `.git` still needs a yes, hence the floor.
+        if sample == 0, !deletions.isEmpty, job.approved.map({ countable > $0 }) ?? true {
+            decision = .hold(count: max(countable, 1))
         }
         let mode: SyncMode
         var holding = false
@@ -607,7 +608,7 @@ public final class RunCoordinator: Sendable {
                 tally.status = .partial
                 return
             case .safetyStop:
-                state.heldDeletions = max(state.heldDeletions, deletions.count, 1)
+                state.heldDeletions = max(state.heldDeletions, countable, 1)
                 tally.notices.append((.deletionsHeld, pair, "\(state.heldDeletions) deletions held"))
                 tally.status = .held
                 return

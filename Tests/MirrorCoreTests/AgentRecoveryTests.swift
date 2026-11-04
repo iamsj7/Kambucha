@@ -214,6 +214,30 @@ private let stamp = "2026-11-04T10-00-00"
         #expect(try FileManager.default.destinationOfSymbolicLink(atPath: to.appendingPathComponent("link").path) == "f.txt")
     }
 
+    @Test func aWholeSetRestoreRecreatesLinksFromTheManifest() async throws {
+        let r = try Rig()
+        try r.put("Sets/Docs/p/f.txt")
+        try SymlinkManifest(set: "Docs", entries: [.init(path: "p/link", target: "f.txt", isAbsolute: false, isBroken: false)])
+            .write(backupRoot: r.root)
+        let to = try r.tmp.sub("out").appendingPathComponent("everything")
+        #expect(try await r.restore("Sets/Docs", to: to.path).ok == true)
+        #expect(try FileManager.default.destinationOfSymbolicLink(atPath: to.appendingPathComponent("p/link").path) == "f.txt")
+    }
+
+    @Test(arguments: ["/../etc/x", "/tmp/../Users/x/y", "/tmp/out/.."])
+    func aTargetWithDotDotIsRefusedBeforeAnythingElse(to: String) async throws {
+        let r = try Rig()
+        try r.put("Archive/Docs/\(stamp)/a.txt")
+        #expect(try await r.restore("Archive/Docs/\(stamp)/a.txt", to: to).failure == .invalidRequest)
+    }
+
+    @Test func aTargetCanHoldDotsInItsNames() async throws {
+        let r = try Rig()
+        try r.put("Archive/Docs/\(stamp)/a.txt", "kept")
+        let to = try r.tmp.sub("out").appendingPathComponent("..hidden..txt")
+        #expect(try await r.restore("Archive/Docs/\(stamp)/a.txt", to: to.path).ok == true)
+    }
+
     @Test func aMissingArchiveFileIsAFailureNotAnEmptySuccess() async throws {
         let r = try Rig()
         try FileManager.default.createDirectory(at: r.root, withIntermediateDirectories: true)

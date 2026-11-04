@@ -3983,3 +3983,87 @@ private struct GoneBeforeTidy: RcloneRunning {
         #expect(state.reviewItems.map(\.path) == ["b/.env"])
     }
 }
+
+@Suite struct FixRoundOneTests {
+    private func lastPass(_ h: Harness, _ ago: TimeInterval) throws {
+        try FileManager.default.createDirectory(at: h.support, withIntermediateDirectories: true)
+        try JSONEncoder().encode(h.now.addingTimeInterval(-ago)).write(to: h.support.appendingPathComponent("last-pass.json"))
+    }
+
+    // I1
+
+    @Test func fullSpeedLeavesAMountWakeAMountWake() async throws {
+        let h = try Harness(); try h.prime(); h.change("flowapp/a.txt")
+        h.mountWakeWindow = 1440
+        try lastPass(h, 60)
+        await h.run(RunCommand(fullSpeed: true))
+        #expect(h.rclone.allCalls == 0)
+        #expect(try h.latest() == nil)
+    }
+
+    @Test func aFullSpeedPassStillCountsAsTheLastPass() async throws {
+        let h = try Harness(); try h.prime(); h.change("flowapp/a.txt")
+        h.mountWakeWindow = 1440
+        await h.run(RunCommand(fullSpeed: true))
+        #expect(h.rclone.realSyncs.count == 1)
+        #expect(FileManager.default.fileExists(atPath: h.support.appendingPathComponent("last-pass.json").path))
+    }
+
+    @Test func onlyAManualRunOrAnApprovalIsNotScheduled() {
+        #expect(RunCommand().isScheduled && RunCommand(fullSpeed: true).isScheduled)
+        #expect(!RunCommand(force: true).isScheduled)
+        #expect(!RunCommand(setID: UUID()).isScheduled)
+        #expect(!RunCommand(approvedDeletions: 1, approvedDestination: UUID()).isScheduled)
+    }
+
+    // I4
+
+    private func emptied(_ h: Harness) throws {
+        try FileManager.default.removeItem(at: h.source.appendingPathComponent("flowapp"))
+        h.rclone.script(dryDeletions: ["a", "b", "c", "p/.git/x", ".git/y"])
+    }
+
+    @Test func anEmptySourceHoldsTheCountTheReviewListShows() async throws {
+        let h = try Harness(); try h.prime()
+        var s = try h.state
+        s.lastFileCount = nil   // otherwise the guard stops it before any dry run
+        try h.store.save(s, for: h.pair)
+        try emptied(h)
+        await h.run(RunCommand(force: true))
+        #expect(try h.state.heldDeletions == 3)
+    }
+
+    @Test func anEmptySourceWithGitFilesCanBeApproved() async throws {
+        let h = try Harness(); try h.prime()
+        var s = try h.state
+        s.lastFileCount = nil
+        s.heldDeletions = 3
+        try h.store.save(s, for: h.pair)
+        try emptied(h)
+        let files = ["a", "b", "c", "p/.git/x", ".git/y"]
+        await h.run(RunCommand(setID: h.set.id, approvedDeletions: AgentWire.nonGitCount(files), approvedDestination: h.iCloudDest.id, force: true))
+        #expect(h.rclone.realSyncs.last?.mode == .mirror(maxDelete: 5))
+        #expect(try h.state.heldDeletions == 0)
+    }
+
+    @Test func anEmptySourceLosingOnlyGitFilesStillHoldsAndCanBeReleased() async throws {
+        let h = try Harness(); try h.prime()
+        var s = try h.state
+        s.lastFileCount = nil
+        try h.store.save(s, for: h.pair)
+        try FileManager.default.removeItem(at: h.source.appendingPathComponent("flowapp"))
+        h.rclone.script(dryDeletions: [".git/y"])
+        await h.run(RunCommand(force: true))
+        #expect(h.rclone.realSyncs.last?.mode == .copyOnly)
+        #expect(try h.state.heldDeletions == 1)
+        await h.run(RunCommand(setID: h.set.id, approvedDeletions: 0, approvedDestination: h.iCloudDest.id, force: true))
+        #expect(h.rclone.realSyncs.last?.mode == .mirror(maxDelete: 1))
+    }
+
+    @Test func aSafetyStopCountsWhatTheReviewListShows() async throws {
+        let h = try Harness(); try h.prime(); h.change("flowapp/a.txt", rescan: true)
+        h.rclone.script(real: [.safetyStop], dryDeletions: ["a", "b", "p/.git/x"])
+        await h.run()
+        #expect(try h.state.heldDeletions == 2)
+    }
+}
