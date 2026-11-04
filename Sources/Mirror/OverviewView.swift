@@ -163,7 +163,7 @@ struct ReviewItemRow: View {
                 Text("\(entry.setName). \(reason)").font(.caption).foregroundStyle(.secondary)
             }
             Spacer()
-            if entry.item.kind != .refusedByICloud {
+            if model.set(entry.setID).map({ ReviewActions.canInclude(entry.item, in: $0) }) == true {
                 Button("Include") { model.resolve(entry, include: true) }
                     .accessibilityLabel("Include \(entry.item.path) in the backup")
             }

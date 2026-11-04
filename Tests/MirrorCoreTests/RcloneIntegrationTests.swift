@@ -81,6 +81,39 @@ private final class Sandbox {
         #expect(try await syncTrackedFolder(project: "pro[j] {1}", scope: nil))
     }
 
+    /// Real rclone, real filter order: an Include on a folder holds, and a switch that's off still wins inside it.
+    private func syncIncludedFolder(secrets: Bool, git: Bool) async throws -> (lib: Bool, env: Bool, gitConfig: Bool, log: Bool) {
+        let box = try Sandbox()
+        let php = Preset(id: "php", name: "PHP", markers: ["composer.json"], alwaysExclude: [], ambiguousExclude: ["vendor/"])
+        try box.write("proj/composer.json", "{}")
+        try box.write("proj/vendor/lib/a.php", "tracked")
+        try box.write("proj/vendor/.env", "SECRET=1")
+        try box.write("proj/vendor/.git/config", "[core]")
+        try box.write("proj/vendor/debug.log", "noise")
+        var set = BackupSet(name: "S", source: box.src, presets: ["php"])
+        set.backupSecrets = secrets; set.backupGit = git
+        set.rules = [UserRule(pattern: "*.log", action: .exclude), UserRule(pattern: "/proj/vendor/**", action: .include)]
+        let filters = FilterBuilder(presets: [php])
+        try filters.write(filters.lines(for: set, projects: [DetectedProject(relativePath: "proj", presetIDs: ["php"])], scope: nil), to: box.filter)
+        #expect(try await runner.sync(box.request()).outcome == .success)
+        return (box.exists(box.dst, "proj/vendor/lib/a.php"), box.exists(box.dst, "proj/vendor/.env"),
+                box.exists(box.dst, "proj/vendor/.git/config"), box.exists(box.dst, "proj/vendor/debug.log"))
+    }
+
+    @Test func theSecretsAndGitSwitchesBeatAnIncludedFolder() async throws {
+        let r = try await syncIncludedFolder(secrets: false, git: false)
+        #expect(r.lib && !r.env && !r.gitConfig)
+    }
+
+    @Test func withTheSwitchesOnAnIncludedFolderKeepsItsSecretsAndGit() async throws {
+        let r = try await syncIncludedFolder(secrets: true, git: true)
+        #expect(r.lib && r.env && r.gitConfig)
+    }
+
+    @Test func aUserExcludeStillBeatsALaterInclude() async throws {
+        #expect(try await !syncIncludedFolder(secrets: true, git: true).log)
+    }
+
     @Test func addModifyDelete() async throws {
         let sb = try Sandbox()
         try sb.write("a.txt", "one"); try sb.write("sub/b.txt", "two")

@@ -192,7 +192,8 @@ Things to know, from rclone's guide at <https://rclone.org/onedrive/>:
 - **Schedule:** every 30 minutes, and after you log in. This can't be changed.
 - **Archive:** old versions and deleted files are kept 30 days by default.
 - **Deletion limit:** deletions are held if a run would remove at least 100 files and more than 5% of the set, or more than 2,000 files at any size. Files inside `.git` do not count.
-- **Secrets and Git history:** both are backed up by default, per set. Turning off Secrets means `.env` files and keys are not backed up.
+- **Secrets and Git history:** both are backed up by default, per set. Turning off Secrets means `.env` files and keys are not backed up, and turning off Git history does the same for `.git` folders. A switch that is off wins over everything, so your own rules and Include can't bring those files back.
+- **Your rules:** they come after those two switches and before the stacks, so an Include can bring back a folder a stack skips.
 - **Changing what is excluded:** any change to a set's rules, stacks or switches opens the preview again. If the change now excludes files already in iCloud Drive or on a connected drive, Mirror asks whether to move them to the archive or leave them. Nothing happens to them without your choice. On Google Drive and OneDrive they stay where they are.
 
 ## 9. If something goes wrong

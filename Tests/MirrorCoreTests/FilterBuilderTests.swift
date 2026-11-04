@@ -51,7 +51,7 @@ struct FilterBuilderTests {
         #expect(lines[1] == "- *.log")
     }
 
-    @Test func orderIsUserThenSecretsThenPresets() throws {
+    @Test func orderIsSwitchesThenUserThenPresets() throws {
         let rules = [UserRule(pattern: "/u", action: .include)]
         let lines = builder.lines(for: set(secrets: false, git: false, rules: rules), projects: projects, scope: nil)
         let u = try #require(lines.firstIndex(of: "+ /u"))
@@ -60,7 +60,7 @@ struct FilterBuilderTests {
         let m = try #require(lines.firstIndex(of: "- .DS_Store"))
         let a = try #require(lines.firstIndex(of: "- node_modules/**"))
         let d = try #require(lines.firstIndex(of: "- /flowapp/dist/**"))
-        #expect(u < s && s < g && g < m && m < a && a < d)
+        #expect(s < g && g < u && u < m && m < a && a < d)
     }
 
     @Test func secretsOnAddsNoSecretExcludes() {

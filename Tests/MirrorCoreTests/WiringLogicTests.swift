@@ -411,3 +411,14 @@ private struct Names: SetNameListing {
     #expect(SetNameConflict.title(name: "Docs", in: [a, b]) == "\"Docs\" is still in use in iCloud and SSD")
     #expect(SetNameConflict.message(name: "Docs").contains("move to the archive"))
 }
+
+@Test func includeIsOfferedOnlyWhereItCanWork() {
+    var set = BackupSet(name: "S", source: URL(fileURLWithPath: "/tmp/s"))
+    let secret = ReviewItem(id: "s", path: "b/.env", kind: .secretInExcluded)
+    let tracked = ReviewItem(id: "t", path: "vendor", kind: .trackedInExcluded)
+    let refused = ReviewItem(id: "r", path: "a.tmp", kind: .refusedByICloud)
+    #expect(ReviewActions.canInclude(secret, in: set) && ReviewActions.canInclude(tracked, in: set))
+    #expect(!ReviewActions.canInclude(refused, in: set))
+    set.backupSecrets = false   // the switch beats any Include, so offering one would do nothing
+    #expect(!ReviewActions.canInclude(secret, in: set) && ReviewActions.canInclude(tracked, in: set))
+}

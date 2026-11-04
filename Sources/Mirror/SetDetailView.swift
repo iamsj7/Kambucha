@@ -113,7 +113,7 @@ struct SetDetailView: View {
             } header: {
                 Text("Your Rules")
             } footer: {
-                Text("Your rules come first. Press Return after typing a pattern to preview the effect.")
+                Text("Your rules come before stacks. With Secrets or Git history off, those files stay out whatever your rules say. Press Return after typing a pattern to preview the effect.")
             }
 
             Section("Destinations") {
