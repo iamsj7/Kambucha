@@ -59,4 +59,26 @@ import Foundation
         let missing = ReviewScanner(filters: FilterBuilder(presets: []), gitPath: "/nonexistent/git")
         #expect(throws: ReviewError.self) { try missing.trackedInExcluded(repo: repo, excluded: ["vendor"]) }
     }
+
+    @Test func repoConfigCannotRunCommands() throws {
+        let box = try ArchiveSandbox(); let repo = try gitRepo(box)
+        try git(repo, "init", "-q")
+        try git(repo, "add", "vendor/autoload.php", "src/main.php")
+        try git(repo, "commit", "-q", "-m", "init")
+        let marker = box.root.appendingPathComponent("marker")
+        let hook = box.root.appendingPathComponent("hook.sh")
+        try "#!/bin/sh\ntouch '\(marker.path)'\n".write(to: hook, atomically: true, encoding: .utf8)
+        try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: hook.path)
+        try git(repo, "config", "core.fsmonitor", hook.path)
+        try git(repo, "config", "core.hooksPath", box.root.path)
+        try git(repo, "config", "core.pager", "touch '\(marker.path)'")
+        let items = try scanner.trackedInExcluded(repo: repo, excluded: ["vendor"])
+        #expect(items.count == 1)
+        #expect(!FileManager.default.fileExists(atPath: marker.path))
+        // The arguments and environment carry the hardening.
+        #expect(ReviewScanner.gitArguments(repo).contains("core.fsmonitor=false"))
+        #expect(ReviewScanner.gitArguments(repo).contains("core.hooksPath=/dev/null"))
+        #expect(ReviewScanner.gitEnvironment["GIT_CONFIG_NOSYSTEM"] == "1")
+        #expect(ReviewScanner.gitEnvironment["GIT_CONFIG_GLOBAL"] == "/dev/null")
+    }
 }

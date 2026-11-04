@@ -45,11 +45,21 @@ public struct ReviewScanner: Sendable {
         return out
     }
 
+    /// A repo's own config must not be able to run anything in this process (core.fsmonitor, hooks).
+    static func gitArguments(_ repo: URL) -> [String] {
+        ["-C", repo.path, "-c", "core.fsmonitor=false", "-c", "core.hooksPath=/dev/null",
+         "-c", "core.quotepath=off", "ls-files", "-z"]
+    }
+    static var gitEnvironment: [String: String] {
+        ["PATH": "/usr/bin:/bin", "HOME": NSHomeDirectory(), "GIT_OPTIONAL_LOCKS": "0",
+         "GIT_CONFIG_NOSYSTEM": "1", "GIT_CONFIG_GLOBAL": "/dev/null"]
+    }
+
     func gitLsFiles(_ repo: URL) throws -> [String] {
         let p = Process()
         p.executableURL = URL(fileURLWithPath: gitPath)
-        p.arguments = ["-C", repo.path, "-c", "core.quotepath=off", "ls-files", "-z"]
-        p.environment = ["PATH": "/usr/bin:/bin", "HOME": NSHomeDirectory(), "GIT_OPTIONAL_LOCKS": "0"]
+        p.arguments = Self.gitArguments(repo)
+        p.environment = Self.gitEnvironment
         let out = Pipe()
         p.standardOutput = out; p.standardError = FileHandle.nullDevice; p.standardInput = FileHandle.nullDevice
         do { try p.run() } catch { throw ReviewError.gitFailed("could not run git: \(error.localizedDescription)") }
