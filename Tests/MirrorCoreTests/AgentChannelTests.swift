@@ -5,13 +5,14 @@ import Foundation
 private func data(_ r: AgentRequest) throws -> Data { try JSONEncoder().encode(r) }
 private func decode(_ d: Data) throws -> AgentResponse { try JSONDecoder().decode(AgentResponse.self, from: d) }
 
-/// A fake rclone that signs in, lists, and "downloads" a fixed file.
+/// A fake rclone that signs in, lists, and "downloads" a fixed file. Lists nothing once `empty-cloud`
+/// exists beside it.
 private func fakeCloudRclone(in dir: URL) throws -> URL {
     try fakeRclone(in: dir, body: #"""
         case "$1" in
           obscure) cat >/dev/null; echo obscured-stand-in; exit 0 ;;
           version) echo "rclone v1.75.2"; exit 0 ;;
-          lsf) echo listed-name; exit 0 ;;
+          lsf) [ -e "$(/usr/bin/dirname "$0")/empty-cloud" ] || echo listed-name; exit 0 ;;
           cryptcheck) exit 0 ;;
           copyto) printf 'the words' > "$3"; exit 0 ;;
           config)
@@ -246,6 +247,32 @@ private struct ServiceRig {
         let r = try await rig.send(.restoreFromKit(destination: rig.drive, kitText: text, acceptUnproven: true))
         #expect(r.failure == .presenceRefused)
         #expect(try rig.secrets.vault(for: rig.drive) == nil)
+    }
+
+    /// The whole path: a surviving sign-in, an empty cloud and an unconfirmed flag used to pass unasked.
+    @Test(arguments: [true, false])
+    func unprovenKitIsNeverAcceptedWithoutPresence(confirmed: Bool) async throws {
+        let rig = try ServiceRig()
+        let text = try await kitText(rig)
+        try rig.secrets.delete(SecretKeys.vault(rig.drive.id))
+        _ = try rig.store(confirmed: confirmed)
+        try Data().write(to: rig.tmp.url.appendingPathComponent("empty-cloud"))
+        let askedBefore = rig.presence.asked
+
+        let unasked = try await rig.send(.restoreFromKit(destination: rig.drive, kitText: text, acceptUnproven: false))
+        #expect(unasked.failure == .setup(.kitUnproven))
+        #expect(rig.presence.asked == askedBefore)
+        #expect(try rig.secrets.vault(for: rig.drive) == nil)
+
+        rig.presence.refuses = true
+        let refused = try await rig.send(.restoreFromKit(destination: rig.drive, kitText: text, acceptUnproven: true))
+        #expect(refused.failure == .presenceRefused)
+        #expect(try rig.secrets.vault(for: rig.drive) == nil)
+
+        rig.presence.refuses = false
+        #expect(try await rig.send(.restoreFromKit(destination: rig.drive, kitText: text, acceptUnproven: true)).failure == nil)
+        #expect(rig.presence.asked == askedBefore + 2)
+        #expect(try rig.secrets.vault(for: rig.drive) != nil)
     }
 
     @Test func provenRestoreDoesNotAskForPresence() async throws {

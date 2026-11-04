@@ -93,10 +93,10 @@ public struct RemoteSetup: Sendable {
     /// what's in the cloud, because a wrong kit would resume backups under keys that can't read them.
     ///
     /// Seeing nothing proves nothing: under `drive.file` a wrong client or account sees an empty
-    /// root. So that passes only for a surviving sign-in with the kit's client on an unconfirmed
-    /// destination. Otherwise it throws `kitUnproven`, and `acceptUnproven` is the owner's answer,
-    /// which the agent gates on user presence. A new sign-in is held apart until then, so yes needs no
-    /// second browser trip. Retrying without accepting signs in afresh: the account may be the mistake.
+    /// root. So it always throws `kitUnproven`, whatever survived and whatever `destinations.json`
+    /// says. `acceptUnproven` is the owner's answer and the only way past, and the agent gates it on
+    /// user presence. A new sign-in is held apart until then, so yes needs no second browser trip.
+    /// Retrying without accepting signs in afresh: the account may be the mistake.
     public func restore(_ destination: Destination, from kit: RecoveryKit, acceptUnproven: Bool = false) async throws {
         guard destination.encrypted, kit.kind == destination.kind, kit.rootPath == MirrorPaths.rootFolderName,
               kit.filenameEncoding == RcloneCrypt.filenameEncoding(for: destination.kind) else {
@@ -159,8 +159,7 @@ public struct RemoteSetup: Sendable {
             try? secrets.delete(SecretKeys.heldSignIn(destination.id))
             throw RemoteSetupError.kitDoesNotOpenBackup
         case .nothingThere:
-            let shortcut = surviving != nil && !destination.recoveryKitConfirmed
-            guard shortcut || acceptUnproven else { throw RemoteSetupError.kitUnproven }
+            guard acceptUnproven else { throw RemoteSetupError.kitUnproven }
         }
         try refuseOtherKeys(keys, destination)   // the browser and the proof took time
         try secrets.saveVault(keys, for: destination)

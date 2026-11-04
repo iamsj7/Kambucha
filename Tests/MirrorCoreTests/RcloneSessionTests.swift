@@ -924,12 +924,24 @@ private func cryptName(_ endpoint: String) -> String {
         #expect(try rig.secrets.vault(for: d) == nil)
     }
 
-    @Test func survivingMatchedSignInMayRestoreOverNothing() async throws {
+    /// A surviving sign-in proves nothing about the Kit, and the flag is only a line in `destinations.json`.
+    @Test(arguments: [emptyCloud, missingCloud])
+    func survivingSignInSeeingNothingIsUnprovenWhateverTheFlag(prelude: String) async throws {
+        let rig = try Rig(prelude: prelude)
+        let d = Destination(name: "Drive", kind: .googleDrive)
+        #expect(!d.recoveryKitConfirmed)
+        try rig.secrets.saveSignIn(["client_id": "kit-id", "client_secret": "kit-secret", "token": fakeToken], for: d)
+        await #expect(throws: RemoteSetupError.kitUnproven) { try await rig.setup.restore(d, from: kit(.generate())) }
+        #expect(try rig.secrets.vault(for: d) == nil)
+    }
+
+    @Test func acceptingKeepsTheSurvivingSignIn() async throws {
         let rig = try Rig(prelude: Self.emptyCloud)
         let d = Destination(name: "Drive", kind: .googleDrive), v = VaultSecrets.generate()
         try rig.secrets.saveSignIn(["client_id": "kit-id", "client_secret": "kit-secret", "token": fakeToken], for: d)
-        try await rig.setup.restore(d, from: kit(v))
+        try await rig.setup.restore(d, from: kit(v), acceptUnproven: true)
         #expect(try rig.secrets.vault(for: d) == v)
+        #expect(try rig.secrets.signIn(for: d)?["token"] == fakeToken)
     }
 
     @Test func ownerCanAcceptAnUnprovenKit() async throws {
