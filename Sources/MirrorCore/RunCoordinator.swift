@@ -26,6 +26,8 @@ public final class RunCoordinator: Sendable {
     static let freedSample = 20
     /// Past this the list stops being cheap to save at every step, so a flag stands in for it.
     static let maxOwed = 5_000
+    /// Evicted owed files survive an overflow, so they have a bound of their own.
+    static let maxFreed = 5_000
     /// Finder's droppings don't make a source any less empty.
     private static let noise: Set<String> = [".DS_Store", ".localized"]
 
@@ -383,7 +385,6 @@ public final class RunCoordinator: Sendable {
         let slices = try makeSlices(job, set: set, scope: scope, projects: projects, endpoint: endpoint, stamp: stamp, runDir: runDir)
         // What earlier runs left unproven. Kept apart, as `owe` may give the saved list up to the flag.
         let carried = state.verifyOwed
-        let flaggedBefore = state.hashWholeSet
 
         func request(_ s: Slice, mode: SyncMode, dryRun: Bool) -> SyncRequest {
             SyncRequest(source: s.source, destination: s.destination, backupDir: s.backupDir, filterFile: s.filter,
@@ -459,7 +460,10 @@ public final class RunCoordinator: Sendable {
         var verified = VerifyResult(differences: 0, audit: AuditResult(pending: [], refused: []))
         let wholePass = plan.isDailyPass && scope == .wholeSet
         let matcher = FilterMatcher(lines: filters.lines(for: set, projects: projects, scope: nil))
-        var listOverflowed = false
+        // A deep check hashes every file on disk, so a Quick hash beside it would do the work twice.
+        let deepDue = plan.isDeepDue && plan.isDailyPass && !holding
+        let deepFollows = scope == .wholeSet && (state.hashWholeSet || deepDue)
+        var awaitingDeep: (slice: Slice, result: VerifyResult)?
         for (slice, summary) in zip(slices, perSlice) {
             // Carried files that have since left the source, or the rules, have nothing to prove.
             let owed = Self.within(slice, carried).filter {
@@ -468,22 +472,27 @@ public final class RunCoordinator: Sendable {
             let names = Array(Set(Self.touched(by: summary) + owed)).sorted()
             let result = try await verifier.quick(source: slice.source, destination: slice.destination, profile: job.profile,
                                                   context: context, filter: slice.filter, copied: names, oneWay: holding,
-                                                  logDir: slice.logDir, auditWholeMirror: wholePass)
+                                                  logDir: slice.logDir, auditWholeMirror: wholePass, hashCopied: !deepFollows)
             Self.merge(result, of: slice, into: &verified)
             guard result.checksClean else { continue }   // a mismatch stays owed, or the next run would call it clean
-            if prove(slice, result, mirror: mirrorRoot(set), state: &state) { listOverflowed = true }
+            // With a deep check to come nothing has been hashed yet, so nothing is proven yet either.
+            if deepFollows { awaitingDeep = (slice, result); continue }
+            prove(slice, result, mirror: mirrorRoot(set), state: &state)
             try persist(state, pair)
         }
         tally.filesChecked = verified.matchingFiles
         var deepRan = false
-        if let slice = slices.first, scope == .wholeSet, flaggedBefore || (plan.isDeepDue && plan.isDailyPass && !holding) {
+        if let slice = slices.first, scope == .wholeSet, state.hashWholeSet || deepDue {
             let deep = try await verifier.deep(source: slice.source, destination: slice.destination, profile: job.profile,
                                                context: context, filter: slice.filter, sampleFreed: Self.freedSample,
                                                logDir: slice.logDir, oneWay: holding)
             verified.differences += deep.differences
             verified.checksClean = verified.checksClean && deep.checksClean
             verified.differingPaths += deep.differingPaths
-            if deep.checksClean { track(deep.audit, mirror: mirrorRoot(set), state: &state) }
+            if deep.checksClean {
+                if let awaitingDeep { prove(awaitingDeep.slice, awaitingDeep.result, mirror: mirrorRoot(set), state: &state) }
+                track(deep.audit, mirror: mirrorRoot(set), state: &state)
+            }
             flagFreed(state: &state)
             deepRan = true
         }
@@ -497,49 +506,55 @@ public final class RunCoordinator: Sendable {
             throw Stop.verificationFailed(differences: verified.differences)
         }
         tally.verification = deepRan ? "Quick and deep checks passed" : "Quick check passed"
-        // Every file this run touched was just hashed. Only what an earlier run left behind needs the deep check.
-        if (!flaggedBefore || deepRan), !listOverflowed { state.hashWholeSet = false }
+        // The list gave up on what it couldn't hold, and only a whole-set check that ran can stand in for it.
+        if deepRan { state.hashWholeSet = false }
 
         try await reconcileUploads(job, set: set, state: &state, tally: &tally)
         finish(job, plan: plan, scope: scope, batch: batch, verified: verified, holding: holding, deepRan: deepRan, state: &state)
         tally.status = holding ? .held : (verified.backedUp && state.isBackedUp ? .success : .partial)
     }
 
-    /// Adds to what's owed, even with the flag set: the flag can clear in this same run, and what
-    /// it stood for mustn't go with it. Past the bound, the flag replaces the list. True then.
-    @discardableResult
-    private func owe(_ paths: [String], state: inout SetState) -> Bool {
-        guard !paths.isEmpty else { return false }
+    /// Adds to what's owed. Past the bound the flag takes over from the list, except for files only
+    /// the list can speak for: an evicted file a whole-set check can't hash, and a recorded mismatch.
+    /// The flag is the record of an overflow, so no caller has to carry one.
+    private func owe(_ paths: [String], state: inout SetState) {
+        guard !paths.isEmpty else { return }
         let all = Set(state.verifyOwed).union(paths)
         guard all.count > Self.maxOwed else {
             state.verifyOwed = all.sorted()
-            return false
+            return
         }
         state.hashWholeSet = true
-        state.verifyOwed = []
-        state.freedSince = [:]
-        return true
+        state.verifyOwed = all.intersection(Set(state.freedSince.keys).union(state.mismatched)).sorted()
     }
 
     /// A slice passed its checks: what it owed is proven, and its audit carries on in the upload
     /// tracking. Two things prove nothing and stay owed: a file the audit couldn't find, and one
-    /// iCloud evicted, which was never hashed. True if that outgrew the list.
-    private func prove(_ slice: Slice, _ result: VerifyResult, mirror: URL, state: inout SetState) -> Bool {
+    /// iCloud evicted, which was never hashed. Past its bound, the flag stands in for an evicted file.
+    private func prove(_ slice: Slice, _ result: VerifyResult, mirror: URL, state: inout SetState) {
         let prefix = slice.folder.map { $0 + "/" } ?? ""
+        let freed = result.skippedFreed.map { Self.inSet($0, slice) }
+        let unhashed = Set(freed)
         state.verifyOwed.removeAll { $0.hasPrefix(prefix) }
+        state.mismatched.removeAll { $0.hasPrefix(prefix) && !unhashed.contains($0) }
         track(result.audit, mirror: mirror, state: &state)
         let root = mirror.path + "/"
         let lost = result.audit.missing.map { $0.hasPrefix(root) ? String($0.dropFirst(root.count)) : $0 }
         let missing = Self.within(slice, lost).filter { Self.existsInSource($0, slice.source) }.map { Self.inSet($0, slice) }
-        let freed = result.skippedFreed.map { Self.inSet($0, slice) }
-        let unhashed = Set(freed)
-        state.mismatched.removeAll { $0.hasPrefix(prefix) && !unhashed.contains($0) }
-        let overflowed = owe(missing + freed, state: &state)
+
         let now = clock()
-        if !overflowed { for path in freed where state.freedSince[path] == nil { state.freedSince[path] = now } }
+        var kept: [String] = []
+        for path in freed {
+            if state.freedSince[path] != nil || state.freedSince.count < Self.maxFreed {
+                state.freedSince[path] = state.freedSince[path] ?? now
+                kept.append(path)
+            } else {
+                state.hashWholeSet = true
+            }
+        }
+        owe(missing + kept, state: &state)
         let owed = Set(state.verifyOwed)
         state.freedSince = state.freedSince.filter { owed.contains($0.key) }
-        return overflowed
     }
 
     /// One flag read per evicted file, no walk. One that came back is hashed by the next run.

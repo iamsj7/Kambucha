@@ -40,9 +40,10 @@ public struct Verifier: Sendable {
     private func audits(_ p: DestinationProfile) -> Bool { p.kind == .iCloudFolder }
 
     /// `auditWholeMirror` is for the daily pass: every file is audited, not just those copied.
+    /// `hashCopied` is false when a deep check follows and will hash them anyway.
     public func quick(source: URL, destination: String, profile: DestinationProfile, context: RcloneContext,
                       filter: URL, copied: [String], oneWay: Bool, logDir: URL,
-                      auditWholeMirror: Bool = false) async throws -> VerifyResult {
+                      auditWholeMirror: Bool = false, hashCopied: Bool = true) async throws -> VerifyResult {
         let size = try await run(CheckRequest(
             source: source, destination: destination, filterFile: filter, filesFrom: nil, sizeOnly: true,
             oneWay: oneWay, cryptCheck: false, context: context, logFile: logDir.appendingPathComponent("quick-size.log")).applying(profile))
@@ -54,7 +55,7 @@ public struct Verifier: Sendable {
         for path in copied {
             if audits(profile), isDataless(root.appendingPathComponent(path)) { skipped.append(path) } else { toHash.append(path) }
         }
-        if !toHash.isEmpty {
+        if hashCopied, !toHash.isEmpty {
             let list = try writeList(toHash, to: logDir.appendingPathComponent("quick-copied.list"))
             let hash = try await run(CheckRequest(
                 source: source, destination: destination, filterFile: filter, filesFrom: list, sizeOnly: false,
