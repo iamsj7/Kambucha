@@ -49,4 +49,18 @@ struct RunLockTests {
         #expect(RunLock(url: url).runIfAcquired { ran = true })
         #expect(ran)
     }
+
+    @Test func openFailureIsDistinctFromHeldAndAbortsImmediately() throws {
+        let blocker = FileManager.default.temporaryDirectory.appendingPathComponent("mirror-blocker-\(UUID().uuidString)")
+        try Data("x".utf8).write(to: blocker)
+        let lock = RunLock(url: blocker.appendingPathComponent("x.lock"))  // parent is a file
+        guard case .openFailed = lock.attempt() else { Issue.record("expected openFailed"); return }
+        let t0 = Date()
+        #expect(throws: RunLockError.self) { try lock.acquire(timeout: 5) }
+        #expect(Date().timeIntervalSince(t0) < 1)
+        let url = lockURL()
+        let holder = RunLock(url: url); #expect(holder.tryAcquire())
+        #expect(RunLock(url: url).attempt() == .held)
+        #expect(try !RunLock(url: url).acquire(timeout: 0.05))
+    }
 }

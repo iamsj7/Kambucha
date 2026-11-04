@@ -1,6 +1,8 @@
 import Foundation
 import os
 
+public enum RunLockError: Error, Equatable { case cannotOpen(errno: Int32) }
+
 /// Exclusive, non-blocking advisory lock (flock). The kernel drops it when the holder exits or crashes.
 /// One per pair at `support/locks/<pair>.lock`, plus one agent-wide.
 public final class RunLock: @unchecked Sendable {
@@ -11,28 +13,40 @@ public final class RunLock: @unchecked Sendable {
     public init(url: URL) { self.url = url }
     deinit { release() }
 
+    public enum Outcome: Equatable, Sendable { case acquired, held, openFailed(errno: Int32) }
+
     private static let log = Logger(subsystem: "app.mirror", category: "RunLock")
 
-    /// False when another holder has it, and also (logged) when the lock file can't be opened.
-    public func tryAcquire() -> Bool {
+    /// Tells "someone else holds it" apart from "the lock file can't be opened".
+    public func attempt() -> Outcome {
         guardLock.lock(); defer { guardLock.unlock() }
-        if fd >= 0 { return true }
+        if fd >= 0 { return .acquired }
         try? FileManager.default.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
         let f = open(url.path, O_CREAT | O_RDWR | O_CLOEXEC, 0o600)
-        guard f >= 0 else {
-            Self.log.error("cannot open lock file, errno \(errno)")
-            return false
-        }
-        if flock(f, LOCK_EX | LOCK_NB) == 0 { fd = f; return true }
+        guard f >= 0 else { return .openFailed(errno: errno) }
+        if flock(f, LOCK_EX | LOCK_NB) == 0 { fd = f; return .acquired }
         close(f)
-        return false
+        return .held
     }
 
-    /// Waits up to `timeout` seconds for the lock (polling, so the wait is bounded).
-    public func acquire(timeout: TimeInterval) -> Bool {
+    /// True only when acquired. Held and open failure both give false (open failure is logged once).
+    public func tryAcquire() -> Bool {
+        switch attempt() {
+        case .acquired: return true
+        case .held: return false
+        case .openFailed(let e): Self.log.error("cannot open lock file, errno \(e)"); return false
+        }
+    }
+
+    /// Waits up to `timeout` seconds while another holder has it. Throws at once if the file can't be opened.
+    public func acquire(timeout: TimeInterval) throws -> Bool {
         let deadline = Date().addingTimeInterval(timeout)
         while true {
-            if tryAcquire() { return true }
+            switch attempt() {
+            case .acquired: return true
+            case .openFailed(let e): throw RunLockError.cannotOpen(errno: e)
+            case .held: break
+            }
             if Date() >= deadline { return false }
             usleep(5_000)
         }

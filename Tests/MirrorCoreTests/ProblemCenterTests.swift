@@ -6,10 +6,13 @@ final class FakeNotifier: Notifying, @unchecked Sendable {
     private let lock = NSLock()
     private var _posts: [(Problem, String, String)] = []
     private var _deliver = true
+    var onPost: (@Sendable () async -> Bool?)?
     var posts: [(Problem, String, String)] { lock.withLock { _posts } }
     var deliver: Bool { get { lock.withLock { _deliver } } set { lock.withLock { _deliver = newValue } } }
     func post(_ p: Problem, pair: PairID, setName: String, detail: String) async -> Bool {
-        lock.withLock { _posts.append((p, setName, detail)); return _deliver }
+        let hook = lock.withLock { _posts.append((p, setName, detail)); return onPost }
+        if let hook, let r = await hook() { return r }
+        return lock.withLock { _deliver }
     }
 }
 
@@ -109,5 +112,37 @@ struct ProblemCenterTests {
         }
         #expect(try ProblemCenter(root: r, notifier: n).active().count == 12)
         #expect(n.posts.count == 12)
+    }
+
+    @Test func unreadableFileThrowsAndIsNotQuarantined() throws {
+        let r = root()
+        try FileManager.default.createDirectory(at: r, withIntermediateDirectories: true)
+        let f = r.appendingPathComponent("problems.json")
+        try Data("[]".utf8).write(to: f)
+        chmod(f.path, 0)
+        defer { chmod(f.path, 0o600) }
+        let c = ProblemCenter(root: r, notifier: FakeNotifier())
+        #expect(throws: (any Error).self) { try c.active() }
+        #expect(FileManager.default.fileExists(atPath: f.path))
+        #expect(!(try FileManager.default.contentsOfDirectory(atPath: r.path)).contains { $0.hasPrefix("problems.corrupt") })
+    }
+
+    @Test func lateDeliveryDoesNotMarkNewOccurrence() async throws {
+        let n = FakeNotifier()
+        let c = ProblemCenter(root: root(), notifier: n)
+        let p = pair
+        // While the first post is in flight, the problem is cleared and raised again; the new one's post fails.
+        n.onPost = { [n] in
+            n.onPost = nil
+            try? c.clear(.deletionsHeld, pair: p)
+            try? await Task.sleep(for: .milliseconds(5))
+            n.deliver = false
+            try? await c.raise(.deletionsHeld, pair: p, setName: "P", detail: "new")
+            return true  // the first occurrence's delivery succeeds late
+        }
+        try await c.raise(.deletionsHeld, pair: p, setName: "P", detail: "old")
+        let a = try c.active()
+        #expect(a.count == 1 && a[0].detail == "new")
+        #expect(a[0].notified == false)
     }
 }

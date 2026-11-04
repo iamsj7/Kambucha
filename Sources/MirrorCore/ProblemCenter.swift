@@ -84,14 +84,15 @@ public struct ProblemCenter: Sendable {
         let stored = try active().first { $0.problem == problem && $0.pair == pair }
         let ok = await notifier.post(problem, pair: pair, setName: stored?.setName ?? setName,
                                      detail: stored?.detail ?? detail)
-        if ok { try markNotified(problem, pair) }
+        // Duplicate posts are harmless: the notification identifier is stable, so a repeat replaces the first.
+        if ok, let since = stored?.since { try markNotified(problem, pair, since: since) }
     }
 
     /// Retries every problem whose notification was not delivered. Call once per run.
     public func retryPending() async throws {
         for p in try active() where !p.notified {
             if await notifier.post(p.problem, pair: p.pair, setName: p.setName, detail: p.detail) {
-                try markNotified(p.problem, p.pair)
+                try markNotified(p.problem, p.pair, since: p.since)
             }
         }
     }
@@ -106,10 +107,11 @@ public struct ProblemCenter: Sendable {
 
     public func active() throws -> [ActiveProblem] { try locked { try load() } }
 
-    private func markNotified(_ problem: Problem, _ pair: PairID) throws {
+    /// Only marks the same occurrence that was posted, not one raised again after a clear.
+    private func markNotified(_ problem: Problem, _ pair: PairID, since: Date) throws {
         try locked {
             var all = try load()
-            guard let i = all.firstIndex(where: { $0.problem == problem && $0.pair == pair }) else { return }
+            guard let i = all.firstIndex(where: { $0.problem == problem && $0.pair == pair && $0.since == since }) else { return }
             all[i].notified = true
             try save(all)
         }
@@ -117,7 +119,7 @@ public struct ProblemCenter: Sendable {
 
     private func locked<T>(_ body: () throws -> T) throws -> T {
         let lock = RunLock(url: root.appendingPathComponent("problems.lock"))
-        guard lock.acquire(timeout: 5) else { throw ProblemCenterError(message: "problems.lock busy") }
+        guard try lock.acquire(timeout: 5) else { throw ProblemCenterError(message: "problems.lock busy") }
         defer { lock.release() }
         return try body()
     }
@@ -125,9 +127,10 @@ public struct ProblemCenter: Sendable {
     /// A corrupt file is moved aside and treated as empty so it can't block every alert.
     private func load() throws -> [ActiveProblem] {
         guard FileManager.default.fileExists(atPath: url.path) else { return [] }
+        let data = try Data(contentsOf: url)  // a read failure throws; it is not corruption
         let d = JSONDecoder()
-        d.dateDecodingStrategy = .iso8601
-        do { return try d.decode([ActiveProblem].self, from: Data(contentsOf: url)) }
+        d.dateDecodingStrategy = .secondsSince1970
+        do { return try d.decode([ActiveProblem].self, from: data) }
         catch {
             let aside = root.appendingPathComponent("problems.corrupt-\(UUID().uuidString).json")
             try? FileManager.default.moveItem(at: url, to: aside)
@@ -138,7 +141,7 @@ public struct ProblemCenter: Sendable {
     private func save(_ list: [ActiveProblem]) throws {
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
         let e = JSONEncoder()
-        e.dateEncodingStrategy = .iso8601
+        e.dateEncodingStrategy = .secondsSince1970  // full precision, so `since` identifies an occurrence
         e.outputFormatting = [.prettyPrinted, .sortedKeys]
         try e.encode(list).write(to: url, options: .atomic)
     }
