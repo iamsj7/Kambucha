@@ -5,6 +5,7 @@ import MirrorCore
 struct MenuBarPanel: View {
     @Bindable var model: AppModel
     @Environment(\.openWindow) private var openWindow
+    @Environment(\.openSettings) private var openSettings
     @State private var network = NetworkStatus()
 
     private var busy: Bool { if case .running = model.status { true } else { false } }
@@ -51,6 +52,7 @@ struct MenuBarPanel: View {
                 }
                 .disabled(model.sets.isEmpty)
                 Button { openMirror("main") } label: { Label("Open Mirror", systemImage: "macwindow") }
+                Button { openSettings(); NSApplication.shared.activate() } label: { Label("Settings…", systemImage: "gearshape") }
                 Divider()
                 Button { NSApplication.shared.terminate(nil) } label: { Label("Quit Mirror", systemImage: "power") }
                     .keyboardShortcut("q")

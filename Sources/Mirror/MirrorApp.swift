@@ -67,7 +67,7 @@ struct MirrorApp: App {
         }
         .menuBarExtraStyle(.window)
 
-        Window("Mirror", id: "main") { MainWindow(model: model) }
+        Window("Mirror", id: "main") { MainWindow(model: model, settings: settings) }
             .defaultLaunchBehavior(opensWindowAtLaunch ? .presented : .suppressed)
             .restorationBehavior(.disabled)
 

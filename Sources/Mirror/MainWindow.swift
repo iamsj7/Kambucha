@@ -10,10 +10,13 @@ enum SidebarItem: Hashable {
     case destination(UUID)
     case archive
     case activity
+    case settings
 }
 
 struct MainWindow: View {
     @Bindable var model: AppModel
+    /// The Settings window's model, so the two never hold different copies of what's saved.
+    let settings: SettingsModel
     @State private var selection: SidebarItem? = .overview
     @State private var addingSet = false
     @State private var addingDestination = false
@@ -24,8 +27,9 @@ struct MainWindow: View {
     @State private var onboarding: OnboardingModel
     @State private var firstPreview: ReviewTarget?
 
-    init(model: AppModel) {
+    init(model: AppModel, settings: SettingsModel) {
         self.model = model
+        self.settings = settings
         _archive = State(initialValue: ArchiveModel(provider: model.services.archive, store: ConfigStore(root: model.support)))
         _activity = State(initialValue: ActivityModel(support: model.support))
         _onboarding = State(initialValue: OnboardingModel(store: ConfigStore(root: model.support),
@@ -48,6 +52,10 @@ struct MainWindow: View {
                 try? await Task.sleep(for: .seconds(onboarding.isComplete ? 30 : 2))
             }
         }
+        // The Dock icon shows only while this window is open; the app is otherwise a menu bar item. Here and not on
+        // the split view, or a first-run window would open behind whatever else is on screen.
+        .onAppear { DockPresence.windowOpened(); model.windowAppeared() }
+        .onDisappear { DockPresence.windowClosed(); model.windowDisappeared() }
         .onChange(of: onboarding.setAwaitingPreview) { _, id in
             guard let id else { return }
             model.reload()
@@ -97,9 +105,6 @@ struct MainWindow: View {
                 if let error = model.lastError { ErrorBar(message: error) { model.dismissError() } }
             }
         }
-        // The Dock icon shows only while this window is open; the app is otherwise a menu bar item.
-        .onAppear { DockPresence.windowOpened(); model.windowAppeared() }
-        .onDisappear { DockPresence.windowClosed(); model.windowDisappeared() }
     }
 
     // MARK: Sidebar
@@ -129,6 +134,7 @@ struct MainWindow: View {
                 Label("Archive", systemImage: "archivebox").tag(SidebarItem.archive)
                 Label("Activity", systemImage: "list.bullet.rectangle").tag(SidebarItem.activity)
             }
+            Label("Settings", systemImage: "gearshape").tag(SidebarItem.settings)
         }
         .toolbar {
             ToolbarItem {
@@ -165,6 +171,8 @@ struct MainWindow: View {
             ArchiveView(model: archive, agent: model.services.agent)
         case .activity:
             ActivityView(model: activity)
+        case .settings:
+            SettingsView(model: settings)
         }
     }
 
