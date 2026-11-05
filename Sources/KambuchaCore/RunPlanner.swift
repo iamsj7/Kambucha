@@ -120,7 +120,7 @@ public struct RunCommand: Codable, Equatable, Sendable {
     }
 }
 
-/// The agent's priority, set by the agent itself. Measured under launchd (docs/proofs.md): a `ProcessType`
+/// The agent's priority, set by the agent itself. Measured under launchd: a `ProcessType`
 /// Background job and everything it spawns stay at scheduling priority 4 whatever the job then calls, and a
 /// plist `Nice` can't be undone without root. So the plist asks for neither, and a background pass lowers
 /// itself instead: the same kernel policy, inherited by rclone, and unlike launchd's it can be lifted.

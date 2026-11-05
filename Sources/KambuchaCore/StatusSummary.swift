@@ -29,7 +29,7 @@ public enum DestinationHealth: Equatable, Sendable {
     case backedUp(last: Date)
 }
 
-/// Folds the on-disk state into the one status the menu bar shows (spec sections 8a and 12).
+/// Folds the on-disk state into the one status the menu bar shows.
 public enum StatusSummary {
     /// A real mismatch said as one, in the status and the run record: never a neutral wait.
     public static func notAcceptedText(count n: Int) -> String {

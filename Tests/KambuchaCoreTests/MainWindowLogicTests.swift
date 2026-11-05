@@ -124,7 +124,7 @@ private func aSet() -> BackupSet { BackupSet(name: "Projects", source: URL(fileU
 private let driveA = Destination(name: "Drive", kind: .googleDrive)
 private let driveB = Destination(name: "iCloud", kind: .iCloudFolder)
 
-// MARK: Any rule change asks about what's already mirrored (final review S11)
+// MARK: Any rule change asks about what's already mirrored
 
 @MainActor private func changedSet(_ change: (inout BackupSet) -> Void) -> BackupSet {
     var set = aSet()

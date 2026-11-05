@@ -122,3 +122,24 @@ import Foundation
         #expect(!FilterMatcher(lines: ["- [", "- a(b"]).isExcluded("["))
     }
 }
+
+private struct Caller: AgentTrust {
+    let trusted: Bool
+    func verifyCaller() throws { if !trusted { throw AgentFailure.untrustedCaller } }
+    func verifyHelper(at url: URL) throws {}
+}
+
+@Suite struct RunRequestTrustTests {
+    @Test func aScheduledRunNeedsNoCaller() throws {
+        #expect(AgentExit.allows(try #require(RunCommand.parse([])), trust: Caller(trusted: false)))
+    }
+
+    @Test func aRequestOnlyComesFromTheApp() throws {
+        let set = UUID().uuidString, destination = UUID().uuidString
+        for arguments in [["--run-now"], ["--run-now", set], ["--allow-deletes", set, destination, "999999"]] {
+            let command = try #require(RunCommand.parse(arguments))
+            #expect(!AgentExit.allows(command, trust: Caller(trusted: false)))
+            #expect(AgentExit.allows(command, trust: Caller(trusted: true)))
+        }
+    }
+}

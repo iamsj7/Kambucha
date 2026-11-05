@@ -2,7 +2,7 @@ import Foundation
 
 public enum DeletionDecision: Equatable { case proceed(maxDelete: Int), hold(count: Int) }
 
-/// Decides whether a sync pass that would delete files should be held for review (spec section 10).
+/// Decides whether a sync pass that would delete files should be held for review.
 ///
 /// Files under any `.git` directory are excluded from the hold decision.
 public struct DeletionGate {

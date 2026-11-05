@@ -14,7 +14,7 @@ public struct KeychainStore: SecretStoring {
     public init(service: String = "com.shaikjaleel.kambucha") { self.service = service }
 
     /// Asks for no interaction: the agent has nobody to answer a dialog, and a secret must never fall
-    /// back to anywhere else. This is a backstop, unproven on the file Keychain until Gate 7. What
+    /// back to anywhere else. This is a backstop, not yet proven on the file Keychain. What
     /// keeps prompts away is that the agent is the only reader.
     static func baseQuery(service: String, key: String) -> [String: Any] {
         let noInteraction = LAContext()

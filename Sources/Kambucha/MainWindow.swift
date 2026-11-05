@@ -2,7 +2,7 @@ import SwiftUI
 import AppKit
 import KambuchaCore
 
-/// What the sidebar can select. Archive and Activity are separate cases so Task 18 can swap in
+/// What the sidebar can select. Archive and Activity are separate cases so each can swap in
 /// `ArchiveView` and `ActivityView` by editing only `MainWindow.detail`.
 enum SidebarItem: Hashable {
     case overview

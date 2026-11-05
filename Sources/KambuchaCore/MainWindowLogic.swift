@@ -19,7 +19,7 @@ public protocol DeletionDryRunProviding: Sendable {
 }
 
 /// Finds files already mirrored that new exclude rules would now skip, and moves them to the archive
-/// when the owner asks. Never automatic (spec section 9).
+/// when the owner asks. Never automatic.
 public protocol MirroredExcludeInspecting: Sendable {
     func mirroredFiles(matching excludes: [UserRule], set: BackupSet) async throws -> [String]
     func archive(_ files: [String], set: BackupSet) async throws

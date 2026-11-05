@@ -4,7 +4,7 @@ cd "${0:A:h}/.."
 IDENTITY="$(scripts/signing-identity.sh)"
 [[ -x vendor/rclone/rclone && -f vendor/rclone/LICENSE.txt ]] || { echo "run scripts/fetch-rclone.sh first" >&2; exit 1; }
 
-# Default build has no proof code. --proofs compiles the --probe* modes and --register-agent (Gate 1 only).
+# Default build has no proof code. --proofs compiles the --probe* modes and --register-agent.
 flags=()
 [[ "${1:-}" == "--proofs" ]] && flags=(-Xswiftc -DKAMBUCHA_PROBES)
 # KAMBUCHA_DIST / KAMBUCHA_SCRATCH let a proof run build somewhere other than dist/ and .build/.

@@ -91,7 +91,7 @@ Your backups stay where they are, in the `Mac Backup` folder of each destination
 
 ## How it works, in short
 
-Kambucha is two programs in one app. The menu bar app is what you see. A small background helper does the backing up, so backups continue even when the window is closed. Both use a copy of [rclone](https://rclone.org) that is bundled inside the app, and never any rclone you installed yourself. Passwords and sign-in tokens are kept only in your login Keychain.
+Kambucha is two programs in one app. The menu bar app is what you see. A small background helper does the backing up, so backups continue even when the window is closed. Both use a copy of [rclone](https://rclone.org) that is bundled inside the app, and never any rclone you installed yourself. Passwords and sign-in tokens are stored only in your login Keychain, and rclone gets them only during a run. [SECURITY.md](SECURITY.md) has the details, including what Kambucha doesn't protect against.
 
 ## Contributing, security and credits
 

@@ -11,7 +11,7 @@ public struct AppSettings: Codable, Equatable, Sendable {
         }
     }
 
-    /// How often the Deep check runs (spec section 12: monthly by default).
+    /// How often the Deep check runs (monthly by default).
     public var deepCheck: DeepCheckFrequency = .monthly
     /// Archive retention for sets created from now on. Each set keeps its own `archiveDays`.
     public var defaultRetentionDays = 30
@@ -58,7 +58,7 @@ public struct SettingsStore: Sendable {
     }
 }
 
-/// When the restore drill reminder is due (spec section 8a): after the first backup to an encrypted
+/// When the restore drill reminder is due: after the first backup to an encrypted
 /// destination, then every 6 months. A reminder only; it never blocks anything.
 public enum DrillSchedule {
     public static let intervalMonths = 6

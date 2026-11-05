@@ -204,7 +204,7 @@ struct StatusSummaryTests {
         #expect(StatusSummary.recheckText(count: 1200) == "Re-checking 1,200 files that didn't match, waiting for iCloud to download them")
     }
 
-    // MARK: External drives (final review S4)
+    // MARK: External drives
 
     let ssd = Destination(name: "SSD", kind: .externalDrive, encrypted: false, volumeUUID: "U")
     func unplugged(_ s: BackupSet, _ ds: [Destination], _ states: [PairID: SetState], _ recs: [RunRecord] = [],

@@ -5,7 +5,7 @@ import Security
 /// reader are then the same signed binary, so no access list or prompt is involved. `KeychainStore`
 /// lives in `KambuchaSecrets`, which only the agent links. Kambucha.app goes through `AgentClient`, which
 /// passes secrets over the agent's stdin and stdout, and `verify-bundle.sh` checks its binary has no
-/// `SecItem` references. Gate 7 proves this, including after a rebuild with the same signing identity.
+/// `SecItem` references. This should hold after a rebuild with the same signing identity, but it has yet to be tested on a real cloud destination.
 public protocol SecretStoring: Sendable {
     func read(_ key: String) throws -> String?
     func write(_ value: String, key: String) throws

@@ -133,7 +133,7 @@ struct ArchiveModelTests {
         #expect(!RestoreTarget.isInside(URL(fileURLWithPath: "/Users/me/Projects-restored/a.txt"), anyOf: [src]))
     }
 
-    // MARK: The latest backup (final review S12)
+    // MARK: The latest backup
 
     @Test func theLatestBackupOpensAtTheSetAndWalksIntoFolders() async throws {
         let fake = FakeArchive()

@@ -20,6 +20,14 @@ public struct RunPaths: Sendable {
 public enum AgentExit {
     /// Sysexits' "try again later": another run holds the lock, so a request that needs a run wasn't carried out.
     public static let busy: Int32 = 75
+    /// Sysexits' "permission denied": the request didn't come from Kambucha.
+    public static let refused: Int32 = 77
+
+    /// launchd's scheduled run has no caller to check and asks for nothing. Anything else does, and `--allow-deletes`
+    /// lifts the mass-deletion hold, so it has to come from the app.
+    public static func allows(_ command: RunCommand, trust: any AgentTrust) -> Bool {
+        command.isScheduled || (try? trust.verifyCaller()) != nil
+    }
 }
 
 public enum RunEnd: Equatable, Sendable {
@@ -33,7 +41,7 @@ public enum RunEnd: Equatable, Sendable {
     }
 }
 
-/// Runs every due pair, one at a time, through the flow in spec section 10. This owns the rule the
+/// Runs every due pair, one at a time, in a fixed flow. This owns the rule the
 /// whole app depends on: the stored event ID moves only after sync and verification both passed
 /// (`finish`), or when a batch held nothing but excluded paths, so nothing was owed. Anything else
 /// (a failure, a kill, a held source) replays from where it was.

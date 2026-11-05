@@ -39,7 +39,7 @@ Kambucha's first-run screen has four steps, in this order, and stays until each 
 3. **Allow Notifications.** Kambucha tells you about problems this way.
 4. **Add Your First Set.** See section 3.
 
-When the last step is done, Kambucha turns on Open Kambucha at login, so the menu bar icon is there after a restart. Backups run whether or not it is on. To turn it off, choose Settings in the menu bar panel. After the first run the window no longer opens by itself: choose Open Kambucha from the menu bar.
+When the last step is done, Kambucha turns on Open Kambucha at login, so the menu bar icon is there after a restart. Backups run whether or not it is on. To turn it off, choose Settings in the menu bar menu. After the first run the window no longer opens by itself: choose Open Kambucha from the menu bar.
 
 The background helper is inside the app, and this permission should cover it too, but macOS may treat the two separately, so switching on Kambucha may not be enough. Kambucha checks by having the helper, started by macOS, read a file that only Full Disk Access can open. Reading Documents and iCloud Drive is not enough, because macOS can allow those on their own.
 

@@ -4,7 +4,7 @@ import KambuchaCore
 import Security
 
 /// Pins the agent's caller and helper to our signature. The caller check is defence in depth: a
-/// process of the same user can exec the signed Kambucha binary and pass it. See spec section 8a.
+/// process of the same user can exec the signed Kambucha binary and pass it.
 /// Team ID is the certificate's OU, not the code in its name. The two identifiers differ on purpose:
 /// rclone can run commands (`--password-command`), so if it could pass as the caller, anyone could
 /// use it to launder a request.

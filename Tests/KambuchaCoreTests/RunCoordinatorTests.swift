@@ -4275,7 +4275,7 @@ private struct LeavesAfterOneMoreLook: RcloneRunning {
     }
 }
 
-/// A set was removed and another added under its name: the old folder is still there (final review S6).
+/// A set was removed and another added under its name: the old folder is still there.
 @Suite struct NameInUseTests {
     private func leftBehind(_ h: Harness) throws -> UUID {
         let old = UUID()
@@ -4330,7 +4330,7 @@ private struct LeavesAfterOneMoreLook: RcloneRunning {
     }
 }
 
-/// A hold with nothing countable in it, from the review to the run (final review S9).
+/// A hold with nothing countable in it, from the review to the run.
 @Suite struct EmptyHoldTests {
     @Test func approvingZeroReleasesAHoldOverOnlyGitFiles() async throws {
         let h = try Harness(); try h.prime()
@@ -4353,7 +4353,7 @@ private struct LeavesAfterOneMoreLook: RcloneRunning {
     }
 }
 
-/// The agent's exit is all the app hears of a request it couldn't take (final review S10).
+/// The agent's exit is all the app hears of a request it couldn't take.
 @Suite struct BusyAgentTests {
     private func holdingTheLock(_ h: Harness, _ command: RunCommand) async throws -> RunEnd {
         let other = RunLock(url: h.support.appendingPathComponent("locks/agent.lock"))

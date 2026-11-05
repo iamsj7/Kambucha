@@ -16,7 +16,7 @@ Bug reports and pull requests are welcome.
 
         swift test
 
-The tests use their own temporary folders and never touch your real files. One test suite mounts a small disk image. Two tests that involve rclone sometimes fail under load: `anExpiredSignInIsToldApartFromAFailedRead` and `kitProofAgainstRealRclone`. They're being worked on, so run those again before treating a failure as yours.
+The tests use their own temporary folders and never touch your real files. One test suite mounts a small disk image, and the secret store tests write throwaway items to your login Keychain and remove them. A test run that gets killed can leave one behind, with `kambucha.test` in its name. Two tests that involve rclone sometimes fail under load: `anExpiredSignInIsToldApartFromAFailedRead` and `kitProofAgainstRealRclone`. They're being worked on, so run those again before treating a failure as yours.
 
 ## Pull requests
 

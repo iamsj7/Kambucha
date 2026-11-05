@@ -2,7 +2,7 @@ import Foundation
 import KambuchaCore
 @preconcurrency import UserNotifications
 
-/// Posts problems as macOS notifications. Swap point: if Gate 1 shows the agent cannot post directly,
+/// Posts problems as macOS notifications. Swap point: if the agent can't post directly,
 /// replace this with a `Notifying` that launches `Kambucha --notify <problem-id>` instead.
 struct UNNotifier: Notifying {
     func post(_ problem: Problem, pair: PairID, setName: String, detail: String) async -> Bool {

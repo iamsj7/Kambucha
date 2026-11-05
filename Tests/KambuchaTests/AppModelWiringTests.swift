@@ -182,7 +182,7 @@ private func vol(_ uuid: String, internalLooking: Bool = false) -> VolumeInfo {
         #expect(m.overviewDestinations.first?.standing == .attention)
     }
 
-    // MARK: Destination status says what's true (final review B1)
+    // MARK: Destination status says what's true
 
     private func destinationText(_ change: (inout SetState) -> Void) throws -> DestinationStatus {
         let d = Destination(name: "iCloud", kind: .iCloudFolder)
@@ -287,7 +287,7 @@ private func vol(_ uuid: String, internalLooking: Bool = false) -> VolumeInfo {
         #expect(m.reviewEntries.isEmpty)
     }
 
-    // MARK: Allow Once while a run holds the lock (final review S10)
+    // MARK: Allow Once while a run holds the lock
 
     private func heldModel() throws -> (AppModel, BackupSet) {
         let d = Destination(name: "iCloud", kind: .iCloudFolder)
@@ -336,7 +336,7 @@ private func vol(_ uuid: String, internalLooking: Bool = false) -> VolumeInfo {
         #expect(m.lastError == "The backup agent stopped with code 1. why")
     }
 
-    // MARK: Problems end with their pair (final review S5)
+    // MARK: Problems end with their pair
 
     private func activeProblems(_ m: AppModel) throws -> [Problem] {
         try ProblemCenter(root: m.support, notifier: NoNotifier()).active().map(\.problem)

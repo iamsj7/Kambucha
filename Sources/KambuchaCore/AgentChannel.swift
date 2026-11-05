@@ -92,7 +92,7 @@ public struct AgentResponse: Codable, Sendable, CustomStringConvertible, CustomD
 /// `verifyHelper` throws `AgentFailure.untrustedHelper` unless `url` is our signed rclone.
 ///
 /// The caller check is defence in depth, not a boundary: a process of the same user can exec the
-/// signed Kambucha binary and pass it. User presence is what guards a Kit reveal (spec section 8a).
+/// signed Kambucha binary and pass it. User presence is what guards a Kit reveal.
 public protocol AgentTrust: HelperValidating {
     /// Throws `AgentFailure.untrustedCaller` unless the parent process is Kambucha.app.
     func verifyCaller() throws
@@ -220,7 +220,7 @@ public struct AgentService: Sendable {
         }
     }
 
-    /// A kit that opens nothing alerts at once (spec section 8a). A drill that couldn't tell never gets here.
+    /// A kit that opens nothing alerts at once. A drill that couldn't tell never gets here.
     /// The verdict stands whether or not the record can be saved.
     private func recordDrill(_ destination: Destination, passed: Bool) async {
         let center = ProblemCenter(root: support, notifier: notifier)

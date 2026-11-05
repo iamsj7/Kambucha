@@ -1,5 +1,5 @@
 #!/bin/zsh
-# Gate 2 (deterministic): do copies into iCloud Drive share physical blocks with their source?
+# Do copies into iCloud Drive share physical blocks with their source?
 # Reads physical offsets via F_LOG2PHYS_EXT (KambuchaAgent --probe-blocks) instead of df.
 # Generated data only. Deletes only ~/Documents/.kambucha-proof-tmp and "Mac Backup Test" in iCloud Drive.
 set -euo pipefail

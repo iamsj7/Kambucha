@@ -4,7 +4,7 @@ import CoreServices
 import Foundation
 import UserNotifications
 
-/// Gate 1 and gate 4 proofs. Not part of the engine.
+/// Diagnostics for a --proofs build. Not part of the engine.
 enum Probe {
     static let iCloud = NSString(string: "~/Library/Mobile Documents/com~apple~CloudDocs").expandingTildeInPath
     static let documents = NSString(string: "~/Documents").expandingTildeInPath
@@ -74,7 +74,7 @@ enum Probe {
         log("probe end")
     }
 
-    // MARK: Gate 4
+    // MARK: Uploads
 
     final class Box: @unchecked Sendable {
         var historyDone = false

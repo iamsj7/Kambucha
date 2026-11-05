@@ -4,11 +4,15 @@ import KambuchaSecrets
 import os
 
 /// Builds the real graph and hands over to `RunCoordinator`. All run logic lives there, so the engine
-/// can move into the app if Gate 1 needs it to.
+/// could move into the app.
 enum BackupRun {
     private static let log = Logger(subsystem: KambuchaCore.bundleID, category: "BackupRun")
 
     static func run(_ requested: RunCommand) async -> Int32 {
+        guard AgentExit.allows(requested, trust: SignedCodeTrust()) else {
+            log.error("refused a run request from an untrusted caller")
+            return AgentExit.refused
+        }
         let places = Places()
         var command = requested
         if (try? SettingsStore(root: places.support).load())?.fullSpeed == true { command.fullSpeed = true }

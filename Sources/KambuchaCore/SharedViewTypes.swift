@@ -31,7 +31,7 @@ public struct PreviewResult: Equatable, Sendable {
     }
 }
 
-/// Implemented by the engine in Task 15. Screens take this so they can be tested with fakes.
+/// Implemented by the engine. Screens take this so they can be tested with fakes.
 public protocol PreviewProviding: Sendable {
     func preview(set: BackupSet) async throws -> PreviewResult
     func rule(for group: PreviewGroup, included: Bool) -> UserRule

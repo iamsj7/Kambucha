@@ -289,7 +289,7 @@ final class AppModel {
         lastError = nil
         // Starting a run while a drive unmounts could write to a drive that is going away.
         guard !eject.isEjecting else { lastError = "A drive is being ejected. Start the backup when it finishes."; return }
-        // No backup for a set starts until its preview was accepted once (spec section 9).
+        // No backup for a set starts until its preview was accepted once.
         // Accepted sets still run; the others are named so the owner can preview them.
         let plan = RunNowPlan.make(sets: sets, target: set, isAccepted: \.isPreviewAccepted)
         if !plan.unaccepted.isEmpty {

@@ -1,5 +1,5 @@
 #!/bin/zsh
-# Gate 3: symlink round trip through iCloud Drive with rclone --links.
+# Symlink round trip through iCloud Drive with rclone --links.
 # Creates and deletes only: a temp source, a temp restore folder, and "Mac Backup Test/links".
 set -euo pipefail
 cd "${0:A:h}/.."

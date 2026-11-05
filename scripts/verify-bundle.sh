@@ -38,7 +38,7 @@ if grep -qE '_SecItem|_SecKeychain' <<<"$symbols"; then fail "Kambucha reference
 # Privileged binaries must not ship proof modes. Opt out only for a --proofs build.
 if (( ! proofs )); then
   for b in KambuchaAgent Kambucha; do
-    ! grep -aq -e '--probe' -e '--register-agent' "$app/Contents/MacOS/$b" || fail "$b contains proof strings (build with --proofs only for Gate 1)"
+    ! grep -aq -e '--probe' -e '--register-agent' -e '--snapshot' -e '--fixture' "$app/Contents/MacOS/$b" || fail "$b contains proof strings (a release build must not have them)"
   done
 fi
 
