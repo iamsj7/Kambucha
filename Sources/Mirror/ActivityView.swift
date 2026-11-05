@@ -104,6 +104,7 @@ struct ActivityView: View {
 
     var body: some View {
         VStack(spacing: 0) {
+            scopeBar
             if model.records.isEmpty && model.reachedScanLimit {
                 PageState {
                     ContentUnavailableView("No Results", systemImage: "magnifyingglass",
@@ -171,17 +172,6 @@ struct ActivityView: View {
         .searchable(text: $model.filter.search, prompt: "Search sets")
         .toolbar {
             ToolbarItemGroup {
-                Picker("Set", selection: $model.filter.setID) {
-                    Text("All Sets").tag(UUID?.none)
-                    ForEach(model.sets, id: \.id) { Text($0.name).tag(UUID?.some($0.id)) }
-                }
-                .help("Show one set's runs")
-                resultPicker
-                    .help("Show all runs, only those with problems, or only those that succeeded")
-                Toggle(isOn: $model.filter.includeSkipped) { Label("Show Skipped Runs", systemImage: "minus.circle") }
-                    .help("Include runs that had nothing to do or couldn't start, such as a paused set or a drive that isn't connected")
-                    .disabled(model.filter.result != .all)
-                    .accessibilityHint("Skipped runs are hidden by default")
                 Button { Task { await model.reload() } } label: { Label("Refresh", systemImage: "arrow.clockwise") }
                     .help("Reload the run history")
                 Button { model.revealLogs() } label: { Label("Reveal Logs", systemImage: "doc.text.magnifyingglass") }
@@ -196,6 +186,24 @@ struct ActivityView: View {
                 await model.reload()
                 try? await Task.sleep(for: .seconds(10))
             }
+        }
+    }
+
+    private var scopeBar: some View {
+        PageScopeBar {
+            Picker("Set", selection: $model.filter.setID) {
+                Text("All Sets").tag(UUID?.none)
+                ForEach(model.sets, id: \.id) { Text($0.name).tag(UUID?.some($0.id)) }
+            }
+            .fixedSize()
+            .help("Show one set's runs")
+            resultPicker
+                .help("Show all runs, only those with problems, or only those that succeeded")
+            Spacer(minLength: 0)
+            Toggle("Show Skipped Runs", isOn: $model.filter.includeSkipped)
+                .help("Include runs that had nothing to do or couldn't start, such as a paused set or a drive that isn't connected")
+                .disabled(model.filter.result != .all)
+                .accessibilityHint("Skipped runs are hidden by default")
         }
     }
 

@@ -110,6 +110,22 @@ struct PageBanner<Content: View>: View {
     }
 }
 
+/// A data page's scope: what it's showing, and its main action. Under the toolbar and not in it, as a toolbar has room for
+/// one switcher and search, and overflows the rest into a menu.
+struct PageScopeBar<Content: View>: View {
+    @ViewBuilder var content: Content
+
+    var body: some View {
+        VStack(spacing: 0) {
+            HStack(spacing: 12) { content }
+                .padding(.horizontal, PageLayout.dataInset)
+                .padding(.vertical, PageLayout.bannerGap)
+                .frame(maxWidth: .infinity, alignment: .leading)
+            Divider()
+        }
+    }
+}
+
 /// A page with banners above and below it. They stay put while the page scrolls.
 struct BannerPage<Top: View, Content: View, Bottom: View>: View {
     var kind = PageLayout.Kind.data

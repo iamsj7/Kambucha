@@ -533,6 +533,7 @@ struct ArchiveView: View {
 
     var body: some View {
         BannerPage {
+            if !model.isSearching { scopeBar }
             if let due = model.drillDueDestinations.first { reminder(due) }
         } content: {
             if model.isSearching { searchResults } else if model.mode == .archive { content } else { latest }
@@ -551,25 +552,17 @@ struct ArchiveView: View {
                 }
             }
             ToolbarItem(placement: .principal) { modePicker }
-            ToolbarItemGroup {
-                if showsLatest {
-                    Button(model.folder.isEmpty ? "Restore Whole Set…" : "Restore This Folder…") {
-                        Task { await model.restoreLatest(nil, chooseLocation: chooseLocation) }
+            ToolbarItem {
+                Menu {
+                    Button { Task { await model.reloadAll() } } label: { Label("Reload", systemImage: "arrow.clockwise") }
+                    if !model.encryptedDestinations.isEmpty {
+                        Button { openDrill() } label: { Label("Test Recovery Kit", systemImage: "key.horizontal") }
+                            .disabled(agent == nil)
                     }
-                    .disabled(model.selectedDestination == nil)
-                    .accessibilityHint("Asks where to put the restored copy")
+                } label: {
+                    Label("More", systemImage: "ellipsis")
                 }
-                Picker("Set", selection: $model.selection.set) {
-                    ForEach(model.sets) { Text($0.name).tag(Optional($0.id)) }
-                }
-                Picker("Destination", selection: $model.selection.destination) {
-                    ForEach(model.destinationsForSelectedSet) { Text($0.name).tag(Optional($0.id)) }
-                }
-                Button { Task { await model.reloadAll() } } label: { Label("Reload", systemImage: "arrow.clockwise") }
-                    .help("Read the archive again")
-                Button { openDrill() } label: { Label("Test Recovery Kit", systemImage: "key.horizontal") }
-                    .help("Check that your Recovery Kit still opens a backup")
-                    .disabled(model.encryptedDestinations.isEmpty || agent == nil)
+                .help("Reload, and more")
             }
         }
         .task(id: model.selection) {
@@ -584,6 +577,30 @@ struct ArchiveView: View {
     }
 
     /// A search covers both, so there's nothing for this to switch while one is on.
+    /// Destination shows only when there's a choice, and search covers everything, so it needs neither.
+    private var scopeBar: some View {
+        PageScopeBar {
+            Picker("Set", selection: $model.selection.set) {
+                ForEach(model.sets) { Text($0.name).tag(Optional($0.id)) }
+            }
+            .fixedSize()
+            if model.destinationsForSelectedSet.count > 1 {
+                Picker("Destination", selection: $model.selection.destination) {
+                    ForEach(model.destinationsForSelectedSet) { Text($0.name).tag(Optional($0.id)) }
+                }
+                .fixedSize()
+            }
+            Spacer(minLength: 0)
+            if showsLatest {
+                Button(model.folder.isEmpty ? "Restore Whole Set…" : "Restore This Folder…") {
+                    Task { await model.restoreLatest(nil, chooseLocation: chooseLocation) }
+                }
+                .disabled(model.selectedDestination == nil)
+                .accessibilityHint("Asks where to put the restored copy")
+            }
+        }
+    }
+
     @ViewBuilder private var modePicker: some View {
         let picker = Picker("Show", selection: $model.mode) {
             Text("Older Versions").tag(ArchiveModel.Mode.archive)
