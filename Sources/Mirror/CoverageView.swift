@@ -113,9 +113,11 @@ struct CoverageView: View {
         .confirmationDialog(turningOff.map { CoverageTurnOff.title(set: $0.setName, destination: $0.destinationName) } ?? "",
                             isPresented: Binding(get: { turningOff != nil }, set: { if !$0 { turningOff = nil } }),
                             titleVisibility: .visible, presenting: turningOff) { request in
-            Button(CoverageTurnOff.button, role: .destructive) {
+            // Not destructive, as the owner chose this by turning the cell off. The shortcut keeps it off Return, as in MainWindow.
+            Button(CoverageTurnOff.button) {
                 model.setDestination(request.destination, on: false, for: request.set)
             }
+            .keyboardShortcut("t", modifiers: .command)
             Button("Cancel", role: .cancel) {}
         } message: { request in
             Text(CoverageTurnOff.message(destination: request.destinationName,
