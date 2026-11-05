@@ -13,6 +13,24 @@ enum RestoreTarget {
             return t.count >= s.count && Array(t.prefix(s.count)) == s
         }
     }
+
+    /// Where a backed-up path lived in the set's source: `Archive/<set>/<stamp>/<rest>` or `Sets/<set>/<rest>`.
+    static func original(of path: String, in set: BackupSet) -> URL? {
+        let parts = path.split(separator: "/").map(String.init)
+        let skip = parts.first == "Sets" ? 2 : parts.first == "Archive" ? 3 : parts.count
+        guard parts.count > skip else { return nil }
+        return parts.dropFirst(skip).reduce(set.source) { $0.appendingPathComponent($1) }
+    }
+
+    /// The folder a file came from, or the nearest one still there if that's been deleted too.
+    static func startFolder(for original: URL, in set: BackupSet) -> URL? {
+        var folder = original.deletingLastPathComponent()
+        while isInside(folder, anyOf: [set.source]) {
+            if FileManager.default.fileExists(atPath: folder.path) { return folder }
+            folder.deleteLastPathComponent()
+        }
+        return nil
+    }
 }
 
 struct ArchiveSelection: Hashable { var set: UUID?; var destination: UUID? }
@@ -110,14 +128,16 @@ final class ArchiveModel {
     /// at the top is the whole set. The same guards as an archived file.
     func restoreLatest(_ item: BackupItem?, chooseLocation: (ArchiveEntry) async -> URL?) async {
         guard let path = latestPath(item?.name), let set = selectedSet else { return }
-        await restore(ArchiveEntry(id: path, setName: set.name, stamp: now(), path: path, size: item?.size ?? 0),
+        await restore(ArchiveEntry(id: path, setName: set.name, stamp: now(), path: path, size: item?.size ?? 0,
+                                   isFolder: item?.isFolder ?? true),
                       chooseLocation: chooseLocation)
     }
 
     /// Everything one run moved to the archive, as a folder. How a mass deletion is undone.
     func restoreRun(of entry: ArchiveEntry, chooseLocation: (ArchiveEntry) async -> URL?) async {
         let path = entry.path.split(separator: "/").prefix(3).joined(separator: "/")
-        await restore(ArchiveEntry(id: path, setName: entry.setName, stamp: entry.stamp, path: path, size: 0), chooseLocation: chooseLocation)
+        await restore(ArchiveEntry(id: path, setName: entry.setName, stamp: entry.stamp, path: path, size: 0, isFolder: true),
+                      chooseLocation: chooseLocation)
     }
 
     /// Archived files grouped by the day they were archived, newest first.
@@ -129,13 +149,19 @@ final class ArchiveModel {
         }
     }
 
-    /// Restores one file or folder to a place the owner picks. Never into a backed-up folder, where it could
-    /// replace the original.
+    /// Where the save panel opens: a file's original folder. A folder has no such place, as it can't go back there.
+    func startFolder(for entry: ArchiveEntry) -> URL? {
+        guard !entry.isFolder, let set = selectedSet, let original = RestoreTarget.original(of: entry.path, in: set) else { return nil }
+        return RestoreTarget.startFolder(for: original, in: set)
+    }
+
+    /// Restores one file or folder to a place the owner picks. A file can go back into a backed-up folder, where
+    /// the save panel asks before replacing anything. A folder can't, as it could overwrite newer work file by file.
     func restore(_ entry: ArchiveEntry, chooseLocation: (ArchiveEntry) async -> URL?) async {
         guard let set = selectedSet, let dest = selectedDestination else { return }
         guard let target = await chooseLocation(entry) else { restoreState = .idle; return }
-        if RestoreTarget.isInside(target, anyOf: sets.map(\.source)) {
-            restoreState = .failed("Choose a place outside the folders Mirror backs up, so the original isn't replaced.")
+        if entry.isFolder, RestoreTarget.isInside(target, anyOf: sets.map(\.source)) {
+            restoreState = .failed("Choose a place outside the folders Mirror backs up, so newer files aren't replaced.")
             return
         }
         let name = (entry.path as NSString).lastPathComponent
@@ -158,13 +184,14 @@ final class ArchiveModel {
 }
 
 @MainActor
-func chooseRestoreLocation(for entry: ArchiveEntry) async -> URL? {
+func chooseRestoreLocation(for entry: ArchiveEntry, startingIn folder: URL?) async -> URL? {
     let panel = NSSavePanel()
     panel.nameFieldStringValue = (entry.path as NSString).lastPathComponent
     panel.prompt = "Restore"
-    panel.message = "Choose where to put the restored copy. Your original files aren't touched."
+    panel.message = entry.isFolder ? "Choose where to put the restored copy. Your original files aren't touched."
+                                   : "This is where the file was. Choose another place to keep both copies."
     panel.canCreateDirectories = true
-    panel.directoryURL = FileManager.default.urls(for: .desktopDirectory, in: .userDomainMask).first
+    panel.directoryURL = folder ?? FileManager.default.urls(for: .desktopDirectory, in: .userDomainMask).first
     return await withCheckedContinuation { c in
         panel.begin { c.resume(returning: $0 == .OK ? panel.url : nil) }
     }
@@ -173,7 +200,9 @@ func chooseRestoreLocation(for entry: ArchiveEntry) async -> URL? {
 struct ArchiveView: View {
     @Bindable var model: ArchiveModel
     let agent: AgentClient?
-    var chooseLocation: (ArchiveEntry) async -> URL? = { await chooseRestoreLocation(for: $0) }
+    private var chooseLocation: (ArchiveEntry) async -> URL? {
+        { [model] entry in await chooseRestoreLocation(for: entry, startingIn: model.startFolder(for: entry)) }
+    }
     @State private var drill: DrillModel?
     @State private var showDrill = false
     @State private var focused: ArchiveEntry.ID?

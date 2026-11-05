@@ -17,10 +17,11 @@ public struct RestoreService: Sendable {
     }
 
     /// - `sources`: the source folders of the backup sets. A destination equal to, inside, or containing one is
-    ///   refused unless `overwrite` is true. Required, so the guard cannot be forgotten.
+    ///   refused unless `overwrite` is true. Required, so the guard cannot be forgotten. One file may go inside a
+    ///   source, as that's where a deleted file belongs; what's already there still needs `replacingFile`.
     /// - A `to` folder that already holds anything is refused unless `overwrite` is true.
     /// - `asFile`: `from` is one file and `to` names the file to create, which must not already exist.
-    /// - `replacingFile`: the owner agreed to replace the plain file at `to`. Nothing else: the source guard stands.
+    /// - `replacingFile`: the owner agreed to replace the plain file at `to`. Never a folder or a link.
     /// - `manifest`/`manifestSubpath`: links in the manifest that are missing from the restored files are
     ///   recreated; `manifestSubpath` is the set-relative folder that `to` holds.
     public func restore(from: String, context: RcloneContext, to: URL, sources: [URL], overwrite: Bool = false, asFile: Bool = false,
@@ -30,7 +31,7 @@ public struct RestoreService: Sendable {
             let dest = PathGuard.canonical(to)
             for s in sources {
                 let src = PathGuard.canonical(s)
-                if PathGuard.denyContains(dest, src) || PathGuard.denyContains(src, dest) {
+                if PathGuard.denyContains(src, dest) || (!asFile && PathGuard.denyContains(dest, src)) {
                     throw RestoreError.overSource(s.path)
                 }
             }

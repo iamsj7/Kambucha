@@ -230,13 +230,14 @@ private let stamp = "2026-11-04T10-00-00"
         #expect(try String(contentsOf: to, encoding: .utf8) == "precious")
     }
 
-    @Test func nothingIsRestoredOverASource() async throws {
+    @Test func aFileInTheSourceIsKeptUnlessTheOwnerAgreed() async throws {
         let r = try Rig()
         try r.put("Archive/Docs/\(stamp)/a.txt", "old")
+        try r.put("a.txt", "mine", in: r.source)
         let to = r.source.appendingPathComponent("a.txt")
         let answer = try await r.restore("Archive/Docs/\(stamp)/a.txt", to: to.path)
         #expect(answer.ok != true)
-        #expect(!FileManager.default.fileExists(atPath: to.path))
+        #expect(try String(contentsOf: to, encoding: .utf8) == "mine")
     }
 
     @Test(arguments: ["Archive/Other/\(stamp)/a.txt", "Manifests/Docs.json", ".mirror-root", "/etc/hosts", "Sets/Other/a.txt",
@@ -270,14 +271,14 @@ private let stamp = "2026-11-04T10-00-00"
         #expect(try String(contentsOf: to, encoding: .utf8) == "archived")
     }
 
-    @Test func replacingNeverLiftsTheSourceGuard() async throws {
+    @Test func replacingCoversAFileInTheSourceButNeverTheSourceItself() async throws {
         let r = try Rig()
         try r.put("Archive/Docs/\(stamp)/a.txt", "archived")
         try r.put("a.txt", "mine", in: r.source)
         let to = r.source.appendingPathComponent("a.txt")
-        let answer = try await r.restore("Archive/Docs/\(stamp)/a.txt", to: to.path, replacing: true)
-        #expect(answer.ok != true)
-        #expect(try String(contentsOf: to, encoding: .utf8) == "mine")
+        #expect(try await r.restore("Archive/Docs/\(stamp)/a.txt", to: to.path, replacing: true).ok == true)
+        #expect(try String(contentsOf: to, encoding: .utf8) == "archived")
+        #expect(try await r.restore("Archive/Docs/\(stamp)/a.txt", to: r.source.path, replacing: true).ok != true)
     }
 
     @Test func replacingCoversAFileNotAFolderOrALink() async throws {
@@ -307,6 +308,14 @@ private let stamp = "2026-11-04T10-00-00"
         guard case .restore(.overSource) = try await r.restore("Sets/Docs", to: r.source.path).failure else {
             Issue.record("expected the source to be refused"); return
         }
+    }
+
+    @Test func aDeletedFileGoesBackToItsOriginalFolder() async throws {
+        let r = try Rig()
+        try r.put("Archive/Docs/\(stamp)/notes/a.txt")
+        let to = r.source.appendingPathComponent("notes/a.txt")
+        #expect(try await r.restore("Archive/Docs/\(stamp)/notes/a.txt", to: to.path).failure == nil)
+        #expect(FileManager.default.fileExists(atPath: to.path))
     }
 
     @Test func aRelativeTargetIsRefused() async throws {

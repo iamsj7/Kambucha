@@ -77,14 +77,38 @@ struct ArchiveModelTests {
         #expect(fake.restored.isEmpty && model.restoreState == .idle)
     }
 
-    @Test func neverRestoresInsideTheSource() async throws {
+    @Test func aFileRestoresIntoItsOriginalFolder() async throws {
         let fake = FakeArchive(); fake.entries = [entry("x", day: 1)]
         let (model, _, _) = try make(fake)
         await model.reload()
         let inside = source.appendingPathComponent("a/x.txt")   // the original's own path
         await model.restore(fake.entries[0]) { _ in inside }
-        #expect(fake.restored.isEmpty)
-        guard case .failed = model.restoreState else { Issue.record("expected failed"); return }
+        #expect(fake.restored.map(\.1) == [inside])
+        #expect(model.restoreState == .done(inside))
+    }
+
+    @Test func thePanelOpensWhereTheFileWas() async throws {
+        let fake = FakeArchive()
+        let (model, set, _) = try make(fake)
+        let notes = source.appendingPathComponent("notes")
+        try FileManager.default.createDirectory(at: notes, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: source) }
+        func file(_ path: String) -> ArchiveEntry { ArchiveEntry(id: path, setName: "Docs", stamp: .now, path: path, size: 1) }
+        let stamp = "2026-11-05T06-52-32"
+        func same(_ a: URL?, _ b: URL) -> Bool { a?.standardizedFileURL.path == b.standardizedFileURL.path }
+        #expect(same(model.startFolder(for: file("Archive/Docs/\(stamp)/notes/a.txt")), notes))
+        #expect(same(model.startFolder(for: file("Sets/Docs/notes/a.txt")), notes))
+        #expect(same(model.startFolder(for: file("Archive/Docs/\(stamp)/a.txt")), source))
+        // Its folder went too, so the nearest one left.
+        #expect(same(model.startFolder(for: file("Archive/Docs/\(stamp)/notes/gone/deep/a.txt")), notes))
+        #expect(RestoreTarget.original(of: "Archive/Docs/\(stamp)/notes/a.txt", in: set)?.path == notes.appendingPathComponent("a.txt").path)
+        var folder = file("Archive/Docs/\(stamp)"); folder.isFolder = true
+        #expect(model.startFolder(for: folder) == nil)
+    }
+
+    @Test func thePanelFallsBackWhenTheSourceIsGone() async throws {
+        let (model, _, _) = try make(FakeArchive())
+        #expect(model.startFolder(for: ArchiveEntry(id: "x", setName: "Docs", stamp: .now, path: "Sets/Docs/a.txt", size: 1)) == nil)
     }
 
     @Test func restoreFailureIsShown() async throws {
@@ -138,10 +162,11 @@ struct ArchiveModelTests {
         #expect(fake.restored.map(\.0.path) == ["Sets/Docs/p", "Sets/Docs/p/f.txt"])
     }
 
-    @Test func aFolderHasTheSameGuardAsAFile() async throws {
+    @Test func aFolderCannotGoInsideTheSource() async throws {
         let fake = FakeArchive()
         let (model, _, _) = try make(fake)
         await model.restoreLatest(nil) { [source] _ in source }
+        await model.restoreLatest(BackupItem(name: "p", isFolder: true, size: 0)) { [source] _ in source.appendingPathComponent("p") }
         #expect(fake.restored.isEmpty)
         guard case .failed = model.restoreState else { Issue.record("expected failed"); return }
     }

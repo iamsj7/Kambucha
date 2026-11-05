@@ -4,7 +4,7 @@ Take a breath. If you are reading this because something went wrong, your backup
 
 Three rules that keep you safe:
 
-1. **Restore to a new, empty folder first.** Never restore on top of your working folder. Look at the result, then move files into place.
+1. **Restore folders to a new, empty folder first.** Never restore a folder on top of your working folder. Look at the result, then move files into place. A single deleted file can go straight back where it was.
 2. **Do not delete anything in the backup.** Not in iCloud Drive, not in Google Drive or OneDrive, not on the external drive.
 3. **Copy and paste commands exactly.** Lines starting with `$` are what you type, without the `$`. Anything in `<angle brackets>` is for you to fill in.
 
@@ -84,7 +84,7 @@ The newest copy is in `Sets/<set name>/`. A file you deleted or overwrote is in 
 1. Open Mirror, then Archive in the sidebar, and choose the set and the destination at the top.
 2. For a file you deleted or overwrote, stay on Older Versions. Files are listed by the day they left the backup. Choose Restore next to the one you want.
 3. For the newest copy of a file, choose Latest Backup, open the folders down to it, and choose Restore next to it.
-4. Pick a new place to put it. Mirror will not restore into a folder it backs up.
+4. For a single file, the save window opens in the folder it came from. Choose Restore to put it back, or pick another place to keep both copies. If a file with that name is there, macOS asks before replacing it. A whole folder must go to a new place, as Mirror will not restore a folder into one it backs up.
 
 Mirror restores through rclone, so symlinks come back correctly. Files that iCloud has freed to save space are downloaded as needed.
 

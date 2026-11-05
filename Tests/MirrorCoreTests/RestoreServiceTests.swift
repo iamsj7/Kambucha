@@ -159,6 +159,55 @@ import Foundation
         #expect(!box.exists("home/proj/app"))
     }
 
+    @Test func aDeletedFileGoesBackInsideItsSource() async throws {
+        let box = try ArchiveSandbox()
+        try box.write("Archive/Projects/2026-10-30T10-00/notes/gone.txt", "kept")
+        let source = try box.dir("home/proj")
+        let to = source.appendingPathComponent("notes/gone.txt")
+        let from = box.root.appendingPathComponent("Archive/Projects/2026-10-30T10-00/notes/gone.txt").path
+        let svc = RestoreService(rclone: realRunner(), backupRoot: box.root.path)
+        let r = try await svc.restore(from: from, context: plainContext, to: to, sources: [source], asFile: true)
+        #expect(r.outcome == .success)
+        #expect(try String(contentsOf: to, encoding: .utf8) == "kept")
+    }
+
+    @Test func aFileInsideASourceIsReplacedOnlyWithAgreement() async throws {
+        let box = try ArchiveSandbox()
+        try box.write("Archive/Projects/2026-10-30T10-00/a.txt", "old")
+        let source = try box.dir("home/proj"); try box.write("a.txt", "new", under: source)
+        let to = source.appendingPathComponent("a.txt")
+        let from = box.root.appendingPathComponent("Archive/Projects/2026-10-30T10-00/a.txt").path
+        let svc = RestoreService(rclone: realRunner(), backupRoot: box.root.path)
+        await #expect(throws: RestoreError.destinationNotEmpty(to.path)) {
+            _ = try await svc.restore(from: from, context: plainContext, to: to, sources: [source], asFile: true)
+        }
+        #expect(try String(contentsOf: to, encoding: .utf8) == "new")
+        _ = try await svc.restore(from: from, context: plainContext, to: to, sources: [source], asFile: true, replacingFile: true)
+        #expect(try String(contentsOf: to, encoding: .utf8) == "old")
+    }
+
+    @Test func aFileNeverTakesTheSourceFolderOrAFolderHoldingIt() async throws {
+        let box = try ArchiveSandbox()
+        try box.write("Archive/Projects/2026-10-30T10-00/a.txt", "old")
+        let source = try box.dir("home/proj")
+        let from = box.root.appendingPathComponent("Archive/Projects/2026-10-30T10-00/a.txt").path
+        let svc = RestoreService(rclone: realRunner(), backupRoot: box.root.path)
+        for to in [source, box.root.appendingPathComponent("home")] {
+            await #expect(throws: RestoreError.overSource(source.path)) {
+                _ = try await svc.restore(from: from, context: plainContext, to: to, sources: [source], asFile: true, replacingFile: true)
+            }
+        }
+    }
+
+    @Test func aFolderStillCannotGoInsideASource() async throws {
+        let (box, from) = try rig()
+        let source = try box.dir("home/proj")
+        let svc = RestoreService(rclone: realRunner(), backupRoot: box.root.path)
+        await #expect(throws: RestoreError.overSource(source.path)) {
+            _ = try await svc.restore(from: from.path, context: plainContext, to: source.appendingPathComponent("new"), sources: [source])
+        }
+    }
+
     @Test func restoreIntoNonEmptyFolderIsRefusedWithoutOverwrite() async throws {
         let box = try ArchiveSandbox(); try wholeProject(box, in: box.root)
         let to = try box.dir("dest"); try box.write("mine.txt", "keep", under: to)

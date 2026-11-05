@@ -4,8 +4,9 @@ import Foundation
 
 public struct ArchiveEntry: Identifiable, Equatable, Sendable {
     public var id: String; public var setName: String; public var stamp: Date; public var path: String; public var size: Int64
-    public init(id: String, setName: String, stamp: Date, path: String, size: Int64) {
-        self.id = id; self.setName = setName; self.stamp = stamp; self.path = path; self.size = size
+    public var isFolder: Bool
+    public init(id: String, setName: String, stamp: Date, path: String, size: Int64, isFolder: Bool = false) {
+        self.id = id; self.setName = setName; self.stamp = stamp; self.path = path; self.size = size; self.isFolder = isFolder
     }
 }
 
