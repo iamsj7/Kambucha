@@ -356,6 +356,28 @@ private struct Vols: VolumeLocating {
         }
     }
 
+    @Test func aFailedBatchNamesWhatItDroppedAndAQueuedRunKeepsTheMessage() async throws {
+        let sets = ["A", "B", "C", "D"].map { set($0, [one.id]) }
+        let ids = sets.map(\.id)
+        let m = try model(sets)
+        let agent = root.appendingPathComponent("failing-agent")
+        try "#!/bin/sh\necho \"$2\" >> \"\(launchLog.path)\"\nsleep 0.2\n[ \"$2\" = \"\(ids[0].uuidString)\" ] && exit 1\nexit 0\n"
+            .write(to: agent, atomically: true, encoding: .utf8)
+        try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: agent.path)
+        m.agentExecutable = agent
+
+        m.runNow(sets: Set(ids[0..<3]))
+        m.runNow(sets: [ids[3]])
+        try await until { launched().count == 2 && m.queuedRuns.isEmpty }
+        try await Task.sleep(for: .milliseconds(400))
+
+        #expect(launched() == [ids[0].uuidString, ids[3].uuidString])
+        let message = m.lastError ?? ""
+        #expect(message.contains("stopped with code 1"))
+        #expect(message.contains("Not backed up this time: B, C."))
+        #expect(!message.contains(AppModel.queuedText))
+    }
+
     @Test func aSecondBatchWaitsAndTheFirstCarriesOn() async throws {
         let sets = ["A", "B", "C", "D", "E"].map { set($0, [one.id]) }
         let ids = sets.map(\.id)

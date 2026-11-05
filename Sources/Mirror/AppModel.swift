@@ -228,7 +228,11 @@ final class AppModel {
     /// Every state load comes here, and the end of any run, launchd's included, changes the folders being watched.
     private func startQueuedRun() {
         guard !queuedRuns.isEmpty, !isBackupActive, runQueue.waiting.isEmpty, !AgentLockProbe.isHeld(support: support) else { return }
+        // Only the owner's own action clears a message. What was said about this wait is over, though.
+        let earlier = lastError?.replacingOccurrences(of: Self.queuedText, with: "").trimmingCharacters(in: .whitespaces)
         runNow(queuedRuns.removeFirst())
+        lastError = [earlier, lastError].compactMap { $0?.isEmpty == false ? $0 : nil }.joined(separator: " ")
+        if lastError?.isEmpty == true { lastError = nil }
     }
 
     // MARK: Panel visibility and polling
@@ -478,7 +482,14 @@ final class AppModel {
                 if isCurrent { self.process = nil }
                 self.agentExited(code: code, tail: tail, reviewing: reviewing)
                 self.refresh()
-                if isCurrent, let id = self.runQueue.next(afterExit: code) { self.launchAgent(["--run-now", id.uuidString]) }
+                guard isCurrent else { return }
+                let dropped = code == 0 ? [] : self.runQueue.waiting
+                if let id = self.runQueue.next(afterExit: code) { self.launchAgent(["--run-now", id.uuidString]) }
+                let names = dropped.compactMap { self.set($0)?.name }
+                if !names.isEmpty {
+                    let note = "Not backed up this time: \(names.joined(separator: ", "))."
+                    self.lastError = [self.lastError, note].compactMap(\.self).joined(separator: " ")
+                }
             }
         }
         do { try p.run(); process = p }

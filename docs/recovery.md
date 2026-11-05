@@ -82,7 +82,7 @@ The newest copy is in `Sets/<set name>/`. A file you deleted or overwrote is in 
 ### With the app (any destination)
 
 1. Open Mirror, then Archive in the sidebar, and choose the set and the destination at the top.
-2. For a file you deleted or overwrote, stay on Older Versions. Files are listed by the day they left the backup. Choose Restore next to the one you want.
+2. For a file you deleted or overwrote, stay on Older Versions. Files are grouped by the backup run that moved them, then by folder. Use the search field to find a file across all your sets. Choose Restore next to the one you want.
 3. For the newest copy of a file, choose Latest Backup, open the folders down to it, and choose Restore next to it.
 4. For a single file, the save window opens in the folder it came from. Choose Restore to put it back, or pick another place to keep both copies. If a file with that name is there, macOS asks before replacing it. A whole folder must go to a new place, as Mirror will not restore a folder into one it backs up.
 
