@@ -94,6 +94,49 @@ struct ActivityPresentationTests {
         #expect(RunResultPresentation.counts(r) == "3 copied, 1 deleted")
     }
 
+    private func skipped(_ scope: String) -> RunRecord {
+        RunRecord(setID: UUID(), setName: "S", destinationID: UUID(), destinationName: "D", start: Date(), end: Date(),
+                  trigger: .manual, scope: scope, status: .skipped)
+    }
+
+    @Test func aSkippedRunSaysWhy() {
+        #expect(RunResultPresentation.counts(skipped("not connected")) == "Not connected")
+        #expect(RunResultPresentation.counts(skipped("waiting for preview")) == "Waiting for preview")
+        #expect(RunResultPresentation.counts(skipped("paused")) == "Paused")
+        #expect(RunResultPresentation.counts(skipped("none")) == "Nothing to do")
+    }
+
+    @Test func aReadFailureOutranksAnyFilter() {
+        #expect(ActivityEmptyState(loadFailed: true, isFiltering: true, search: "x") == .loadFailed)
+        #expect(ActivityEmptyState(loadFailed: true, isFiltering: false, search: "") == .loadFailed)
+    }
+
+    @Test func onlyASearchIsToldToCheckItsSpelling() {
+        #expect(ActivityEmptyState(loadFailed: false, isFiltering: true, search: "x") == .noSearchResults)
+        #expect(ActivityEmptyState(loadFailed: false, isFiltering: true, search: "") == .noMatchingRuns)
+        #expect(ActivityEmptyState(loadFailed: false, isFiltering: false, search: "") == .noActivity)
+    }
+
+    @MainActor @Test func theFirstReadDoesNotWaitForTyping() async {
+        let m = ActivityModel(support: FileManager.default.temporaryDirectory.appendingPathComponent("mirror-activity-\(UUID().uuidString)"))
+        #expect(m.readDelay == .zero)
+        await m.reload()
+        #expect(m.readDelay == .milliseconds(250))
+    }
+
+    @MainActor @Test func aFilterOnARemovedSetIsDropped() async throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent("mirror-activity-\(UUID().uuidString)")
+        let kept = BackupSet(name: "Kept", source: URL(fileURLWithPath: "/tmp/kept"))
+        try ConfigStore(root: root).saveSets([kept])
+        let m = ActivityModel(support: root)
+        m.filter.setID = kept.id
+        await m.reload()
+        #expect(m.filter.setID == kept.id)
+        try ConfigStore(root: root).saveSets([])
+        await m.reload()
+        #expect(m.filter.setID == nil)
+    }
+
     @Test func allSymbolsUsedByTheViewsExist() {
         for name in ["checkmark.circle", "arrow.counterclockwise", "externaldrive.badge.checkmark", "folder", "lock.shield",
                      "bell.badge", "person.badge.key", "plus.rectangle.on.folder", "exclamationmark.triangle", "questionmark.circle",

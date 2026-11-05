@@ -24,6 +24,14 @@ struct SetPageLogicTests {
         #expect(RuleFilter.visibleIDs(r, query: "zzz", keep: [r[5].id]) == [r[5].id])
     }
 
+    @Test func theFirstAddedRuleIsFoundWhereverItLanded() {
+        let r = rules(3)
+        let a = UserRule(pattern: "/a", action: .exclude), b = UserRule(pattern: "/b", action: .exclude)
+        #expect(RuleFilter.firstAdded(to: r, in: [a, b] + r) == a.id)
+        #expect(RuleFilter.firstAdded(to: r, in: r + [b]) == b.id)
+        #expect(RuleFilter.firstAdded(to: r, in: r) == nil)
+    }
+
     @Test func smallListsAreNeverFiltered() {
         let r = rules(10)
         #expect(!RuleFilter.offersFilter(ruleCount: 10))

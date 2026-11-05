@@ -96,6 +96,39 @@ private func vol(_ uuid: String, internalLooking: Bool = false) -> VolumeInfo {
         #expect(m.destinationStatus(d).text.hasPrefix("Not connected"))
     }
 
+    // MARK: Overview decides a destination from one value
+
+    private func unplugged(_ change: (inout SetState) -> Void) async throws -> OverviewDestination {
+        let d = Destination(name: "SSD", kind: .externalDrive, encrypted: false, volumeUUID: "U")
+        var s = BackupSet(name: "A", source: URL(fileURLWithPath: "/tmp/a"), destinationIDs: [d.id])
+        s.acceptPreview()
+        let m = try make(destinations: [d], sets: [s]) { store, _ in
+            var st = SetState(); st.lastFinished = Date()
+            change(&st)
+            try store.save(st, for: PairID(set: s.id, destination: d.id))
+        }
+        await m.volumeCache.refresh()
+        return try #require(m.overviewDestinations.first)
+    }
+
+    @Test func aDrivePulledMidRunIsOnlyNotConnected() async throws {
+        let row = try await unplugged { $0.syncIncomplete = true }
+        #expect(row.standing == .notConnected)
+        #expect(row.status.text.hasPrefix("Not connected"))
+    }
+
+    @Test func aRealProblemOnADriveThatIsAwayKeepsItsOwnWords() async throws {
+        let row = try await unplugged { $0.consecutiveFailures = 2 }
+        #expect(row.standing == .attention)
+        #expect(row.status.text == "Needs attention")
+    }
+
+    @Test func aWarningOnTheDestinationScreenNeedsAttention() throws {
+        let d = Destination(name: "Cloud", kind: .iCloudFolder, encrypted: true)
+        let m = try make(destinations: [d])
+        #expect(m.overviewDestinations.first?.standing == .attention)
+    }
+
     // MARK: Destination status says what's true (final review B1)
 
     private func destinationText(_ change: (inout SetState) -> Void) throws -> DestinationStatus {

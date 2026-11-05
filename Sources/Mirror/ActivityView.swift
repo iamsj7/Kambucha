@@ -20,9 +20,21 @@ struct RunResultPresentation {
 
     /// "3 copied, 1 deleted": only the counts that aren't zero.
     static func counts(_ r: RunRecord) -> String {
+        if r.status == .skipped { return r.scope == "none" ? "Nothing to do" : r.scope.prefix(1).uppercased() + r.scope.dropFirst() }
         let parts = [(r.copied, "copied"), (r.renamed, "renamed"), (r.deleted, "deleted"), (r.archived, "archived")]
             .filter { $0.0 > 0 }.map { "\($0.0.formatted()) \($0.1)" }
         return parts.isEmpty ? "No changes" : parts.joined(separator: ", ")
+    }
+}
+
+/// What an empty list means. A failed read comes first, as no filter explains it.
+enum ActivityEmptyState: Equatable {
+    case loadFailed, noActivity, noSearchResults, noMatchingRuns
+
+    init(loadFailed: Bool, isFiltering: Bool, search: String) {
+        if loadFailed { self = .loadFailed }
+        else if !isFiltering { self = .noActivity }
+        else { self = search.isEmpty ? .noMatchingRuns : .noSearchResults }
     }
 }
 
@@ -34,6 +46,7 @@ final class ActivityModel {
 
     private(set) var records: [RunRecord] = []
     private(set) var loadFailed = false
+    private var hasLoaded = false
     /// Sets to choose from in the filter, by name.
     private(set) var sets: [(id: UUID, name: String)] = []
     var filter = RunFilter()
@@ -57,12 +70,18 @@ final class ActivityModel {
         }.value
         guard filter == self.filter else { return }
         sets = names
+        hasLoaded = true
+        if let id = self.filter.setID, !names.contains(where: { $0.id == id }) { self.filter.setID = nil }
         if let result {
             records = result.records; reachedScanLimit = result.reachedScanLimit; loadFailed = false
         } else {
             loadFailed = true
         }
     }
+
+    /// The wait is for typing, so opening the screen doesn't pay it.
+    var readDelay: Duration { hasLoaded ? .milliseconds(250) : .zero }
+    var emptyState: ActivityEmptyState { ActivityEmptyState(loadFailed: loadFailed, isFiltering: isFiltering, search: filter.search) }
 
     /// True when a filter hides records, so an empty list isn't read as "no activity".
     var isFiltering: Bool { filter.setID != nil || filter.result != .all || !filter.search.isEmpty }
@@ -87,8 +106,11 @@ struct ActivityView: View {
             if model.records.isEmpty && model.reachedScanLimit {
                 ContentUnavailableView("No Results", systemImage: "magnifyingglass",
                                        description: Text("\(ActivityModel.scanNote) Older runs may match."))
-            } else if model.records.isEmpty && model.isFiltering {
+            } else if model.records.isEmpty && model.emptyState == .noSearchResults {
                 ContentUnavailableView.search
+            } else if model.records.isEmpty && model.emptyState == .noMatchingRuns {
+                ContentUnavailableView("No Matching Runs", systemImage: "line.3.horizontal.decrease.circle",
+                                       description: Text("No runs match these filters."))
             } else if model.records.isEmpty {
                 ContentUnavailableView(model.loadFailed ? "Couldn't Read Activity" : "No Activity Yet",
                                        systemImage: model.loadFailed ? "exclamationmark.triangle" : "clock.arrow.circlepath",
@@ -154,7 +176,8 @@ struct ActivityView: View {
                 .pickerStyle(.segmented)
                 .help("Show all runs, only those with problems, or only those that succeeded")
                 Toggle(isOn: $model.filter.includeSkipped) { Label("Show Skipped Runs", systemImage: "minus.circle") }
-                    .help("Include scheduled runs that found nothing to do")
+                    .help("Include runs that had nothing to do or couldn't start, such as a paused set or a drive that isn't connected")
+                    .disabled(model.filter.result != .all)
                     .accessibilityHint("Skipped runs are hidden by default")
                 Button { Task { await model.reload() } } label: { Label("Refresh", systemImage: "arrow.clockwise") }
                     .help("Reload the run history")
@@ -165,7 +188,7 @@ struct ActivityView: View {
         .task(id: model.filter) {
             // Light refresh while the screen is open; nothing runs when it is closed. A new filter restarts it,
             // after a short wait so typing in the search field doesn't read the history per keystroke.
-            try? await Task.sleep(for: .milliseconds(250))
+            try? await Task.sleep(for: model.readDelay)
             while !Task.isCancelled {
                 await model.reload()
                 try? await Task.sleep(for: .seconds(10))

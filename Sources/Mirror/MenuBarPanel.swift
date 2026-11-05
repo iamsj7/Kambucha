@@ -25,7 +25,7 @@ struct MenuBarPanel: View {
         let health = health
         let live = model.progress
         let rows = PanelRows(attention: health.attention.count, progress: live.count, limit: Self.rowLimit)
-        if health.isCalm {
+        if health.isCalm || rows.isEmpty {
             if let line = health.countLine {
                 Divider()
                 Text(line).font(.subheadline).foregroundStyle(.secondary)
@@ -40,7 +40,7 @@ struct MenuBarPanel: View {
                 if rows.more > 0 {
                     Button { openMirror("main") } label: { Text("\(rows.more.formatted()) more") }
                         .buttonStyle(.borderless).font(.subheadline)
-                        .accessibilityHint("Opens Mirror to show all of them")
+                        .accessibilityHint("Opens Mirror. The Overview lists all of them")
                 }
                 if !live.isEmpty { NetworkUploadRow(network: network) }
             }
@@ -80,6 +80,7 @@ struct MenuBarPanel: View {
             if let err = model.lastError {
                 HStack(alignment: .top) {
                     Label(err, systemImage: "exclamationmark.triangle").font(.footnote).foregroundStyle(.secondary).lineLimit(3)
+                        .help(err)
                     Spacer(minLength: 4)
                     Button("Dismiss") { model.dismissError() }.font(.footnote).buttonStyle(.borderless)
                 }
