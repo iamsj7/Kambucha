@@ -3,7 +3,11 @@ import AppKit
 import MirrorCore
 
 /// The pane last chosen, kept across sets (MainWindow recreates the view per set) for the session.
-@MainActor enum SetPaneMemory { static var last = SetPane.status }
+@MainActor enum SetPaneMemory {
+    static var last = SetPane.status
+    /// A set opened to deal with a problem shows why, not the pane last used.
+    static func openOnStatus() { last = .status }
+}
 
 struct SetDetailView: View {
     @Bindable var model: AppModel
@@ -17,6 +21,9 @@ struct SetDetailView: View {
     @State private var confirmingAdoption = false
     @State private var outsidePicks = 0
     @State private var pane: SetPane
+    /// Here and not in the pane, which a pane switch destroys.
+    @State private var ruleQuery = ""
+    @State private var revealRule: UUID?
 
     init(model: AppModel, setID: UUID, pane: SetPane? = nil) {
         _pane = State(initialValue: pane ?? SetPaneMemory.last)
@@ -53,7 +60,7 @@ struct SetDetailView: View {
             case .included:
                 VStack(spacing: 0) {
                     bannerBar
-                    IncludedPane(draft: $draft, presets: presets, presetBinding: presetBinding,
+                    IncludedPane(draft: $draft, query: $ruleQuery, revealRule: $revealRule, presets: presets, presetBinding: presetBinding,
                                  requestPreview: { requestPreview(after: $0) }, excludeItems: { Task { await excludeItems() } })
                 }
             case .destinations: form { destinationsPane }
@@ -267,6 +274,9 @@ struct SetDetailView: View {
         let result = ExcludeRule.adding(picked, to: draft)
         outsidePicks = result.outside
         guard result.rules != draft.rules else { return }
+        // The filter goes, or it could hide the rule just made.
+        ruleQuery = ""
+        revealRule = RuleFilter.firstAdded(to: draft.rules, in: result.rules)
         draft.rules = result.rules
         requestPreview(after: 0)
     }

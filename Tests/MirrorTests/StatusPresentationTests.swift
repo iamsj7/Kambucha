@@ -33,3 +33,29 @@ struct StatusPresentationTests {
         #expect(OverallStatus.driveNotConnected(name: "SSD", last: nil).shortText == "Not Connected")
     }
 }
+
+struct OverviewReviewTests {
+    private func entry(_ set: UUID, _ name: String, _ path: String) -> ReviewEntry {
+        ReviewEntry(setID: set, setName: name, item: ReviewItem(id: path, path: path, kind: .secretInExcluded))
+    }
+
+    @Test func everyItemIsReachableUnderItsSet() {
+        let a = UUID(), b = UUID()
+        let entries = (0..<30).map { entry(a, "A", "/f\($0)") } + [entry(b, "B", "/.env")]
+        let groups = ReviewGroup.grouped(entries)
+        #expect(groups.map(\.name) == ["A", "B"])
+        #expect(groups.map(\.entries.count) == [30, 1])
+        #expect(groups.last?.entries.first?.item.path == "/.env")
+    }
+
+    @Test func aListThatFitsOffersNothingMore() {
+        #expect(!ReviewGroup.needsShowAll(count: ReviewGroup.overviewLimit))
+        #expect(ReviewGroup.needsShowAll(count: ReviewGroup.overviewLimit + 1))
+    }
+
+    @MainActor @Test func arrivingFromNeedsAttentionLandsOnStatus() {
+        SetPaneMemory.last = .safety
+        SetPaneMemory.openOnStatus()
+        #expect(SetPaneMemory.last == .status)
+    }
+}

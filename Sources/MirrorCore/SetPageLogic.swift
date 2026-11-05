@@ -48,6 +48,12 @@ public enum RuleFilter {
         }.map(\.id)
     }
 
+    /// The first rule in `new` that `old` didn't have.
+    public static func firstAdded(to old: [UserRule], in new: [UserRule]) -> UUID? {
+        let known = Set(old.map(\.id))
+        return new.first { !known.contains($0.id) }?.id
+    }
+
     /// "24 rules", or "3 of 24 rules" while filtering.
     public static func countText(total: Int, shown: Int) -> String {
         let noun = total == 1 ? "rule" : "rules"

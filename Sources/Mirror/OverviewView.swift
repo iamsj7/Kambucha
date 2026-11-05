@@ -39,9 +39,58 @@ extension AppModel {
     }
 }
 
+/// One set's review items, for the list of all of them.
+struct ReviewGroup: Identifiable {
+    var id: UUID
+    var name: String
+    var entries: [ReviewEntry]
+
+    /// In the order the sets first appear.
+    static func grouped(_ entries: [ReviewEntry]) -> [ReviewGroup] {
+        var out: [ReviewGroup] = []
+        var index: [UUID: Int] = [:]
+        for e in entries {
+            if let i = index[e.setID] { out[i].entries.append(e); continue }
+            index[e.setID] = out.count
+            out.append(ReviewGroup(id: e.setID, name: e.setName, entries: [e]))
+        }
+        return out
+    }
+
+    /// Review items are rows with buttons, so the Overview builds only the first.
+    static let overviewLimit = 25
+
+    /// An item past the limit must not have to wait for earlier ones to be decided.
+    static func needsShowAll(count: Int) -> Bool { count > overviewLimit }
+}
+
+/// A destination as the Overview says it. `standing` picks the row and the summary line, and `status` words it.
+struct OverviewDestination: Identifiable {
+    var destination: Destination
+    var standing: DestinationStanding
+    var status: DestinationStatus
+    var id: UUID { destination.id }
+}
+
+extension AppModel {
+    /// Before the first read of the mounted drives no drive is called away, as the status files aren't either.
+    var overviewDestinations: [OverviewDestination] {
+        let away = volumeCache.hasLoaded ? ExternalVolume.disconnected(destinations, in: volumeCache.volumes) : []
+        return destinations.map { d in
+            let health = StatusSummary.destinationHealth(d.id, sets: sets, states: states)
+            let status = destinationStatus(d)
+            let standing = DestinationStanding(health, driveAway: away.contains(d.id), warned: status.symbol == "exclamationmark.triangle")
+            // A drive's status stops at "Not connected", which wouldn't say why it's listed.
+            let worded = standing == .attention && away.contains(d.id) ? DestinationStatus(health) : status
+            return OverviewDestination(destination: d, standing: standing, status: worded)
+        }
+    }
+}
+
 struct OverviewView: View {
     @Bindable var model: AppModel
     var select: (SidebarItem) -> Void
+    @State private var showingAllReview = false
 
     var body: some View {
         let p = StatusPresentation(model.status)
@@ -67,33 +116,37 @@ struct OverviewView: View {
             }
 
             let health = HealthSummary(model.rows.map { SetHealth(id: $0.id, name: $0.name, status: $0.status) })
-            if model.rows.isEmpty {
-                Section { Text("Add a folder to start backing it up.").foregroundStyle(.secondary) }
+            let prompts = OverviewPrompts.lines(hasSets: !model.rows.isEmpty, hasDestinations: !model.destinations.isEmpty)
+            if !prompts.isEmpty {
+                Section {
+                    ForEach(prompts, id: \.self) { Text($0).foregroundStyle(.secondary) }
+                }
             }
             if !health.attention.isEmpty {
                 Section("Needs Attention") {
                     ForEach(health.attention) { item in
-                        Button { select(.set(item.id)) } label: { AttentionRow(item: item) }
+                        Button { SetPaneMemory.openOnStatus(); select(.set(item.id)) } label: { AttentionRow(item: item) }
                             .buttonStyle(.plain)
                     }
                 }
             }
-            let troubled = model.destinations.filter { needsAttention($0) }
+            let destinations = model.overviewDestinations
+            let troubled = destinations.filter { $0.standing == .attention }
             if !troubled.isEmpty {
                 Section("Destinations Needing Attention") {
-                    ForEach(troubled) { d in
-                        let s = model.destinationStatus(d)
-                        Button { select(.destination(d.id)) } label: {
+                    ForEach(troubled) { row in
+                        let s = row.status
+                        Button { select(.destination(row.id)) } label: {
                             LabeledContent {
                                 Text(s.text).foregroundStyle(.secondary)
                             } label: {
-                                Label(d.name, systemImage: s.symbol)
+                                Label(row.destination.name, systemImage: s.symbol)
                             }
                             .contentShape(Rectangle())
                         }
                         .buttonStyle(.plain)
                         .accessibilityElement(children: .ignore)
-                        .accessibilityLabel("\(d.name), \(s.text)")
+                        .accessibilityLabel("\(row.destination.name), \(s.text)")
                         .accessibilityAddTraits(.isButton)
                     }
                 }
@@ -101,46 +154,37 @@ struct OverviewView: View {
             let entries = model.reviewEntries
             if !entries.isEmpty {
                 Section {
-                    ForEach(entries.prefix(Self.reviewLimit)) { ReviewItemRow(entry: $0, model: model) }
+                    ForEach(entries.prefix(ReviewGroup.overviewLimit)) { ReviewItemRow(entry: $0, model: model) }
+                    if ReviewGroup.needsShowAll(count: entries.count) {
+                        Button("Show All…") { showingAllReview = true }
+                            .accessibilityHint("Lists every item to review, by set")
+                    }
                 } header: {
                     Text("Items to Review")
                 } footer: {
-                    Text(entries.count > Self.reviewLimit
-                         ? "Showing \(Self.reviewLimit) of \(entries.count.formatted()). These files sit outside your current rules. Nothing blocks your backup while they wait."
+                    Text(entries.count > ReviewGroup.overviewLimit
+                         ? "Showing \(ReviewGroup.overviewLimit) of \(entries.count.formatted()). These files sit outside your current rules. Nothing blocks your backup while they wait."
                          : "These files sit outside your current rules. Nothing blocks your backup while they wait.")
                 }
             }
             if let line = health.countLine {
                 Section {
-                    Label(summaryText(line, health), systemImage: "checkmark.circle").foregroundStyle(.secondary)
-                    if !model.destinations.isEmpty {
-                        Label(destinationLine(troubled.count), systemImage: "externaldrive").foregroundStyle(.secondary)
+                    Label(summaryText(line, health), systemImage: health.allBackedUp ? "checkmark.circle" : "info.circle")
+                        .foregroundStyle(.secondary)
+                    if let line = DestinationSummary.line(destinations.map(\.standing)) {
+                        Label(line, systemImage: "externaldrive").foregroundStyle(.secondary)
                     }
                 }
             }
         }
         .formStyle(.grouped)
         .navigationTitle("Overview")
+        .sheet(isPresented: $showingAllReview) { ReviewAllSheet(model: model) }
     }
-
-    /// Review items are rows with buttons, so only the first are built.
-    private static let reviewLimit = 25
 
     private func summaryText(_ line: String, _ health: HealthSummary) -> String {
         guard let last = health.lastBackup else { return line }
         return "\(line), last backup \(last.formatted(.relative(presentation: .named)))"
-    }
-
-    private func destinationLine(_ troubled: Int) -> String {
-        let n = model.destinations.count
-        let noun = n == 1 ? "destination" : "destinations"
-        return troubled == 0 ? "\(n.formatted()) \(noun), all fine" : "\(n.formatted()) \(noun), \(troubled.formatted()) need attention"
-    }
-
-    /// The shared health check, plus the two warnings the destination screen raises on its own.
-    private func needsAttention(_ d: Destination) -> Bool {
-        StatusSummary.destinationHealth(d.id, sets: model.sets, states: model.states).needsAttention
-            || model.destinationStatus(d).symbol == "exclamationmark.triangle"
     }
 
     private var canBackUp: Bool {
@@ -167,6 +211,34 @@ struct AttentionRow: View {
         .accessibilityElement(children: .ignore)
         .accessibilityLabel("\(item.name), \(p.title)" + (p.detail.map { ", \($0)" } ?? ""))
         .accessibilityAddTraits(.isButton)
+    }
+}
+
+/// Every item to review, by set. A List, so only the rows on screen are built.
+struct ReviewAllSheet: View {
+    let model: AppModel
+    @Environment(\.dismiss) private var dismiss
+
+    var body: some View {
+        let entries = model.reviewEntries
+        VStack(spacing: 0) {
+            List {
+                ForEach(ReviewGroup.grouped(entries)) { group in
+                    Section(group.name) {
+                        ForEach(group.entries) { ReviewItemRow(entry: $0, model: model) }
+                    }
+                }
+            }
+            Divider()
+            HStack {
+                Text(entries.count == 1 ? "1 item" : "\(entries.count.formatted()) items").foregroundStyle(.secondary)
+                Spacer()
+                Button("Done") { dismiss() }.keyboardShortcut(.defaultAction)
+            }
+            .padding()
+        }
+        .frame(minWidth: 560, idealWidth: 640, minHeight: 420, idealHeight: 560)
+        .onChange(of: entries.isEmpty) { _, empty in if empty { dismiss() } }
     }
 }
 

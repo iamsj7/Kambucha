@@ -4,12 +4,14 @@ import MirrorCore
 /// The "What's Included" pane. A List, so a set with hundreds of rules only builds the rows on screen.
 struct IncludedPane: View {
     @Binding var draft: BackupSet
+    @Binding var query: String
+    /// A rule made outside this pane: scrolled to once, without taking the focus.
+    @Binding var revealRule: UUID?
     let presets: [Preset]
     let presetBinding: (String) -> Binding<Bool>
     let requestPreview: (Double) -> Void
     let excludeItems: () -> Void
 
-    @State private var query = ""
     @FocusState private var focusedRule: UUID?
     /// A rule just added: scrolled to and focused once its row exists.
     @State private var pendingFocus: UUID?
@@ -39,14 +41,16 @@ struct IncludedPane: View {
                 }
 
                 Section {
+                    // A row and not a footer: List footers stay on one line, which cut this off.
+                    Text("Your rules come before stacks. With Secrets or Git history off, those files stay out whatever your rules say. Press Return after typing a pattern to preview the effect. A folder's pattern ends in /**.")
+                        .font(.footnote).foregroundStyle(.secondary)
+                        .listRowSeparator(.hidden)
                     // Ids, not filtered indices: each row binds to its real rule, and stored order is kept.
                     ForEach(RuleFilter.visibleIDs(draft.rules, query: query, keep: focusedRule.map { [$0] } ?? []), id: \.self) { id in
                         row(id)
                     }
                 } header: {
                     rulesHeader
-                } footer: {
-                    Text("Your rules come before stacks. With Secrets or Git history off, those files stay out whatever your rules say. Press Return after typing a pattern to preview the effect. A folder's pattern ends in /**.")
                 }
             }
             .onChange(of: pendingFocus) { _, id in
@@ -56,6 +60,13 @@ struct IncludedPane: View {
                     try? await Task.sleep(for: .milliseconds(120))
                     focusedRule = id
                     pendingFocus = nil
+                }
+            }
+            .onChange(of: revealRule) { _, id in
+                guard let id else { return }
+                Task { @MainActor in
+                    proxy.scrollTo(id, anchor: .center)
+                    revealRule = nil
                 }
             }
         }
