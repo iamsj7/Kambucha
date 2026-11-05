@@ -97,7 +97,6 @@ struct ActivityView: View {
     @Bindable var model: ActivityModel
     @State private var sortOrder = [KeyPathComparator(\RunRecord.start, order: .reverse)]
     @State private var selection: RunRecord.ID?
-    @State private var width: CGFloat = 0
 
     private var sorted: [RunRecord] { model.records.sorted(using: sortOrder) }
     private var selected: RunRecord? { model.records.first { $0.id == selection } }
@@ -167,7 +166,6 @@ struct ActivityView: View {
                 }
             }
         }
-        .measuringWidth($width)
         .navigationTitle("Activity")
         .searchable(text: $model.filter.search, prompt: "Search sets")
         .toolbar {
@@ -213,7 +211,7 @@ struct ActivityView: View {
             Text("Problems").tag(RunFilter.Result.problems)
             Text("Success").tag(RunFilter.Result.success)
         }
-        if PageLayout.hasRoomyToolbar(width: width) { picker.pickerStyle(.segmented).fixedSize() } else { picker.pickerStyle(.menu) }
+        picker.pickerStyle(.segmented).fixedSize()
     }
 }
 

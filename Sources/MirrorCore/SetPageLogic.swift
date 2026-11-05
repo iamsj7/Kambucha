@@ -7,7 +7,7 @@ public enum SetPane: String, CaseIterable, Sendable {
     public var title: String {
         switch self {
         case .status: "Status"
-        case .included: "What's Included"
+        case .included: "Included"
         case .destinations: "Destinations"
         case .safety: "Safety"
         }

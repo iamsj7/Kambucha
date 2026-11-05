@@ -1,7 +1,7 @@
 import SwiftUI
 import MirrorCore
 
-/// The "What's Included" pane. A List, so a set with hundreds of rules only builds the rows on screen.
+/// The Included pane. A List, so a set with hundreds of rules only builds the rows on screen.
 struct IncludedPane: View {
     @Binding var draft: BackupSet
     @Binding var query: String

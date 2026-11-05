@@ -20,12 +20,6 @@ struct MenuBarPanel: View {
     @Environment(\.openWindow) private var openWindow
     @Environment(\.openSettings) private var openSettings
 
-    private var canBackUp: Bool {
-        switch model.status {
-        case .notConfigured, .paused, .running: false
-        default: true
-        }
-    }
     /// Rows are capped, so 50 failing sets can't push the actions off the screen.
     private static let rowLimit = 5
 
@@ -64,7 +58,7 @@ struct MenuBarPanel: View {
         }
         Divider()
         Button("Back Up Now") { model.runNow(nil) }
-            .disabled(!canBackUp)
+            .disabled(!model.canBackUp)
         Button(model.isPaused ? "Resume Backups" : "Pause Backups") { model.setPaused(!model.isPaused) }
             .disabled(model.sets.isEmpty)
         Divider()

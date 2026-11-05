@@ -341,6 +341,18 @@ final class AppModel {
     }
 
     /// Opens the deletion review. Approving deletions needs the owner to see the list first.
+    enum AddRequest { case set, destination }
+    /// What the File menu asked to add, until the main window takes it.
+    var addRequest: AddRequest?
+
+    /// What Back Up Now needs, wherever it's offered.
+    var canBackUp: Bool {
+        switch status {
+        case .notConfigured, .paused, .running: false
+        default: true
+        }
+    }
+
     /// Each ask moves an open main window to Overview. A window that isn't open starts there.
     private(set) var overviewRequests = 0
     func showOverview() { overviewRequests += 1 }

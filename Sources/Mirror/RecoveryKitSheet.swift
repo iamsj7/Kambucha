@@ -44,7 +44,7 @@ struct RecoveryKitSheet: View {
                 ContentUnavailableView {
                     Label("Recovery Kit Not Shown", systemImage: "touchid")
                 } description: { Text("Touch ID was cancelled, so the kit stays hidden.") } actions: {
-                    Button("Show Recovery Kit") { Task { await reveal.begin() } }
+                    Button("Show Recovery Kit…") { Task { await reveal.begin() } }
                 }
             } else if let kitText = reveal.kitText {
                 ScrollView {

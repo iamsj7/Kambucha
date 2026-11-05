@@ -15,7 +15,7 @@ private let a = UUID(), b = UUID(), c = UUID()
     }
 
     @Test func oneItemOfAnyKindIsOneItem() {
-        for item in [SidebarItem.overview, .coverage, .set(a), .destination(a), .archive, .activity, .settings] {
+        for item in [SidebarItem.overview, .coverage, .set(a), .destination(a), .archive, .activity] {
             var s = SidebarSelection()
             s.change(to: [item])
             #expect(s.content(live: [a]) == .one(item))
@@ -36,7 +36,7 @@ private let a = UUID(), b = UUID(), c = UUID()
 
     @Test func commandClickingSomethingElseMovesThere() {
         #expect(after(SidebarSelection(sets: [a, b]), [.set(a), .set(b), .archive]) == [.archive])
-        #expect(after(SidebarSelection(.archive), [.archive, .settings]) == [.settings])
+        #expect(after(SidebarSelection(.archive), [.archive, .activity]) == [.activity])
         #expect(after(SidebarSelection(.set(a)), [.set(a), .destination(b)]) == [.destination(b)])
     }
 
@@ -49,7 +49,7 @@ private let a = UUID(), b = UUID(), c = UUID()
     }
 
     @Test func aRangeWithNoSetsEndsOnOneItem() {
-        #expect(after(SidebarSelection(.archive), [.archive, .activity, .settings]) == [.archive])
+        #expect(after(SidebarSelection(.archive), [.archive, .activity, .coverage]) == [.archive])
     }
 
     @Test func setsThatWentLeaveTheSelection() {

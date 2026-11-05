@@ -24,7 +24,6 @@ struct SetDetailView: View {
     /// Here and not in the pane, which a pane switch destroys.
     @State private var ruleQuery = ""
     @State private var revealRule: UUID?
-    @State private var width: CGFloat = 0
 
     init(model: AppModel, setID: UUID, pane: SetPane? = nil) {
         _pane = State(initialValue: pane ?? SetPaneMemory.last)
@@ -60,7 +59,6 @@ struct SetDetailView: View {
             case .safety: ReadingForm { safetyPane }
             }
         }
-        .measuringWidth($width)
         .onChange(of: pane) { _, new in SetPaneMemory.last = new }
         .toolbar {
             ToolbarItem(placement: .principal) { panePicker }
@@ -75,7 +73,7 @@ struct SetDetailView: View {
                         .accessibilityLabel("Back Up Now")
                         .disabled(!accepted || draft.isPaused)
                 }
-                .labelStyle(PageToolbarLabelStyle(wordy: PageLayout.hasWordyToolbar(width: width)))
+                .labelStyle(.iconOnly)
             }
         }
         .navigationTitle(draft.name)
@@ -126,7 +124,7 @@ struct SetDetailView: View {
         }
         .labelsHidden()
         .accessibilityLabel("Section")
-        if PageLayout.hasRoomyToolbar(width: width) { picker.pickerStyle(.segmented).fixedSize() } else { picker.pickerStyle(.menu) }
+        picker.pickerStyle(.segmented).fixedSize()
     }
 
     private var shownBanners: [SetBanner] {

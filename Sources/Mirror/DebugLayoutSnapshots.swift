@@ -172,7 +172,6 @@ enum DebugLayoutSnapshots {
             Screen(name: "archive-failed", selection: { _ in SidebarSelection(.archive) }, archive: FakeArchive(runs: 0, fails: true)),
             Screen(name: "archive-loading", selection: { _ in SidebarSelection(.archive) }, archive: FakeArchive(runs: 0, hangs: true)),
             Screen(name: "activity", selection: { _ in SidebarSelection(.activity) }),
-            Screen(name: "settings", selection: { _ in SidebarSelection(.settings) }),
         ]
         for pane in SetPane.allCases {
             out.append(Screen(name: "set-\(pane.rawValue)", selection: firstSet, pane: pane))
@@ -265,8 +264,7 @@ enum DebugLayoutSnapshots {
         spin(0.5)
         model.reload()
         SetPaneMemory.last = .included
-        let settings = SettingsModel(store: SettingsStore(root: model.support))
-        let window = open(MainWindow(model: model, settings: settings, skipsOnboarding: true), title: "", subtitle: "", size: CGSize(width: 1100, height: 700))
+        let window = open(MainWindow(model: model, skipsOnboarding: true), title: "", subtitle: "", size: CGSize(width: 1100, height: 700))
         guard let list = window.contentView.flatMap(sidebarList) else { return }
         for (step, row) in [3, 0, 8, 3, 9, 10, 1, 4, 6, 8, 0].enumerated() {
             list.selectRowIndexes(IndexSet(integer: row), byExtendingSelection: false)
@@ -283,7 +281,7 @@ enum DebugLayoutSnapshots {
         try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
         if only == nil || only == "switch" { snapshotSwitching(to: dir) }
         if only == "switch" { return }
-        let sizes = [CGSize(width: 760, height: 480), CGSize(width: 1040, height: 700), CGSize(width: 1100, height: 700), CGSize(width: 1800, height: 1050)]
+        let sizes = [CGSize(width: 900, height: 480), CGSize(width: 1040, height: 700), CGSize(width: 1100, height: 700), CGSize(width: 1800, height: 1050)]
         for make in [small, large, banners, blank] {
             let data = make()
             for screen in screens(data) {
@@ -297,10 +295,9 @@ enum DebugLayoutSnapshots {
                     if let only, !name.contains(only) { continue }
                     SetPaneMemory.last = screen.pane
                     render({
-                        let settings = SettingsModel(store: SettingsStore(root: model.support))
                         let archive = ArchiveModel(provider: model.services.archive, store: ConfigStore(root: model.support), debounce: .zero)
                         screen.prepare(archive)
-                        return MainWindow(model: model, settings: settings, selection: screen.selection(model), skipsOnboarding: true, archive: archive)
+                        return MainWindow(model: model, selection: screen.selection(model), skipsOnboarding: true, archive: archive)
                     }, title: title(screen, model), subtitle: screen.name == "archive-latest" ? model.sets.first?.name ?? "" : "", size: size, scroll: screen.scroll, name: name, to: dir)
                 }
             }

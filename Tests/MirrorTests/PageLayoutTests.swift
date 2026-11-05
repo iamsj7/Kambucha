@@ -17,13 +17,6 @@ import Foundation
         }
     }
 
-    @Test func theToolbarGivesUpItsSegmentsBelowTheRoomyWidth() {
-        #expect(!PageLayout.hasRoomyToolbar(width: 530))
-        #expect(PageLayout.hasRoomyToolbar(width: 810))   // the window's default size
-        #expect(!PageLayout.hasWordyToolbar(width: 810))
-        #expect(PageLayout.hasWordyToolbar(width: 1570))
-    }
-
     @Test func aCardRoundsOnlyItsOuterCorners() {
         #expect(PageCard.Position(index: 0, count: 1) == .only)
         #expect(PageCard.Position(index: 0, count: 3) == .first)

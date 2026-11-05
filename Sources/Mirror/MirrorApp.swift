@@ -78,11 +78,47 @@ struct MirrorApp: App {
         }
         .menuBarExtraStyle(.menu)
 
-        Window("Mirror", id: "main") { MainWindow(model: model, settings: settings) }
+        Window("Mirror", id: "main") { MainWindow(model: model) }
             .defaultSize(width: 1040, height: 700)
             .defaultLaunchBehavior(opensWindowAtLaunch ? .presented : .suppressed)
             .restorationBehavior(.disabled)
+            .commands {
+                SidebarCommands()
+                ToolbarCommands()
+                CommandGroup(replacing: .newItem) { AddCommands(model: model) }
+                CommandMenu("Backup") { BackupCommands(model: model) }
+            }
 
         Settings { SettingsView(model: settings) }
+    }
+}
+
+/// File's items. Views, not Commands, for `openWindow`: the main window may be closed.
+private struct AddCommands: View {
+    @Bindable var model: AppModel
+    @Environment(\.openWindow) private var openWindow
+
+    var body: some View {
+        Button("Add Backup Set…") { add(.set) }
+            .keyboardShortcut("n")
+        Button("Add Destination…") { add(.destination) }
+            .keyboardShortcut("n", modifiers: [.command, .shift])
+    }
+
+    private func add(_ request: AppModel.AddRequest) {
+        model.addRequest = request
+        openWindow(id: "main")
+        NSApplication.shared.activate()
+    }
+}
+
+private struct BackupCommands: View {
+    @Bindable var model: AppModel
+
+    var body: some View {
+        Button("Back Up Now") { model.runNow(nil) }
+            .disabled(!model.canBackUp)
+        Button(model.isPaused ? "Resume Backups" : "Pause Backups") { model.setPaused(!model.isPaused) }
+            .disabled(model.sets.isEmpty)
     }
 }

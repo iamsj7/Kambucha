@@ -16,26 +16,10 @@ enum PageLayout {
     /// Between a banner and what's next to it.
     static let bannerGap: CGFloat = 8
     static let cardRadius: CGFloat = 12
-    /// Below this the toolbar can't fit a four-part segmented control beside its other items, so the control becomes a menu.
-    static let roomyToolbarWidth: CGFloat = 700
-    /// Below this a toolbar with such a control keeps its buttons by showing them as symbols.
-    static let wordyToolbarWidth: CGFloat = 950
 
     /// What a reading page adds to each side, on top of a Form's own `inset`, to centre its column in `width`.
     static func readingMargin(in width: CGFloat) -> CGFloat {
         max(0, (width - readingWidth) / 2 - inset)
-    }
-
-    static func hasRoomyToolbar(width: CGFloat) -> Bool { width >= roomyToolbarWidth }
-    static func hasWordyToolbar(width: CGFloat) -> Bool { width >= wordyToolbarWidth }
-}
-
-/// A toolbar button's words, or its symbol alone where there isn't room for them.
-struct PageToolbarLabelStyle: LabelStyle {
-    let wordy: Bool
-
-    func makeBody(configuration: Configuration) -> some View {
-        if wordy { configuration.title } else { configuration.icon }
     }
 }
 
@@ -44,7 +28,7 @@ extension View {
     /// margins scroll too. `ownInset` is for a List, which has no side margin of its own as a Form has.
     func readingColumn(ownInset: Bool = false) -> some View { modifier(ReadingColumn(ownInset: ownInset)) }
 
-    /// The page's width, for the toolbar's sake, as a toolbar item can't measure itself.
+    /// The page's width.
     func measuringWidth(_ width: Binding<CGFloat>) -> some View {
         onGeometryChange(for: CGFloat.self, of: \.size.width) { width.wrappedValue = $0 }
     }

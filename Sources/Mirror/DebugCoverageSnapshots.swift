@@ -109,10 +109,9 @@ enum DebugCoverageSnapshots {
         render(NavigationStack { CoverageView(model: model, rows: [], filter: "zzz", select: { _ in }) }, size: size, name: "coverage-no-match", to: dir)
         render(NavigationStack { SeveralSetsView(model: model, rows: Array(rows.prefix(4)), select: { _ in }) },
                size: CGSize(width: 620, height: 520), name: "several-sets", to: dir)
-        let settings = SettingsModel(store: SettingsStore(root: model.support))
-        render(MainWindow(model: model, settings: settings, selection: SidebarSelection(sets: Set(rows.prefix(3).map(\.id))), skipsOnboarding: true),
+        render(MainWindow(model: model, selection: SidebarSelection(sets: Set(rows.prefix(3).map(\.id))), skipsOnboarding: true),
                size: CGSize(width: 1100, height: 720), name: "main-several", to: dir)
-        render(MainWindow(model: model, settings: settings, selection: SidebarSelection(.coverage), skipsOnboarding: true),
+        render(MainWindow(model: model, selection: SidebarSelection(.coverage), skipsOnboarding: true),
                size: CGSize(width: 1100, height: 720), name: "main-coverage", to: dir)
     }
 }

@@ -523,7 +523,6 @@ struct ArchiveView: View {
     @State private var drill: DrillModel?
     @State private var showDrill = false
     @State private var focused: ArchiveEntry.ID?
-    @State private var width: CGFloat = 0
 
     private func chooseLocation(for hit: ArchiveHit) -> (ArchiveEntry) async -> URL? {
         { [model] entry in await chooseRestoreLocation(for: entry, startingIn: model.startFolder(for: entry, of: hit)) }
@@ -540,7 +539,6 @@ struct ArchiveView: View {
         } bottom: {
             if model.restoreState != .idle { restoreBar }
         }
-        .measuringWidth($width)
         .navigationTitle("Archive")
         .navigationSubtitle(showsLatest ? ArchivePath.text(set: model.selectedSet?.name, folder: model.folder) : "")
         .searchable(text: $model.query, placement: .toolbar, prompt: "Search all archived files")
@@ -552,17 +550,14 @@ struct ArchiveView: View {
                 }
             }
             ToolbarItem(placement: .principal) { modePicker }
-            ToolbarItem {
-                Menu {
-                    Button { Task { await model.reloadAll() } } label: { Label("Reload", systemImage: "arrow.clockwise") }
-                    if !model.encryptedDestinations.isEmpty {
-                        Button { openDrill() } label: { Label("Test Recovery Kit", systemImage: "key.horizontal") }
-                            .disabled(agent == nil)
-                    }
-                } label: {
-                    Label("More", systemImage: "ellipsis")
+            ToolbarItemGroup {
+                Button { Task { await model.reloadAll() } } label: { Label("Reload", systemImage: "arrow.clockwise") }
+                    .help("Read the archive again")
+                if !model.encryptedDestinations.isEmpty {
+                    Button { openDrill() } label: { Label("Test Recovery Kit…", systemImage: "key.horizontal") }
+                        .help("Check that your Recovery Kit still opens a backup")
+                        .disabled(agent == nil)
                 }
-                .help("Reload, and more")
             }
         }
         .task(id: model.selection) {
@@ -608,7 +603,7 @@ struct ArchiveView: View {
         }
         .labelsHidden()
         .disabled(model.isSearching)
-        if PageLayout.hasRoomyToolbar(width: width) { picker.pickerStyle(.segmented).fixedSize() } else { picker.pickerStyle(.menu) }
+        picker.pickerStyle(.segmented).fixedSize()
     }
 
     /// One model per opening, so the sheet keeps its state while it is on screen.

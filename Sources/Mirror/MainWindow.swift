@@ -11,7 +11,6 @@ enum SidebarItem: Hashable {
     case destination(UUID)
     case archive
     case activity
-    case settings
 }
 
 /// What's selected in the sidebar. Several rows can be, but only sets: anything else is one place to go.
@@ -64,8 +63,6 @@ struct SidebarSelection: Equatable {
 
 struct MainWindow: View {
     @Bindable var model: AppModel
-    /// The Settings window's model, so the two never hold different copies of what's saved.
-    let settings: SettingsModel
     @State private var selection: SidebarSelection
     @State private var setOrder = SetOrder()
     @State private var filter = ""
@@ -82,10 +79,9 @@ struct MainWindow: View {
     /// For snapshots, which can't pass the real system checks.
     private let skipsOnboarding: Bool
 
-    init(model: AppModel, settings: SettingsModel, selection: SidebarSelection = SidebarSelection(), skipsOnboarding: Bool = false,
+    init(model: AppModel, selection: SidebarSelection = SidebarSelection(), skipsOnboarding: Bool = false,
          archive: ArchiveModel? = nil) {
         self.model = model
-        self.settings = settings
         self.skipsOnboarding = skipsOnboarding
         _selection = State(initialValue: selection)
         _archive = State(initialValue: archive ?? ArchiveModel(provider: model.services.archive, store: ConfigStore(root: model.support)))
@@ -115,6 +111,15 @@ struct MainWindow: View {
         .onAppear { DockPresence.windowOpened(); model.windowAppeared() }
         .onDisappear { DockPresence.windowClosed(); model.windowDisappeared() }
         .onChange(of: model.overviewRequests) { selection.select(.overview) }
+        // Initial too, as File > Add can be what opened this window.
+        .onChange(of: model.addRequest, initial: true) { _, request in
+            switch request {
+            case .set: addingSet = true
+            case .destination: addingDestination = true
+            case nil: return
+            }
+            model.addRequest = nil
+        }
         .onChange(of: onboarding.setAwaitingPreview) { _, id in
             guard let id else { return }
             model.reload()
@@ -131,7 +136,7 @@ struct MainWindow: View {
         } detail: {
             detail
         }
-        .frame(minWidth: 760, minHeight: 480)
+        .frame(minWidth: 900, minHeight: 480)
         .navigationTitle("Mirror")
         .searchable(text: $filter, placement: .sidebar, prompt: "Filter Sets")
         .onChange(of: orderKeys, initial: true) { updateOrder() }
@@ -199,7 +204,6 @@ struct MainWindow: View {
                 Label("Archive", systemImage: "archivebox").tag(SidebarItem.archive)
                 Label("Activity", systemImage: "list.bullet.rectangle").tag(SidebarItem.activity)
             }
-            Label("Settings", systemImage: "gearshape").tag(SidebarItem.settings)
         }
         .contextMenu(forSelectionType: SidebarItem.self) { items in
             let ids = SidebarSelection.setIDs(in: items, visible: Set(visibleRows.map(\.id)))
@@ -264,8 +268,6 @@ struct MainWindow: View {
             ArchiveView(model: archive, agent: model.services.agent)
         case .one(.activity):
             ActivityView(model: activity)
-        case .one(.settings):
-            SettingsView(model: settings)
         }
     }
 

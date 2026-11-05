@@ -104,7 +104,7 @@ struct OverviewView: View {
                     }
                     Spacer()
                     if let held = model.heldSet {
-                        Button("Review Deletions") { model.allowDeletes(held.id) }
+                        Button("Review Deletions…") { model.allowDeletes(held.id) }
                             .buttonStyle(.borderedProminent)
                             .accessibilityHint("Shows the files that would be deleted from the backup")
                     } else {
