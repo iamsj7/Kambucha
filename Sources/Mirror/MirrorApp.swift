@@ -28,6 +28,11 @@ struct MirrorApp: App {
             DebugFixtures.snapshotMain(to: URL(fileURLWithPath: dbg[i + 1]))
             exit(0)
         }
+        if let i = dbg.firstIndex(of: "--snapshot-coverage"), i + 1 < dbg.count {
+            _ = NSApplication.shared
+            DebugCoverageSnapshots.snapshotAll(to: URL(fileURLWithPath: dbg[i + 1]))
+            exit(0)
+        }
         if let i = dbg.firstIndex(of: "--snapshot-progress"), i + 1 < dbg.count {
             DebugFixtures.snapshotProgress(to: URL(fileURLWithPath: dbg[i + 1]))
             exit(0)
