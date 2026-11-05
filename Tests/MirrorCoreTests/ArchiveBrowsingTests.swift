@@ -82,6 +82,16 @@ struct ArchiveBrowsingTests {
         #expect(ArchiveSearch.find("تقرير", in: [l]).total == 1)
     }
 
+    /// A name made on a Mac is often stored decomposed, while what's typed is composed.
+    @Test func hangulAndKanaMatchInBothSpellings() {
+        for name in ["\u{D55C}\u{AE00}", "\u{304C}", "\u{30D1}\u{30B9}\u{30DD}\u{30FC}\u{30C8}"] {
+            let composed = name.precomposedStringWithCanonicalMapping, decomposed = name.decomposedStringWithCanonicalMapping
+            #expect(Array(composed.utf8) != Array(decomposed.utf8))
+            #expect(ArchiveSearch.find(composed, in: [listing([file("\(decomposed).txt")])]).total == 1, "\(name)")
+            #expect(ArchiveSearch.find(decomposed, in: [listing([file("\(composed).txt")])]).total == 1, "\(name)")
+        }
+    }
+
     @Test func aBlankQueryFindsNothing() {
         #expect(ArchiveSearch.find("   ", in: [listing([file("a.txt")])]) == ArchiveMatches())
     }

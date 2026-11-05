@@ -245,6 +245,21 @@ private final class Shelf: ArchiveProviding, @unchecked Sendable {
     /// Refuses a second command the way the agent's lock does, rather than waiting.
     var exclusive = false
     var pause: Duration = .zero
+    var folders: [String: [BackupItem]] = [:]
+    var browseFailures: Set<String> = []
+    /// By path, as a restore or a browse of that path stops until `release`.
+    private var held: Set<String> = []
+    private var _started: [String] = []
+    private var _restoreFailures: [String: any Error] = [:]
+
+    var started: [String] { lock.withLock { _started } }
+    func hold(_ path: String) { lock.withLock { _ = held.insert(path) } }
+    func release(_ path: String) { lock.withLock { _ = held.remove(path) } }
+    func failRestore(of path: String, with error: (any Error)?) { lock.withLock { _restoreFailures[path] = error } }
+    private func start(_ path: String) async throws {
+        lock.withLock { _started.append(path) }
+        while lock.withLock({ held.contains(path) }) { try await Task.sleep(for: .milliseconds(2)) }
+    }
 
     var listCalls: [PairID] { lock.withLock { _listCalls } }
     var restored: [(path: String, set: UUID, destination: UUID, to: URL)] { lock.withLock { _restored } }
@@ -273,10 +288,14 @@ private final class Shelf: ArchiveProviding, @unchecked Sendable {
     }
     func browse(path: String, set: BackupSet, destination: Destination) async throws -> [BackupItem] {
         try enter(); defer { leave() }
-        return []
+        try await start(path)
+        if browseFailures.contains(path) { throw URLError(.notConnectedToInternet) }
+        return folders[path] ?? []
     }
     func restore(entry: ArchiveEntry, set: BackupSet, destination: Destination, to: URL, replacing: Bool) async throws {
         try enter(); defer { leave() }
+        try await start(entry.path)
+        if let failure = lock.withLock({ _restoreFailures[entry.path] }) { throw failure }
         lock.withLock { _restored.append((entry.path, set.id, destination.id, to)) }
     }
 }
@@ -475,7 +494,25 @@ struct ArchiveSearchModelTests {
         model.query = "plan"
         await settled(model)
         let hit = try #require(model.results.matches.hits.first)
-        #expect(model.startFolder(for: hit)?.standardizedFileURL.path == beach.standardizedFileURL.path)
+        #expect(model.startFolder(for: hit.entry, of: hit)?.standardizedFileURL.path == beach.standardizedFileURL.path)
+    }
+
+    /// The whole run is a folder, and the guard would refuse the place the file came from.
+    @Test func aResultsWholeRunPanelDoesntOpenInsideTheSource() async throws {
+        let shelf = Shelf()
+        let beach = photosSource.appendingPathComponent("beach")
+        try FileManager.default.createDirectory(at: beach, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: photosSource) }
+        shelf.listings = [pair(photos, drive): [file(photos, "beach/plan.jpg")]]
+        let model = try make(shelf)
+        model.query = "plan"
+        await settled(model)
+        let hit = try #require(model.results.matches.hits.first)
+        var asked: ArchiveEntry?
+        await model.restoreRun(of: hit) { asked = $0; return nil }
+        let run = try #require(asked)
+        #expect(run.isFolder)
+        #expect(model.startFolder(for: run, of: hit) == nil)
     }
 
     @Test func aResultCanGoBackIntoItsOriginalFolder() async throws {
@@ -567,6 +604,221 @@ struct ArchiveSearchModelTests {
     }
 
     /// Measured, not pinned tightly: the point is that the main actor keeps turning while a big listing is read.
+    // MARK: Moving the selection
+
+    func until(_ condition: () -> Bool) async {
+        for _ in 0..<2_000 {
+            if condition() { return }
+            try? await Task.sleep(for: .milliseconds(2))
+        }
+        Issue.record("never happened")
+    }
+
+    /// A row's name is joined to the selected set, so one left from the last set would restore a different file.
+    @Test func changingTheSetDropsTheLatestRowsInTheSameStep() async throws {
+        let shelf = Shelf()
+        let report = BackupItem(name: "report.docx", isFolder: false, size: 111)
+        shelf.folders = ["Sets/Docs": [report]]
+        let model = try make(shelf)
+        model.mode = .latest
+        await model.showSelection()
+        #expect(model.latest == .loaded([report]))
+        shelf.hold("Sets/Photos")
+        model.selection.set = photos.id
+        #expect(model.latest == .idle)
+        let moving = Task { await model.showSelection() }
+        await until { shelf.started.contains("Sets/Photos") }
+        #expect(model.latest == .loading)
+        shelf.release("Sets/Photos")
+        await moving.value
+        #expect(model.latest == .loaded([]))
+    }
+
+    @Test func changingTheDestinationDropsTheLatestRowsInTheSameStep() async throws {
+        let shelf = Shelf()
+        shelf.folders = ["Sets/Photos": [BackupItem(name: "beach.jpg", isFolder: false, size: 1)]]
+        let model = try make(shelf)
+        model.selection = ArchiveSelection(set: photos.id, destination: cloud.id)
+        model.mode = .latest
+        await model.showSelection()
+        model.selection.destination = drive.id
+        #expect(model.latest == .idle)
+    }
+
+    @Test func changingTheSetDropsOlderVersionsInTheSameStep() async throws {
+        let shelf = Shelf()
+        shelf.listings = [pair(docs, cloud): [file(docs, "plan.pdf")]]
+        let model = try make(shelf)
+        await model.showSelection()
+        guard case .loaded = model.phase else { Issue.record("expected loaded"); return }
+        model.selection.set = photos.id
+        #expect(model.phase == .idle)
+    }
+
+    /// A listing can wait minutes behind a search, and this pane has no use for one.
+    @Test func theLatestBackupReadsNoListing() async throws {
+        let shelf = Shelf()
+        let model = try make(shelf)
+        model.mode = .latest
+        await model.showSelection()
+        #expect(shelf.listCalls.isEmpty)
+    }
+
+    @Test func goingBackToOlderVersionsShowsTheSetNowSelected() async throws {
+        let shelf = Shelf()
+        shelf.listings = [pair(photos, cloud): [file(photos, "beach.jpg")]]
+        let model = try make(shelf)
+        model.mode = .latest
+        model.selection.set = photos.id
+        await model.showSelection()
+        model.mode = .archive
+        await model.showPane()
+        guard case .loaded(let runs) = model.phase else { Issue.record("expected loaded"); return }
+        #expect(runs.map(\.fileCount) == [1])
+    }
+
+    @Test func aFailedReadOfTheLastSetIsntShownUnderTheNewOne() async throws {
+        let shelf = Shelf()
+        shelf.browseFailures = ["Sets/Docs"]
+        shelf.hold("Sets/Docs")
+        let model = try make(shelf)
+        model.mode = .latest
+        let old = Task { await model.reloadLatest() }
+        await until { shelf.started.contains("Sets/Docs") }
+        model.selection.set = photos.id
+        shelf.release("Sets/Docs")
+        await old.value
+        #expect(model.latest == .idle)
+    }
+
+    // MARK: Several restores at once
+
+    /// Counts panels answered, so a test knows a restore has been asked for.
+    @MainActor final class Panels {
+        var answered = 0
+        let tmp = FileManager.default.temporaryDirectory
+        func target(_ name: String) -> URL { tmp.appendingPathComponent("\(UUID().uuidString)-\(name)") }
+    }
+
+    /// Starts a restore of `entry` and returns once it has left the panel.
+    func begin(_ entry: ArchiveEntry, on model: ArchiveModel, to target: URL, _ panels: Panels) async -> Task<Void, Never> {
+        let before = panels.answered
+        let task = Task { await model.restore(entry) { _ in panels.answered += 1; return target } }
+        await until { panels.answered > before }
+        return task
+    }
+
+    @Test func aFailureIsntOverwrittenByARestoreThatSucceeds() async throws {
+        let shelf = Shelf(), panels = Panels()
+        let a = file(docs, "a.txt"), b = file(docs, "b.txt")
+        shelf.hold(a.path)
+        shelf.failRestore(of: a.path, with: URLError(.timedOut))
+        let model = try make(shelf)
+        let first = await begin(a, on: model, to: panels.target("a"), panels)
+        let second = await begin(b, on: model, to: panels.target("b"), panels)
+        shelf.release(a.path)
+        await first.value; await second.value
+        guard case .failed(let why) = model.restoreState else { Issue.record("expected failed, got \(model.restoreState)"); return }
+        #expect(why.contains("a.txt"))
+        #expect(why.contains("1 other was restored"))
+    }
+
+    @Test func restoredWaitsUntilNothingIsLeft() async throws {
+        let shelf = Shelf(), panels = Panels()
+        let a = file(docs, "a.txt"), b = file(docs, "b.txt")
+        shelf.hold(a.path); shelf.hold(b.path)
+        let model = try make(shelf)
+        let target = panels.target("b")
+        let first = await begin(a, on: model, to: panels.target("a"), panels)
+        let second = await begin(b, on: model, to: target, panels)
+        #expect(model.restoreState == .restoring("2 items"))
+        shelf.release(a.path)
+        await first.value
+        #expect(model.restoreState == .restoring("b.txt"))
+        shelf.release(b.path)
+        await second.value
+        #expect(model.restoreState == .done(target))
+    }
+
+    @Test func aCancelledPanelLeavesARunningRestoreOnShow() async throws {
+        let shelf = Shelf(), panels = Panels()
+        let a = file(docs, "a.txt")
+        shelf.hold(a.path)
+        let model = try make(shelf)
+        let first = await begin(a, on: model, to: panels.target("a"), panels)
+        await model.restore(file(docs, "b.txt")) { _ in nil }
+        #expect(model.restoreState == .restoring("a.txt"))
+        shelf.release(a.path)
+        await first.value
+    }
+
+    @Test func aFailureStaysUntilItsDismissed() async throws {
+        let shelf = Shelf(), panels = Panels()
+        let a = file(docs, "a.txt")
+        shelf.failRestore(of: a.path, with: URLError(.timedOut))
+        let model = try make(shelf)
+        await model.restore(a) { _ in panels.target("a") }
+        guard case .failed = model.restoreState else { Issue.record("expected failed"); return }
+        await model.restore(file(docs, "b.txt")) { _ in nil }
+        guard case .failed = model.restoreState else { Issue.record("a cancelled panel cleared the failure"); return }
+        await model.restore(file(docs, "c.txt")) { _ in panels.target("c") }
+        guard case .failed = model.restoreState else { Issue.record("a later restore cleared the failure"); return }
+        model.dismissRestoreState()
+        #expect(model.restoreState == .idle)
+    }
+
+    @Test func everyFailureIsKept() async throws {
+        let shelf = Shelf(), panels = Panels()
+        let a = file(docs, "a.txt"), b = file(docs, "b.txt")
+        shelf.failRestore(of: a.path, with: URLError(.timedOut))
+        shelf.failRestore(of: b.path, with: RestoreError.destinationNotEmpty("/x"))
+        let model = try make(shelf)
+        await model.restore(a) { _ in panels.target("a") }
+        await model.restore(b) { _ in panels.target("b") }
+        guard case .failed(let why) = model.restoreState else { Issue.record("expected failed"); return }
+        #expect(why.contains("a.txt") && why.contains("b.txt"))
+    }
+
+    @Test func tryingAFileAgainClearsItsFailure() async throws {
+        let shelf = Shelf(), panels = Panels()
+        let a = file(docs, "a.txt")
+        shelf.failRestore(of: a.path, with: URLError(.timedOut))
+        let model = try make(shelf)
+        await model.restore(a) { _ in panels.target("a") }
+        shelf.failRestore(of: a.path, with: nil)
+        let target = panels.target("a")
+        await model.restore(a) { _ in target }
+        #expect(model.restoreState == .done(target))
+    }
+
+    // MARK: Reads that recover, and turns at the agent
+
+    @Test func aReadThatRecoversThroughSearchClearsTheFailure() async throws {
+        let shelf = Shelf()
+        shelf.listings = [pair(docs, cloud): [file(docs, "plan.pdf")]]
+        shelf.failures = [cloud.id: URLError(.notConnectedToInternet)]
+        let model = try make(shelf)
+        await model.reload()
+        guard case .failed = model.phase else { Issue.record("expected failed"); return }
+        model.query = "plan"
+        await settled(model)
+        shelf.failures = [:]
+        model.retryUnreadable()
+        await until { !model.results.matches.hits.isEmpty && !model.results.isReading }
+        guard case .loaded = model.phase else { Issue.record("expected loaded, got \(model.phase)"); return }
+    }
+
+    /// The agent refuses a second command at once, and the test would end as "couldn't tell" with the Kit already typed.
+    @Test func aRecoveryKitTestWaitsForTheListingBeforeIt() async throws {
+        let shelf = Shelf(); shelf.exclusive = true; shelf.pause = .milliseconds(50)
+        let model = try make(shelf)
+        model.query = "plan"
+        await until { !shelf.listCalls.isEmpty }
+        let items = try await model.agentTurn { [docs, cloud] in try await shelf.browse(path: "Sets/Docs", set: docs, destination: cloud) }
+        #expect(items.isEmpty)
+        await settled(model)
+    }
+
     @Test func aHugeListingDoesntHoldUpTheMainThread() async throws {
         let shelf = Shelf()
         shelf.listings[pair(docs, cloud)] = (0..<100_000).map { file(docs, "client-\($0 % 12)/module-\($0 % 40)/report-\($0).pdf", stamp: "2026-11-\(10 + $0 % 20)T10-00-30") }

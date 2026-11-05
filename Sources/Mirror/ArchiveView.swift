@@ -60,6 +60,59 @@ struct ArchiveResults: Equatable {
     }
 }
 
+/// Restores under way and what became of them. Several can wait for the agent at once, so no one result speaks for the rest.
+private struct RestoreLog {
+    private struct Failure { var path: String; var why: String }
+
+    private var running: [(id: UUID, path: String)] = []
+    private var failures: [Failure] = []
+    private var restored: [URL] = []
+
+    private static func name(of path: String) -> String { (path as NSString).lastPathComponent }
+
+    var state: ArchiveModel.RestoreState {
+        if let job = running.first {
+            return .restoring(running.count == 1 ? Self.name(of: job.path) : "\(running.count) items")
+        }
+        if !failures.isEmpty { return .failed(failureText) }
+        return restored.last.map { .done($0) } ?? .idle
+    }
+
+    private var failureText: String {
+        var lines = failures.map(\.why)
+        if failures.count > 1 {
+            lines = failures.map { $0.why.contains(Self.name(of: $0.path)) ? $0.why : "\(Self.name(of: $0.path)): \($0.why)" }
+        }
+        if !restored.isEmpty { lines.append(restored.count == 1 ? "1 other was restored." : "\(restored.count) others were restored.") }
+        return lines.joined(separator: "\n")
+    }
+
+    /// Trying a file again answers its last failure. Any other failure stays until it's dismissed.
+    mutating func begin(_ path: String) -> UUID {
+        if running.isEmpty { restored = [] }
+        failures.removeAll { $0.path == path }
+        let id = UUID()
+        running.append((id, path))
+        return id
+    }
+
+    mutating func end(_ id: UUID) { running.removeAll { $0.id == id } }
+    mutating func finish(_ id: UUID, at target: URL) { end(id); restored.append(target) }
+    mutating func fail(_ id: UUID, why: String) {
+        guard let job = running.first(where: { $0.id == id }) else { return }
+        end(id)
+        failures.append(Failure(path: job.path, why: why))
+    }
+
+    /// For a restore that was refused before it started.
+    mutating func refuse(_ path: String, why: String) {
+        failures.removeAll { $0.path == path }
+        failures.append(Failure(path: path, why: why))
+    }
+
+    mutating func dismiss() { failures = []; restored = [] }
+}
+
 @MainActor @Observable
 final class ArchiveModel {
     enum Phase: Equatable { case idle, loading, loaded([ArchiveRun]), failed(String) }
@@ -71,9 +124,11 @@ final class ArchiveModel {
     private(set) var sets: [BackupSet] = []
     private(set) var destinations: [Destination] = []
     private(set) var phase: Phase = .idle
-    private(set) var restoreState: RestoreState = .idle
+    private var restores = RestoreLog()
+    var restoreState: RestoreState { restores.state }
     private(set) var drillDueDestinations: [Destination] = []
-    var selection = ArchiveSelection()
+    /// What's on show was read for the old selection, and a restore joins it to the new one, so it goes in the same step.
+    var selection = ArchiveSelection() { didSet { if selection != oldValue { resetFolder(); phase = .idle } } }
     var mode = Mode.archive
     /// Where the owner is in the latest backup, below the set's own folder.
     private(set) var folder: [String] = []
@@ -148,12 +203,19 @@ final class ArchiveModel {
 
     private func show(_ set: BackupSet, _ dest: Destination) async {
         phase = .loading
-        let read = await read(set, dest, urgent: true).value
-        guard set.id == selectedSet?.id, dest.id == selectedDestination?.id else { return }   // selection moved on
+        _ = await read(set, dest, urgent: true).value
+    }
+
+    /// A read a search started can be the one that answers for the selected archive, so `show` isn't the only way here.
+    private func listingRead(_ read: ListingRead, for pair: PairID) {
+        guard pair.set == selection.set, pair.destination == selection.destination else { return }
+        switch phase {
+        case .loading, .failed: break
+        case .idle, .loaded: return
+        }
         switch read {
         case .read(let listing): phase = .loaded(listing.runs)
         case .failed: phase = .failed("Mirror couldn't read the archive. Check your connection and try again.")
-        case nil: break
         }
     }
 
@@ -172,7 +234,10 @@ final class ArchiveModel {
             guard let self, generation == self.generation else { return nil }
             self.reads[source.pair] = nil
             self.listings[source.pair] = read
-            if read != nil { self.listingArrived() }
+            if let read {
+                self.listingRead(read, for: source.pair)
+                self.listingArrived()
+            }
             return read
         }
         reads[source.pair] = task
@@ -280,6 +345,19 @@ final class ArchiveModel {
         if mode == .latest { await reloadLatest() }
     }
 
+    /// What the screen does on opening and when the selection moves.
+    func showSelection() async {
+        loadConfig()
+        resetFolder()
+        resumeSearch()
+        await showPane()
+    }
+
+    /// Reads only the pane on show: a listing can wait minutes behind a search, and the latest backup has no use for one.
+    func showPane() async {
+        if mode == .latest { await reloadLatest() } else { await loadSelection() }
+    }
+
     /// `Sets/<set>` plus where the owner is, and a name below that.
     private func latestPath(_ name: String? = nil) -> String? {
         guard let set = selectedSet else { return nil }
@@ -289,21 +367,21 @@ final class ArchiveModel {
     func reloadLatest() async {
         guard let set = selectedSet, let dest = selectedDestination, let path = latestPath() else { latest = .idle; return }
         latest = .loading
+        func ownerMovedOn() -> Bool { set.id != selectedSet?.id || dest.id != selectedDestination?.id || path != latestPath() }
         do {
             let items = try await agent.turn(urgent: true) { [provider] in try await provider.browse(path: path, set: set, destination: dest) }
-            guard path == latestPath(), dest.id == selectedDestination?.id else { return }   // the owner moved on
-            latest = .loaded(items)
+            if !ownerMovedOn() { latest = .loaded(items) }
         } catch is CancellationError {
             return
         } catch {
-            latest = .failed(SetupFailureText.message(for: error))
+            if !ownerMovedOn() { latest = .failed(SetupFailureText.message(for: error)) }
         }
     }
 
     func open(_ name: String) async { folder.append(name); await reloadLatest() }
     func goUp(to depth: Int) async { folder = Array(folder.prefix(depth)); await reloadLatest() }
     /// A folder of one set means nothing in another.
-    func resetFolder() { folder = [] }
+    func resetFolder() { folder = []; latest = .idle }
 
     /// Restores a file or folder of the latest backup, or with `item` nil the folder the owner is in, which
     /// at the top is the whole set. The same guards as an archived file.
@@ -341,10 +419,16 @@ final class ArchiveModel {
         return startFolder(for: entry, in: set)
     }
 
-    /// A hit can be from any set, and its path means nothing against the selected one.
-    func startFolder(for hit: ArchiveHit) -> URL? {
+    /// A hit can be from any set, and its path means nothing against the selected one. `entry` is what's being restored,
+    /// which for a whole run is a folder and not the hit's own file.
+    func startFolder(for entry: ArchiveEntry, of hit: ArchiveHit) -> URL? {
         guard let set = sets.first(where: { $0.id == hit.source.pair.set }) else { return nil }
-        return startFolder(for: hit.entry, in: set)
+        return startFolder(for: entry, in: set)
+    }
+
+    /// For a command from elsewhere on this screen: the agent refuses a second one rather than wait, and a search holds it for minutes.
+    func agentTurn<T: Sendable>(_ work: @Sendable () async throws -> T) async rethrows -> T {
+        try await agent.turn(urgent: true, work)
     }
 
     private func startFolder(for entry: ArchiveEntry, in set: BackupSet) -> URL? {
@@ -370,7 +454,7 @@ final class ArchiveModel {
     private func restore(_ entry: ArchiveEntry, from hit: ArchiveHit, chooseLocation: (ArchiveEntry) async -> URL?) async {
         guard let set = sets.first(where: { $0.id == hit.source.pair.set }),
               let dest = destinations.first(where: { $0.id == hit.source.pair.destination }) else {
-            restoreState = .failed("\(hit.source.setName) on \(hit.source.destinationName) is no longer in Mirror.")
+            restores.refuse(entry.path, why: "\(hit.source.setName) on \(hit.source.destinationName) is no longer in Mirror.")
             return
         }
         await restore(entry, from: set, dest, chooseLocation: chooseLocation)
@@ -379,13 +463,13 @@ final class ArchiveModel {
     /// Restores one file or folder to a place the owner picks. A file can go back into a backed-up folder, where
     /// the save panel asks before replacing anything. A folder can't, as it could overwrite newer work file by file.
     private func restore(_ entry: ArchiveEntry, from set: BackupSet, _ dest: Destination, chooseLocation: (ArchiveEntry) async -> URL?) async {
-        guard let target = await chooseLocation(entry) else { restoreState = .idle; return }
+        guard let target = await chooseLocation(entry) else { return }
         if entry.isFolder, RestoreTarget.isInside(target, anyOf: sets.map(\.source)) {
-            restoreState = .failed("Choose a place outside the folders Mirror backs up, so newer files aren't replaced.")
+            restores.refuse(entry.path, why: "Choose a place outside the folders Mirror backs up, so newer files aren't replaced.")
             return
         }
         let name = (entry.path as NSString).lastPathComponent
-        restoreState = .restoring(name)
+        let job = restores.begin(entry.path)
         // The save panel has already asked "Replace?" of anything it was pointed at.
         let replacing = FileManager.default.fileExists(atPath: target.path)
         do {
@@ -393,17 +477,17 @@ final class ArchiveModel {
             try await agent.turn(urgent: true) { [provider] in
                 try await provider.restore(entry: entry, set: set, destination: dest, to: target, replacing: replacing)
             }
-            restoreState = .done(target)
+            restores.finish(job, at: target)
         } catch is CancellationError {
-            restoreState = .idle
+            restores.end(job)
         } catch let refused as RestoreError {
-            restoreState = .failed(SetupFailureText.message(for: refused))   // trying again wouldn't help
+            restores.fail(job, why: SetupFailureText.message(for: refused))   // trying again wouldn't help
         } catch {
-            restoreState = .failed("Mirror couldn't restore \(name). Nothing was changed. Try again.")
+            restores.fail(job, why: "Mirror couldn't restore \(name). Nothing was changed. Try again.")
         }
     }
 
-    func dismissRestoreState() { restoreState = .idle }
+    func dismissRestoreState() { restores.dismiss() }
 }
 
 @MainActor
@@ -431,7 +515,7 @@ struct ArchiveView: View {
     @State private var focused: ArchiveEntry.ID?
 
     private func chooseLocation(for hit: ArchiveHit) -> (ArchiveEntry) async -> URL? {
-        { [model] entry in await chooseRestoreLocation(for: entry, startingIn: model.startFolder(for: hit)) }
+        { [model] entry in await chooseRestoreLocation(for: entry, startingIn: model.startFolder(for: entry, of: hit)) }
     }
 
     var body: some View {
@@ -468,15 +552,11 @@ struct ArchiveView: View {
             }
         }
         .task(id: model.selection) {
-            model.loadConfig()
-            model.resetFolder()
-            model.resumeSearch()
-            await model.loadSelection()
-            if model.mode == .latest { await model.reloadLatest() }
+            await model.showSelection()
         }
         .onDisappear { model.forgetListings() }
         // Each look at a cloud is an agent launch and a network trip, so this waits until it's asked for.
-        .onChange(of: model.mode) { _, mode in if mode == .latest { Task { await model.reloadLatest() } } }
+        .onChange(of: model.mode) { Task { await model.showPane() } }
         .sheet(isPresented: $showDrill, onDismiss: { drill?.discard(); drill = nil; model.loadConfig() }) {
             if let drill { DrillSheet(model: drill) }
         }
@@ -487,7 +567,9 @@ struct ArchiveView: View {
         guard let agent else { return }
         drill = DrillModel(destinations: model.encryptedDestinations, sets: model.sets,
                            candidate: DrillFilePicker.candidate(sets: model.sets),
-                           run: { try await agent.drill($0, kitText: $1, relativePath: $2, original: $3) })
+                           run: { [model] destination, kit, path, original in
+                               try await model.agentTurn { try await agent.drill(destination, kitText: kit, relativePath: path, original: original) }
+                           })
         showDrill = true
     }
 

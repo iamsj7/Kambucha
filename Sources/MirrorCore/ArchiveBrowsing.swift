@@ -137,12 +137,12 @@ public enum ArchiveSearch {
         return path[...]
     }
 
-    /// Case and accents dropped, which also makes the two ways macOS can spell an accented name the same.
+    /// Case and accents dropped. Composed first, as folding alone leaves Hangul and kana in the two spellings macOS can store.
     static func folded<S: StringProtocol>(_ text: S) -> [UInt8] {
         if text.utf8.allSatisfy({ $0 < 0x80 }) {
             return text.utf8.map { $0 >= 0x41 && $0 <= 0x5A ? $0 + 0x20 : $0 }
         }
-        return Array(text.folding(options: [.caseInsensitive, .diacriticInsensitive], locale: nil).utf8)
+        return Array(text.precomposedStringWithCanonicalMapping.folding(options: [.caseInsensitive, .diacriticInsensitive], locale: nil).utf8)
     }
 
     private static func has(_ token: [UInt8], in key: [UInt8], from start: Int) -> Bool {

@@ -52,6 +52,31 @@ struct SettingsModelTests {
     }
 }
 
+@MainActor
+struct ActivityScanTests {
+    func run(_ t: TimeInterval, _ status: RunRecord.Status) -> RunRecord {
+        RunRecord(setID: UUID(), setName: "S", destinationID: UUID(), destinationName: "D", start: Date(timeIntervalSince1970: t),
+                  end: Date(timeIntervalSince1970: t + 5), trigger: .schedule, scope: "all", status: status)
+    }
+
+    /// An empty list here would otherwise read as "no problems".
+    @Test func aHistoryTooLongToSearchIsSaid() async throws {
+        let support = FileManager.default.temporaryDirectory.appendingPathComponent("mirror-activity-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: support) }
+        let store = RunRecordStore(root: support)
+        try store.append(run(1_700_000_000, .failed))
+        for i in 1...3 { try store.append(run(1_700_000_000 + Double(i) * 60, .success)) }
+        let model = ActivityModel(support: support, maxRead: 2)
+        model.filter.result = .problems
+        await model.reload()
+        #expect(model.records.isEmpty && model.reachedScanLimit)
+        let whole = ActivityModel(support: support, maxRead: 10)
+        whole.filter.result = .problems
+        await whole.reload()
+        #expect(whole.records.count == 1 && !whole.reachedScanLimit)
+    }
+}
+
 struct ActivityPresentationTests {
     @Test func everyStatusHasASymbolThatExistsAndWords() {
         for s: RunRecord.Status in [.skipped, .success, .partial, .held, .failed, .verificationFailed] {

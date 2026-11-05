@@ -88,6 +88,7 @@ public struct RunRecordStore: Sendable {
     private let dir: URL
     public init(root: URL) { dir = root.appendingPathComponent("runs", isDirectory: true) }
 
+    public static let scanBound = 5_000
     private static let skippedMarker = "-skipped-"
     private static let stampLength = 15   // yyyyMMddTHHmmss
 
@@ -122,24 +123,31 @@ public struct RunRecordStore: Sendable {
     /// Newest first by start time. Unreadable files are skipped. Includes skipped runs.
     public func recent(limit: Int) throws -> [RunRecord] { try recent(limit: limit, matching: .everything) }
 
+    /// The newest `limit` records that match, newest first. See `search`.
+    public func recent(limit: Int, matching filter: RunFilter, maxRead: Int = scanBound) throws -> [RunRecord] {
+        try search(limit: limit, matching: filter, maxRead: maxRead).records
+    }
+
     /// The newest `limit` records that match, newest first. Names sort by start time, so this reads newest-first and stops
     /// at `limit` matches; files marked skipped in their name are passed over unread when skipped runs can't match.
     /// `maxRead` bounds the files decoded, so a filter that matches little can't read the whole history.
-    public func recent(limit: Int, matching filter: RunFilter, maxRead: Int = 5_000) throws -> [RunRecord] {
-        guard limit > 0 else { return [] }
+    /// `reachedScanLimit` means files that could match were left unread, so a run that isn't here may still exist.
+    public func search(limit: Int, matching filter: RunFilter, maxRead: Int = scanBound) throws -> (records: [RunRecord], reachedScanLimit: Bool) {
+        guard limit > 0 else { return ([], false) }
         let passOverSkipped = !filter.admits(.skipped)
         var out: [RunRecord] = []
         var read = 0
+        var reachedScanLimit = false
         for url in try files().sorted(by: { $0.lastPathComponent > $1.lastPathComponent }) {
             if passOverSkipped, url.lastPathComponent.dropFirst(Self.stampLength).hasPrefix(Self.skippedMarker) { continue }
-            guard read < maxRead else { break }
+            guard read < maxRead else { reachedScanLimit = true; break }
             read += 1
             if let r = load(url), filter.matches(r) {
                 out.append(r)
                 if out.count == limit { break }
             }
         }
-        return out.sorted { $0.start > $1.start }
+        return (out.sorted { $0.start > $1.start }, reachedScanLimit)
     }
 
     public func prune(olderThan cutoff: Date) throws {

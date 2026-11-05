@@ -112,6 +112,33 @@ struct RunFilterTests {
         #expect(try store.recent(limit: 5, matching: RunFilter(search: "nothing"), maxRead: 10).isEmpty)
     }
 
+    /// A failed run past the bound mustn't read as "no problems".
+    @Test func aScanCutShortSaysSo() throws {
+        let store = RunRecordStore(root: root())
+        let bad = rec(1_700_000_000, .failed)
+        try store.append(bad)
+        for i in 1...5 { try store.append(rec(1_700_000_000 + Double(i) * 60, .success)) }
+        let cut = try store.search(limit: 9, matching: RunFilter(result: .problems), maxRead: 3)
+        #expect(cut.records.isEmpty && cut.reachedScanLimit)
+        let whole = try store.search(limit: 9, matching: RunFilter(result: .problems), maxRead: 6)
+        #expect(whole.records == [bad] && !whole.reachedScanLimit)
+    }
+
+    @Test func stoppingAtTheLimitIsntACutScan() throws {
+        let store = RunRecordStore(root: root())
+        for i in 0..<5 { try store.append(rec(1_700_000_000 + Double(i) * 60, .success)) }
+        let found = try store.search(limit: 2, matching: RunFilter(), maxRead: 2)
+        #expect(found.records.count == 2 && !found.reachedScanLimit)
+    }
+
+    @Test func skippedFilesPassedOverArentACutScan() throws {
+        let store = RunRecordStore(root: root())
+        for i in 0..<5 { try store.append(rec(1_700_000_000 + Double(i) * 60, .skipped)) }
+        for i in 5..<8 { try store.append(rec(1_700_000_000 + Double(i) * 60, .success)) }
+        let found = try store.search(limit: 9, matching: RunFilter(), maxRead: 3)
+        #expect(found.records.count == 3 && !found.reachedScanLimit)
+    }
+
     @Test func pruneKeepsRecentWithoutNeedingThemRead() throws {
         let store = RunRecordStore(root: root())
         let old = rec(1_600_000_000, .skipped), new = rec(1_700_000_000, .success)

@@ -30,6 +30,7 @@ struct RunResultPresentation {
 final class ActivityModel {
     /// Records shown at most, counted after filtering.
     static let limit = 500
+    static let scanNote = "Only the most recent runs were searched."
 
     private(set) var records: [RunRecord] = []
     private(set) var loadFailed = false
@@ -39,18 +40,28 @@ final class ActivityModel {
     @ObservationIgnored private let store: RunRecordStore
     @ObservationIgnored private let config: ConfigStore
 
-    init(support: URL = MirrorPaths.support) { store = RunRecordStore(root: support); config = ConfigStore(root: support) }
+    /// True when the history was too long to read to its end, so a run that isn't listed may still exist.
+    private(set) var reachedScanLimit = false
+    @ObservationIgnored private let maxRead: Int
+
+    init(support: URL = MirrorPaths.support, maxRead: Int = RunRecordStore.scanBound) {
+        store = RunRecordStore(root: support); config = ConfigStore(root: support); self.maxRead = maxRead
+    }
 
     /// Reads off the main thread. A filter changed while this runs is read again by the next call.
     func reload() async {
-        let store = store, config = config, filter = filter, limit = Self.limit
+        let store = store, config = config, filter = filter, limit = Self.limit, maxRead = maxRead
         let (result, names) = await Task.detached(priority: .utility) {
-            (try? store.recent(limit: limit, matching: filter),
+            (try? store.search(limit: limit, matching: filter, maxRead: maxRead),
              ((try? config.loadSets()) ?? []).map { (id: $0.id, name: $0.name) }.sorted { $0.name.localizedStandardCompare($1.name) == .orderedAscending })
         }.value
         guard filter == self.filter else { return }
         sets = names
-        if let result { records = result; loadFailed = false } else { loadFailed = true }
+        if let result {
+            records = result.records; reachedScanLimit = result.reachedScanLimit; loadFailed = false
+        } else {
+            loadFailed = true
+        }
     }
 
     /// True when a filter hides records, so an empty list isn't read as "no activity".
@@ -73,7 +84,10 @@ struct ActivityView: View {
 
     var body: some View {
         VStack(spacing: 0) {
-            if model.records.isEmpty && model.isFiltering {
+            if model.records.isEmpty && model.reachedScanLimit {
+                ContentUnavailableView("No Results", systemImage: "magnifyingglass",
+                                       description: Text("\(ActivityModel.scanNote) Older runs may match."))
+            } else if model.records.isEmpty && model.isFiltering {
                 ContentUnavailableView.search
             } else if model.records.isEmpty {
                 ContentUnavailableView(model.loadFailed ? "Couldn't Read Activity" : "No Activity Yet",
@@ -111,6 +125,11 @@ struct ActivityView: View {
                         Text(r.errors.isEmpty ? "None" : "\(r.errors.count.formatted()), \(r.errors[0])").lineLimit(2)
                             .foregroundStyle(r.errors.isEmpty ? .secondary : .primary)
                     }.width(min: 90, ideal: 180)
+                }
+                if model.reachedScanLimit {
+                    Text(ActivityModel.scanNote).font(.callout).foregroundStyle(.secondary)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .padding(.horizontal).padding(.vertical, 8)
                 }
                 if let selected, !selected.errors.isEmpty {
                     Divider()
