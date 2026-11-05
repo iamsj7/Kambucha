@@ -66,51 +66,81 @@ struct OverviewView: View {
                 .accessibilityElement(children: .combine)
             }
 
-            Section("Backup Sets") {
-                if model.rows.isEmpty {
-                    Text("Add a folder to start backing it up.").foregroundStyle(.secondary)
-                }
-                ForEach(model.rows) { row in
-                    Button { select(.set(row.id)) } label: { SetSummaryRow(row: row, model: model) }
-                        .buttonStyle(.plain)
-                }
+            let health = HealthSummary(model.rows.map { SetHealth(id: $0.id, name: $0.name, status: $0.status) })
+            if model.rows.isEmpty {
+                Section { Text("Add a folder to start backing it up.").foregroundStyle(.secondary) }
             }
-
-            Section("Destinations") {
-                if model.destinations.isEmpty {
-                    Text("Add a place to keep your backups.").foregroundStyle(.secondary)
-                }
-                ForEach(model.destinations) { d in
-                    let s = model.destinationStatus(d)
-                    Button { select(.destination(d.id)) } label: {
-                        LabeledContent {
-                            Text(s.text).foregroundStyle(.secondary)
-                        } label: {
-                            Label(d.name, systemImage: s.symbol)
-                        }
-                        .contentShape(Rectangle())
+            if !health.attention.isEmpty {
+                Section("Needs Attention") {
+                    ForEach(health.attention) { item in
+                        Button { select(.set(item.id)) } label: { AttentionRow(item: item) }
+                            .buttonStyle(.plain)
                     }
-                    .buttonStyle(.plain)
-                    .accessibilityElement(children: .ignore)
-                    .accessibilityLabel("\(d.name), \(s.text)")
-                    .accessibilityAddTraits(.isButton)
                 }
             }
-
-            Section {
-                let entries = model.reviewEntries
-                if entries.isEmpty {
-                    Label("Nothing to review", systemImage: "checkmark.circle").foregroundStyle(.secondary)
+            let troubled = model.destinations.filter { needsAttention($0) }
+            if !troubled.isEmpty {
+                Section("Destinations Needing Attention") {
+                    ForEach(troubled) { d in
+                        let s = model.destinationStatus(d)
+                        Button { select(.destination(d.id)) } label: {
+                            LabeledContent {
+                                Text(s.text).foregroundStyle(.secondary)
+                            } label: {
+                                Label(d.name, systemImage: s.symbol)
+                            }
+                            .contentShape(Rectangle())
+                        }
+                        .buttonStyle(.plain)
+                        .accessibilityElement(children: .ignore)
+                        .accessibilityLabel("\(d.name), \(s.text)")
+                        .accessibilityAddTraits(.isButton)
+                    }
                 }
-                ForEach(entries) { ReviewItemRow(entry: $0, model: model) }
-            } header: {
-                Text("Items to Review")
-            } footer: {
-                Text("These files sit outside your current rules. Nothing blocks your backup while they wait.")
+            }
+            let entries = model.reviewEntries
+            if !entries.isEmpty {
+                Section {
+                    ForEach(entries.prefix(Self.reviewLimit)) { ReviewItemRow(entry: $0, model: model) }
+                } header: {
+                    Text("Items to Review")
+                } footer: {
+                    Text(entries.count > Self.reviewLimit
+                         ? "Showing \(Self.reviewLimit) of \(entries.count.formatted()). These files sit outside your current rules. Nothing blocks your backup while they wait."
+                         : "These files sit outside your current rules. Nothing blocks your backup while they wait.")
+                }
+            }
+            if let line = health.countLine {
+                Section {
+                    Label(summaryText(line, health), systemImage: "checkmark.circle").foregroundStyle(.secondary)
+                    if !model.destinations.isEmpty {
+                        Label(destinationLine(troubled.count), systemImage: "externaldrive").foregroundStyle(.secondary)
+                    }
+                }
             }
         }
         .formStyle(.grouped)
         .navigationTitle("Overview")
+    }
+
+    /// Review items are rows with buttons, so only the first are built.
+    private static let reviewLimit = 25
+
+    private func summaryText(_ line: String, _ health: HealthSummary) -> String {
+        guard let last = health.lastBackup else { return line }
+        return "\(line), last backup \(last.formatted(.relative(presentation: .named)))"
+    }
+
+    private func destinationLine(_ troubled: Int) -> String {
+        let n = model.destinations.count
+        let noun = n == 1 ? "destination" : "destinations"
+        return troubled == 0 ? "\(n.formatted()) \(noun), all fine" : "\(n.formatted()) \(noun), \(troubled.formatted()) need attention"
+    }
+
+    /// The shared health check, plus the two warnings the destination screen raises on its own.
+    private func needsAttention(_ d: Destination) -> Bool {
+        StatusSummary.destinationHealth(d.id, sets: model.sets, states: model.states).needsAttention
+            || model.destinationStatus(d).symbol == "exclamationmark.triangle"
     }
 
     private var canBackUp: Bool {
@@ -121,25 +151,21 @@ struct OverviewView: View {
     }
 }
 
-struct SetSummaryRow: View {
-    let row: SetRow
-    let model: AppModel
+struct AttentionRow: View {
+    let item: HealthSummary.Item
     var body: some View {
-        let p = StatusPresentation(row.status)
-        let set = model.set(row.id)
-        let last = set.flatMap { s in s.destinationIDs.compactMap { model.states[PairID(set: s.id, destination: $0)]?.lastFinished }.max() }
+        let p = StatusPresentation(item.status)
         LabeledContent {
-            VStack(alignment: .trailing, spacing: 2) {
-                Text(row.status.shortText)
-                if let last { Text(last.formatted(.relative(presentation: .named))).font(.caption) }
-            }
-            .foregroundStyle(.secondary)
+            Text(item.status.shortText).foregroundStyle(.secondary)
         } label: {
-            Label(row.name, systemImage: p.symbol)
+            VStack(alignment: .leading, spacing: 2) {
+                Label(item.name, systemImage: p.symbol)
+                if let d = p.detail { Text(d).font(.caption).foregroundStyle(.secondary).lineLimit(2) }
+            }
         }
         .contentShape(Rectangle())
         .accessibilityElement(children: .ignore)
-        .accessibilityLabel("\(row.name), \(p.title)" + (last.map { ", last backed up \($0.formatted(.relative(presentation: .named)))" } ?? ""))
+        .accessibilityLabel("\(item.name), \(p.title)" + (p.detail.map { ", \($0)" } ?? ""))
         .accessibilityAddTraits(.isButton)
     }
 }

@@ -39,10 +39,57 @@ public struct RunRecord: Codable, Identifiable, Equatable, Sendable {
     }
 }
 
-/// Stores records at `<root>/runs/<date>-<id>.json`. `root` is the support directory.
+/// What the Activity screen wants from the history. The limit applies after this, so records people don't
+/// care about (a scheduled run that found nothing to do) can't push the ones they do off the end.
+public struct RunFilter: Equatable, Sendable {
+    public enum Result: String, CaseIterable, Sendable { case all, problems, success }
+    public var includeSkipped = false
+    public var setID: UUID?
+    public var result: Result = .all
+    /// Matched against the set name, ignoring case.
+    public var search = ""
+
+    public init(includeSkipped: Bool = false, setID: UUID? = nil, result: Result = .all, search: String = "") {
+        self.includeSkipped = includeSkipped; self.setID = setID; self.result = result; self.search = search
+    }
+
+    /// Every record, skipped runs too.
+    public static let everything = RunFilter(includeSkipped: true)
+
+    /// Problems are the runs that need a look: failed, unverified, unfinished, or holding deletions.
+    public static func isProblem(_ s: RunRecord.Status) -> Bool {
+        switch s {
+        case .failed, .verificationFailed, .partial, .held: true
+        case .success, .skipped: false
+        }
+    }
+
+    /// Whether any record with this status can match, so a file known by name to be skipped needn't be read.
+    func admits(_ s: RunRecord.Status) -> Bool {
+        switch s {
+        case .skipped: includeSkipped && result == .all
+        case .success: result != .problems
+        default: result != .success
+        }
+    }
+
+    public func matches(_ r: RunRecord) -> Bool {
+        guard admits(r.status) else { return false }
+        if let setID, r.setID != setID { return false }
+        let q = search.trimmingCharacters(in: .whitespaces)
+        return q.isEmpty || r.setName.localizedCaseInsensitiveContains(q)
+    }
+}
+
+/// Stores records at `<root>/runs/<stamp>-<id>.json`, or `<stamp>-skipped-<id>.json` for a skipped run. `root` is the
+/// support directory. The name carries the one fact the Activity screen filters on most, so it can pass over the
+/// many skipped runs a schedule writes without reading them. Older records have no marker and are read as before.
 public struct RunRecordStore: Sendable {
     private let dir: URL
     public init(root: URL) { dir = root.appendingPathComponent("runs", isDirectory: true) }
+
+    private static let skippedMarker = "-skipped-"
+    private static let stampLength = 15   // yyyyMMddTHHmmss
 
     private static func stamp(_ d: Date) -> String {
         let f = Date.ISO8601FormatStyle(timeZone: .gmt).year().month().day().time(includingFractionalSeconds: false)
@@ -55,7 +102,8 @@ public struct RunRecordStore: Sendable {
         let e = JSONEncoder()
         e.dateEncodingStrategy = .iso8601
         e.outputFormatting = [.prettyPrinted, .sortedKeys]
-        let name = "\(Self.stamp(r.start))-\(r.id.uuidString).json"
+        let marker = r.status == .skipped ? Self.skippedMarker : "-"
+        let name = "\(Self.stamp(r.start))\(marker)\(r.id.uuidString).json"
         try e.encode(r).write(to: dir.appendingPathComponent(name), options: .atomic)
     }
 
@@ -71,15 +119,34 @@ public struct RunRecordStore: Sendable {
         return (try? Data(contentsOf: url)).flatMap { try? d.decode(RunRecord.self, from: $0) }
     }
 
-    /// Newest first by start time. Unreadable files are skipped.
-    public func recent(limit: Int) throws -> [RunRecord] {
-        // File names start with a sortable UTC stamp, so only the newest `limit` need decoding.
-        let newest = try files().sorted { $0.lastPathComponent > $1.lastPathComponent }.prefix(max(limit, 0))
-        return newest.compactMap(load).sorted { $0.start > $1.start }
+    /// Newest first by start time. Unreadable files are skipped. Includes skipped runs.
+    public func recent(limit: Int) throws -> [RunRecord] { try recent(limit: limit, matching: .everything) }
+
+    /// The newest `limit` records that match, newest first. Names sort by start time, so this reads newest-first and stops
+    /// at `limit` matches; files marked skipped in their name are passed over unread when skipped runs can't match.
+    /// `maxRead` bounds the files decoded, so a filter that matches little can't read the whole history.
+    public func recent(limit: Int, matching filter: RunFilter, maxRead: Int = 5_000) throws -> [RunRecord] {
+        guard limit > 0 else { return [] }
+        let passOverSkipped = !filter.admits(.skipped)
+        var out: [RunRecord] = []
+        var read = 0
+        for url in try files().sorted(by: { $0.lastPathComponent > $1.lastPathComponent }) {
+            if passOverSkipped, url.lastPathComponent.dropFirst(Self.stampLength).hasPrefix(Self.skippedMarker) { continue }
+            guard read < maxRead else { break }
+            read += 1
+            if let r = load(url), filter.matches(r) {
+                out.append(r)
+                if out.count == limit { break }
+            }
+        }
+        return out.sorted { $0.start > $1.start }
     }
 
     public func prune(olderThan cutoff: Date) throws {
+        let cutoffStamp = Self.stamp(cutoff)
         for url in try files() {
+            // A run that started after the cutoff's second ended after it: no need to read it.
+            if url.lastPathComponent.prefix(Self.stampLength) > cutoffStamp { continue }
             if let r = load(url), r.end < cutoff { try FileManager.default.removeItem(at: url) }
         }
     }

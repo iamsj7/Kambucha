@@ -160,11 +160,13 @@ public enum StatusSummary {
     /// A set whose preview was never accepted (a set made before acceptance moved onto the set, say) can't be backed up
     /// by the agent, so "Backed Up" and "Not backed up yet" give way to a plain request. Problems, held deletions and a
     /// run keep their own message, and a paused set needs nothing.
+    public static let previewNeededPrefix = "Preview needed: "
+
     public static func withPreviewNeeded(_ status: OverallStatus, sets: [BackupSet]) -> OverallStatus {
         let needing = sets.filter { !$0.isPaused && !$0.isPreviewAccepted }.map(\.name)
         guard !needing.isEmpty else { return status }
         switch status {
-        case .backedUp, .driveNotConnected, .attention("Not backed up yet"): return .attention("Preview needed: " + needing.joined(separator: ", "))
+        case .backedUp, .driveNotConnected, .attention("Not backed up yet"): return .attention(previewNeededPrefix + needing.joined(separator: ", "))
         default: return status
         }
     }
