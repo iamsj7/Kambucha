@@ -36,6 +36,11 @@ struct ProgressPresentation {
 
     var detail: String { [filesText, speedText, etaText].compactMap { $0 }.joined(separator: " · ") }
 
+    /// One line for the menu bar's menu.
+    func menuLine(label: String) -> String {
+        "\(label): " + [percentText ?? phaseText, speedText, etaText].compactMap { $0 }.joined(separator: ", ")
+    }
+
     var spokenValue: String {
         var parts = [percentText.map { "\($0) done" } ?? phaseText]
         if let s = speedText { parts.append(s.replacingOccurrences(of: "/s", with: " per second")) }

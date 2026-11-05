@@ -154,6 +154,12 @@ final class AppModel {
         volumeCache = cache
         eject = EjectController(ejector: services.ejector, isBackupRunning: { false }, refresh: { await cache.refresh() })
         // Eject also asks the lock itself, so a launchd run this app hasn't loaded yet still blocks it.
+        // A menu has no appear or disappear of its own, and it must show fresh words and times when it opens.
+        for (name, open) in [(NSMenu.didBeginTrackingNotification, true), (NSMenu.didEndTrackingNotification, false)] {
+            NotificationCenter.default.addObserver(forName: name, object: nil, queue: .main) { [weak self] _ in
+                MainActor.assumeIsolated { if open { self?.panelAppeared() } else { self?.panelDisappeared() } }
+            }
+        }
         eject.isBackupRunning = { [weak self] in
             guard let self else { return false }
             return self.isBackupActive || AgentLockProbe.isHeld(support: self.support)

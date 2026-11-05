@@ -1,3 +1,4 @@
+import AppKit
 import Testing
 import Foundation
 import MirrorCore
@@ -73,6 +74,30 @@ private func vol(_ uuid: String, internalLooking: Bool = false) -> VolumeInfo {
         let before = m.overviewRequests
         m.showOverview()
         #expect(m.overviewRequests == before + 1)
+    }
+
+    @Test func openingAMenuCountsAsLookingAtTheStatus() throws {
+        let m = try make()
+        NotificationCenter.default.post(name: NSMenu.didBeginTrackingNotification, object: nil)
+        #expect(m.isWatchingProgress)
+        NotificationCenter.default.post(name: NSMenu.didEndTrackingNotification, object: nil)
+        #expect(!m.isWatchingProgress)
+    }
+
+    @Test func aMenuItemStaysOneShortLine() {
+        #expect(MenuText.short("Short.") == "Short.")
+        #expect(MenuText.short("The backup agent stopped with code 1. Then a long story.") == "The backup agent stopped with code 1")
+        let long = MenuText.short(String(repeating: "word ", count: 40))
+        #expect(long.count <= MenuText.limit && long.hasSuffix("…"))
+    }
+
+    @Test func aRunningPairReadsAsOneMenuLine() {
+        let pair = PairID(set: UUID(), destination: UUID())
+        var p = TransferProgress(pair: pair, phase: .transferring, bytesDone: 1, updated: Date())
+        p.bytesPerSecond = 3_000_000
+        let line = ProgressPresentation(progress: p).menuLine(label: "Docs to iCloud Drive")
+        #expect(line.hasPrefix("Docs to iCloud Drive: "))
+        #expect(line.contains("MB/s"))
     }
 
     @Test func aSecondDestinationForTheSameDriveIsRefused() throws {

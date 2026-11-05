@@ -76,7 +76,7 @@ struct MirrorApp: App {
             Image(systemName: StatusPresentation(model.status).symbol)
                 .accessibilityLabel("Mirror, \(StatusPresentation(model.status).title)")
         }
-        .menuBarExtraStyle(.window)
+        .menuBarExtraStyle(.menu)
 
         Window("Mirror", id: "main") { MainWindow(model: model, settings: settings) }
             .defaultSize(width: 1040, height: 700)
