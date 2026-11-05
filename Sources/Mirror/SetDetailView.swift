@@ -2,6 +2,9 @@ import SwiftUI
 import AppKit
 import MirrorCore
 
+/// The pane last chosen, kept across sets (MainWindow recreates the view per set) for the session.
+@MainActor enum SetPaneMemory { static var last = SetPane.status }
+
 struct SetDetailView: View {
     @Bindable var model: AppModel
     let setID: UUID
@@ -13,8 +16,10 @@ struct SetDetailView: View {
     @State private var network = NetworkStatus()
     @State private var confirmingAdoption = false
     @State private var outsidePicks = 0
+    @State private var pane: SetPane
 
-    init(model: AppModel, setID: UUID) {
+    init(model: AppModel, setID: UUID, pane: SetPane? = nil) {
+        _pane = State(initialValue: pane ?? SetPaneMemory.last)
         self.model = model
         self.setID = setID
         let initial = model.set(setID) ?? BackupSet(name: "", source: URL(fileURLWithPath: "/"))
@@ -35,134 +40,35 @@ struct SetDetailView: View {
     }
 
     var body: some View {
-        Form {
-            let running = model.progress.filter { $0.progress.pair.set == setID }
-            if !running.isEmpty {
-                Section("Backing Up") {
-                    ForEach(running) { ProgressRow(label: $0.label, progress: $0.progress) }
-                    NetworkUploadRow(network: network)
+        VStack(spacing: 0) {
+            Picker("Section", selection: $pane) {
+                ForEach(SetPane.allCases, id: \.self) { Text($0.title).tag($0) }
+            }
+            .pickerStyle(.segmented).labelsHidden()
+            .padding([.horizontal, .top])
+            .padding(.bottom, 8)
+            .accessibilityLabel("Section")
+            switch pane {
+            case .status: form { statusPane }
+            case .included:
+                VStack(spacing: 0) {
+                    bannerBar
+                    IncludedPane(draft: $draft, presets: presets, presetBinding: presetBinding,
+                                 requestPreview: { requestPreview(after: $0) }, excludeItems: { Task { await excludeItems() } })
                 }
+            case .destinations: form { destinationsPane }
+            case .safety: form { safetyPane }
             }
-            if !nameConflicts.isEmpty {
-                Section {
-                    Label(SetNameConflict.title(name: draft.name, in: nameConflicts), systemImage: "exclamationmark.triangle")
-                    Text("Nothing has been changed there. To start a fresh backup instead, remove this set and add it under another name.")
-                        .font(.caption).foregroundStyle(.secondary)
-                    Button("\(SetNameConflict.adoptButton)…") { confirmingAdoption = true }
-                }
-            }
-            if !accepted {
-                Section {
-                    Label("Preview this set before its first backup. Changing rules asks again.", systemImage: "eye")
-                    Button("Preview Backup…") { showingPreview = true }
-                        .buttonStyle(.borderedProminent)
-                }
-            }
-
-            Section("Location") {
-                LabeledContent("Name") { Text(draft.name) }
-                LabeledContent("Folder") {
-                    Text(draft.source.path).lineLimit(1).truncationMode(.middle).textSelection(.enabled)
-                }
-                Button("Show in Finder") { NSWorkspace.shared.activateFileViewerSelecting([draft.source]) }
-                Toggle("Pause this set", isOn: $draft.isPaused)
-                Text("The name can't be changed, because it names this set's folder in every destination. To rename it, remove the set and add it again.")
-                    .font(.caption).foregroundStyle(.secondary)
-            }
-
-            Section {
-                Toggle(isOn: .constant(true)) { Text("macOS (.DS_Store, .Trash)") }
-                    .disabled(true)
-                ForEach(presets) { preset in
-                    Toggle(preset.name, isOn: presetBinding(preset.id))
-                }
-            } header: {
-                Text("Stacks")
-            } footer: {
-                Text("Build folders and caches for these stacks are skipped. When unsure, Mirror backs a file up.")
-            }
-
-            Section {
-                Toggle("Back up secrets", isOn: $draft.backupSecrets)
-                Toggle("Back up Git history", isOn: $draft.backupGit)
-            } header: {
-                Text("Secrets and Git")
-            } footer: {
-                Text("Secrets are .env files and private keys. Git history adds the .git folders, which can be large.")
-            }
-
-            Section {
-                ForEach($draft.rules) { $rule in
-                    HStack {
-                        Picker("Action", selection: $rule.action) {
-                            Text("Include").tag(UserRule.Action.include)
-                            Text("Exclude").tag(UserRule.Action.exclude)
-                        }
-                        .labelsHidden().frame(width: 100)
-                        .onChange(of: rule.action) { if !rule.pattern.isEmpty { requestPreview() } }
-                        TextField("Pattern", text: $rule.pattern, prompt: Text("For example *.log or /Drafts/**"))
-                            .labelsHidden()
-                            .onSubmit { requestPreview(after: 0) }
-                        Button(role: .destructive) { draft.rules.removeAll { $0.id == rule.id }; requestPreview() } label: {
-                            Image(systemName: "trash")
-                        }
-                        .buttonStyle(.borderless)
-                        .accessibilityLabel("Delete rule \(rule.pattern)")
-                    }
-                }
-                HStack {
-                    Button("Exclude File or Folder…") { Task { await excludeItems() } }
-                        .accessibilityHint("Pick items in this set to leave out of the backup")
-                    Button("Add Rule") { draft.rules.append(UserRule(pattern: "", action: .exclude)) }
-                }
-            } header: {
-                Text("Your Rules")
-            } footer: {
-                Text("Your rules come before stacks. With Secrets or Git history off, those files stay out whatever your rules say. Press Return after typing a pattern to preview the effect. A folder's pattern ends in /**.")
-            }
-
-            Section("Destinations") {
-                ForEach(model.destinations) { d in
-                    let status = model.destinationStatus(d)
-                    Toggle(isOn: destinationBinding(d.id)) {
-                        VStack(alignment: .leading) {
-                            Label(d.name, systemImage: d.kind.symbol)
-                            Text(status.text).font(.caption).foregroundStyle(.secondary)
-                        }
-                    }
-                }
-                if model.destinations.isEmpty {
-                    Text("Add a destination from the sidebar.").foregroundStyle(.secondary)
-                }
-            }
-
-            Section {
-                Stepper("At least \(draft.deletion.minFiles) files", value: $draft.deletion.minFiles, in: 1...100_000, step: 10)
-                Stepper("More than \(draft.deletion.percent.formatted())% of the set",
-                        value: $draft.deletion.percent, in: 1...100, step: 1)
-                Stepper("Or more than \(draft.deletion.absoluteMax.formatted()) files",
-                        value: $draft.deletion.absoluteMax, in: 10...1_000_000, step: 100)
-            } header: {
-                Text("Hold Deletions When a Backup Would Remove")
-            } footer: {
-                Text("A hold needs both the first two, or the last on its own. New and changed files keep backing up while deletions wait for you.")
-            }
-
-            Section {
-                Stepper("Keep removed files \(draft.archiveDays) days", value: $draft.archiveDays, in: 1...3650, step: 5)
-            } header: {
-                Text("Archive")
-            } footer: {
-                Text("Files you delete or change are kept in the archive for this long.")
-            }
-
-            Section {
+        }
+        .onChange(of: pane) { _, new in SetPaneMemory.last = new }
+        .toolbar {
+            ToolbarItemGroup {
                 Button("Preview Backup…") { showingPreview = true }
+                    .accessibilityHint("Shows what a backup of this set would change")
                 Button("Back Up Now") { model.runNow(setID) }
                     .disabled(!accepted || draft.isPaused)
             }
         }
-        .formStyle(.grouped)
         .navigationTitle(draft.name)
         .onChange(of: draft) { _, new in
             let c = Self.cleaned(new)
@@ -202,6 +108,142 @@ struct SetDetailView: View {
                 model.save(set: accepted)
                 model.runNow(accepted.id)
             }
+        }
+    }
+
+    private func form<Content: View>(@ViewBuilder _ content: () -> Content) -> some View {
+        Form {
+            banners
+            content()
+        }
+        .formStyle(.grouped)
+    }
+
+    private var shownBanners: [SetBanner] {
+        SetBanners.visible(nameConflict: !nameConflicts.isEmpty, previewAccepted: accepted, on: pane)
+    }
+
+    /// Notices that need the owner show at the top of every pane: as sections in a form pane.
+    @ViewBuilder private var banners: some View {
+        ForEach(shownBanners, id: \.self) { banner in
+            Section {
+                switch banner {
+                case .nameConflict:
+                    Label(SetNameConflict.title(name: draft.name, in: nameConflicts), systemImage: "exclamationmark.triangle")
+                    Text(Self.conflictHelp).font(.caption).foregroundStyle(.secondary)
+                    Button("\(SetNameConflict.adoptButton)…") { confirmingAdoption = true }
+                case .previewNeeded:
+                    Label(Self.previewHelp, systemImage: "eye")
+                    Button("Preview Backup…") { showingPreview = true }
+                        .buttonStyle(.borderedProminent)
+                }
+            }
+        }
+    }
+
+    /// The same notices as a bar above the list pane, so they don't scroll away with 200 rules.
+    @ViewBuilder private var bannerBar: some View {
+        if !shownBanners.isEmpty {
+            VStack(alignment: .leading, spacing: 8) {
+                ForEach(shownBanners, id: \.self) { banner in
+                    switch banner {
+                    case .nameConflict:
+                        HStack {
+                            Label(SetNameConflict.title(name: draft.name, in: nameConflicts), systemImage: "exclamationmark.triangle")
+                            Spacer()
+                            Button("\(SetNameConflict.adoptButton)…") { confirmingAdoption = true }
+                        }
+                        Text(Self.conflictHelp).font(.caption).foregroundStyle(.secondary)
+                    case .previewNeeded:
+                        HStack {
+                            Label(Self.previewHelp, systemImage: "eye")
+                            Spacer()
+                            Button("Preview Backup…") { showingPreview = true }.buttonStyle(.borderedProminent)
+                        }
+                    }
+                }
+            }
+            .padding(12)
+            .background(.quaternary, in: RoundedRectangle(cornerRadius: 8))
+            .padding(.horizontal).padding(.bottom, 8)
+        }
+    }
+
+    private static let conflictHelp = "Nothing has been changed there. To start a fresh backup instead, remove this set and add it under another name."
+    private static let previewHelp = "Preview this set before its first backup. Changing rules asks again."
+
+    @ViewBuilder private var statusPane: some View {
+        let running = model.progress.filter { $0.progress.pair.set == setID }
+        let current = model.rows.first { $0.id == setID }.map { StatusPresentation($0.status) }
+        let lastRun = model.states.filter { $0.key.set == setID }.compactMap(\.value.lastFinished).max()
+        Section("Location") {
+            LabeledContent("Name") { Text(draft.name) }
+            LabeledContent("Folder") {
+                Text(draft.source.path).lineLimit(1).truncationMode(.middle).textSelection(.enabled)
+            }
+            Button("Show in Finder") { NSWorkspace.shared.activateFileViewerSelecting([draft.source]) }
+            Toggle("Pause this set", isOn: $draft.isPaused)
+            Text("The name can't be changed, because it names this set's folder in every destination. To rename it, remove the set and add it again.")
+                .font(.caption).foregroundStyle(.secondary)
+        }
+        Section("State") {
+            if let current {
+                LabeledContent("Now") { Label(current.title, systemImage: current.symbol) }
+                if let detail = current.detail { Text(detail).font(.caption).foregroundStyle(.secondary) }
+            }
+            LabeledContent("Last backup") {
+                Text(lastRun.map { $0.formatted(.relative(presentation: .named)) } ?? "Not yet")
+            }
+        }
+        if !running.isEmpty {
+            Section("Backing Up") {
+                ForEach(running) { ProgressRow(label: $0.label, progress: $0.progress) }
+                NetworkUploadRow(network: network)
+            }
+        }
+        Section {
+            Button("Preview Backup…") { showingPreview = true }
+            Button("Back Up Now") { model.runNow(setID) }
+                .disabled(!accepted || draft.isPaused)
+        }
+    }
+
+    @ViewBuilder private var destinationsPane: some View {
+        Section("Destinations") {
+            ForEach(model.destinations) { d in
+                let status = model.destinationStatus(d)
+                Toggle(isOn: destinationBinding(d.id)) {
+                    VStack(alignment: .leading) {
+                        Label(d.name, systemImage: d.kind.symbol)
+                        Text(status.text).font(.caption).foregroundStyle(.secondary)
+                    }
+                }
+            }
+            if model.destinations.isEmpty {
+                Text("Add a destination from the sidebar.").foregroundStyle(.secondary)
+            }
+        }
+    }
+
+    @ViewBuilder private var safetyPane: some View {
+        Section {
+            Stepper("At least \(draft.deletion.minFiles) files", value: $draft.deletion.minFiles, in: 1...100_000, step: 10)
+            Stepper("More than \(draft.deletion.percent.formatted())% of the set",
+                    value: $draft.deletion.percent, in: 1...100, step: 1)
+            Stepper("Or more than \(draft.deletion.absoluteMax.formatted()) files",
+                    value: $draft.deletion.absoluteMax, in: 10...1_000_000, step: 100)
+        } header: {
+            Text("Hold Deletions When a Backup Would Remove")
+        } footer: {
+            Text("A hold needs both the first two, or the last on its own. New and changed files keep backing up while deletions wait for you.")
+        }
+
+        Section {
+            Stepper("Keep removed files \(draft.archiveDays) days", value: $draft.archiveDays, in: 1...3650, step: 5)
+        } header: {
+            Text("Archive")
+        } footer: {
+            Text("Files you delete or change are kept in the archive for this long.")
         }
     }
 

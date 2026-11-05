@@ -158,6 +158,14 @@ enum DebugFixtures {
         // MainWindow itself shows onboarding until the real system checks pass, so the overview is rendered directly.
         render(NavigationStack { OverviewView(model: model, select: { _ in }) }, size: CGSize(width: 700, height: 900), to: at("main-overview"))
         render(NavigationStack { SetDetailView(model: model, setID: model.sets[0].id) }, size: CGSize(width: 620, height: 2000), to: at("set-detail"))
+        // A set with 200 rules, one pane per render, with the name-conflict banner showing on every pane.
+        var bigSet = sets[1]
+        bigSet.rules = (0..<200).map { UserRule(pattern: $0 % 7 == 0 ? "/Drafts/part\($0)/**" : "*.tmp\($0)", action: $0 % 5 == 0 ? .include : .exclude) }
+        try? store.saveSets([sets[0], bigSet])
+        model.reload()
+        for pane in SetPane.allCases {
+            render(NavigationStack { SetDetailView(model: model, setID: bigSet.id, pane: pane) }, size: CGSize(width: 700, height: 640), to: at("set-200-rules-\(pane.rawValue)"))
+        }
         render(NavigationStack { DestinationDetailView(model: model, destination: dests[1]) }, size: CGSize(width: 620, height: 480), to: at("destination-drive"))
         render(NavigationStack { DestinationDetailView(model: model, destination: onedrive) }, size: CGSize(width: 620, height: 480), to: at("destination-onedrive"))
         render(NavigationStack { DestinationDetailView(model: model, destination: ssd) }, size: CGSize(width: 620, height: 480), to: at("destination-ssd-running"))
