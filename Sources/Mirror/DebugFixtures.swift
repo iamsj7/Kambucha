@@ -157,6 +157,31 @@ enum DebugFixtures {
         render(NavigationStack { SetDetailView(model: model, setID: sets[1].id) }, size: CGSize(width: 620, height: 420), to: at("set-name-in-use"))
         // MainWindow itself shows onboarding until the real system checks pass, so the overview is rendered directly.
         render(NavigationStack { OverviewView(model: model, select: { _ in }) }, size: CGSize(width: 700, height: 900), to: at("main-overview"))
+        // 50 sets, most of them failing or held, with several runs under way: the panel must stay short.
+        let bigRoot = FileManager.default.temporaryDirectory.appendingPathComponent("mirror-big-\(UUID().uuidString)")
+        let bigStore = ConfigStore(root: bigRoot)
+        let bigDest = Destination(name: "iCloud Drive", kind: .iCloudFolder)
+        var bigSets: [BackupSet] = []
+        for i in 1...50 {
+            var b = BackupSet(name: "Project \(i)", source: URL(fileURLWithPath: "/Users/me/P\(i)"), destinationIDs: [bigDest.id])
+            b.acceptPreview(); bigSets.append(b)
+        }
+        try? bigStore.saveDestinations([bigDest]); try? bigStore.saveSets(bigSets)
+        for (i, b) in bigSets.enumerated() {
+            var st = SetState(); st.lastFinished = Date().addingTimeInterval(-600); st.lastFileCount = 1_000
+            if i % 5 == 0 { st.heldDeletions = 30 } else if i % 7 != 0 { st.consecutiveFailures = 3 }
+            let pair = PairID(set: b.id, destination: bigDest.id)
+            try? bigStore.save(st, for: pair)
+            if i < 8 {
+                try? ProgressStore(root: bigRoot).write(TransferProgress(pair: pair, phase: .transferring, bytesDone: 1_000_000,
+                    bytesTotal: 5_000_000, filesDone: 40, filesTotal: 100, bytesPerSecond: 1_000_000, eta: 30, updated: Date()))
+            }
+        }
+        try? "\(getpid())\n".write(to: bigRoot.appendingPathComponent(AgentPresence.fileName), atomically: true, encoding: .utf8)
+        let bigModel = AppModel(support: bigRoot, services: services)
+        spin(0.5)
+        render(MenuBarPanel(model: bigModel), size: CGSize(width: 320, height: 600), to: at("panel-50-sets"))
+        render(NavigationStack { OverviewView(model: bigModel, select: { _ in }) }, size: CGSize(width: 700, height: 900), to: at("main-overview-50-sets"))
         render(NavigationStack { SetDetailView(model: model, setID: model.sets[0].id) }, size: CGSize(width: 620, height: 2000), to: at("set-detail"))
         render(NavigationStack { DestinationDetailView(model: model, destination: dests[1]) }, size: CGSize(width: 620, height: 480), to: at("destination-drive"))
         render(NavigationStack { DestinationDetailView(model: model, destination: onedrive) }, size: CGSize(width: 620, height: 480), to: at("destination-onedrive"))

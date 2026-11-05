@@ -28,17 +28,33 @@ struct RunResultPresentation {
 
 @MainActor @Observable
 final class ActivityModel {
+    /// Records shown at most, counted after filtering.
+    static let limit = 500
+
     private(set) var records: [RunRecord] = []
     private(set) var loadFailed = false
+    /// Sets to choose from in the filter, by name.
+    private(set) var sets: [(id: UUID, name: String)] = []
+    var filter = RunFilter()
     @ObservationIgnored private let store: RunRecordStore
+    @ObservationIgnored private let config: ConfigStore
 
-    init(support: URL = MirrorPaths.support) { store = RunRecordStore(root: support) }
+    init(support: URL = MirrorPaths.support) { store = RunRecordStore(root: support); config = ConfigStore(root: support) }
 
+    /// Reads off the main thread. A filter changed while this runs is read again by the next call.
     func reload() async {
-        let store = store
-        let result = await Task.detached(priority: .utility) { try? store.recent(limit: 500) }.value
+        let store = store, config = config, filter = filter, limit = Self.limit
+        let (result, names) = await Task.detached(priority: .utility) {
+            (try? store.recent(limit: limit, matching: filter),
+             ((try? config.loadSets()) ?? []).map { (id: $0.id, name: $0.name) }.sorted { $0.name.localizedStandardCompare($1.name) == .orderedAscending })
+        }.value
+        guard filter == self.filter else { return }
+        sets = names
         if let result { records = result; loadFailed = false } else { loadFailed = true }
     }
+
+    /// True when a filter hides records, so an empty list isn't read as "no activity".
+    var isFiltering: Bool { filter.setID != nil || filter.result != .all || !filter.search.isEmpty }
 
     func revealLogs() {
         let dir = MirrorPaths.logs
@@ -57,11 +73,14 @@ struct ActivityView: View {
 
     var body: some View {
         VStack(spacing: 0) {
-            if model.records.isEmpty {
+            if model.records.isEmpty && model.isFiltering {
+                ContentUnavailableView.search
+            } else if model.records.isEmpty {
                 ContentUnavailableView(model.loadFailed ? "Couldn't Read Activity" : "No Activity Yet",
                                        systemImage: model.loadFailed ? "exclamationmark.triangle" : "clock.arrow.circlepath",
                                        description: Text(model.loadFailed ? "Mirror couldn't read its run history. Try again."
-                                                                          : "Backups appear here after they run."))
+                                                                          : model.filter.includeSkipped ? "Backups appear here after they run."
+                                                                          : "Backups appear here after they run. Skipped runs are hidden."))
             } else {
                 Table(sorted, selection: $selection, sortOrder: $sortOrder) {
                     TableColumn("Started", value: \.start) { r in
@@ -100,16 +119,34 @@ struct ActivityView: View {
             }
         }
         .navigationTitle("Activity")
+        .searchable(text: $model.filter.search, prompt: "Search sets")
         .toolbar {
             ToolbarItemGroup {
+                Picker("Set", selection: $model.filter.setID) {
+                    Text("All Sets").tag(UUID?.none)
+                    ForEach(model.sets, id: \.id) { Text($0.name).tag(UUID?.some($0.id)) }
+                }
+                .help("Show one set's runs")
+                Picker("Result", selection: $model.filter.result) {
+                    Text("All").tag(RunFilter.Result.all)
+                    Text("Problems").tag(RunFilter.Result.problems)
+                    Text("Success").tag(RunFilter.Result.success)
+                }
+                .pickerStyle(.segmented)
+                .help("Show all runs, only those with problems, or only those that succeeded")
+                Toggle(isOn: $model.filter.includeSkipped) { Label("Show Skipped Runs", systemImage: "minus.circle") }
+                    .help("Include scheduled runs that found nothing to do")
+                    .accessibilityHint("Skipped runs are hidden by default")
                 Button { Task { await model.reload() } } label: { Label("Refresh", systemImage: "arrow.clockwise") }
                     .help("Reload the run history")
                 Button { model.revealLogs() } label: { Label("Reveal Logs", systemImage: "doc.text.magnifyingglass") }
                     .help("Show Mirror's log files in Finder")
             }
         }
-        .task {
-            // Light refresh while the screen is open; nothing runs when it is closed.
+        .task(id: model.filter) {
+            // Light refresh while the screen is open; nothing runs when it is closed. A new filter restarts it,
+            // after a short wait so typing in the search field doesn't read the history per keystroke.
+            try? await Task.sleep(for: .milliseconds(250))
             while !Task.isCancelled {
                 await model.reload()
                 try? await Task.sleep(for: .seconds(10))

@@ -39,7 +39,8 @@ private struct Snapshot: Sendable {
                 if let st = try? store.state(for: p) { states[p] = st }
             }
         }
-        let records = (try? RunRecordStore(root: support).recent(limit: 200)) ?? []
+        // `overall` ignores skipped runs, so they must not crowd real ones out of the 200.
+        let records = (try? RunRecordStore(root: support).recent(limit: 200, matching: RunFilter())) ?? []
         let problems = (try? ProblemCenter(root: support, notifier: NoNotifier()).active()) ?? []
         let running = AgentPresence.isRunning(support: support)
         // Progress belongs to a live agent only; a file left by a killed one is ignored.

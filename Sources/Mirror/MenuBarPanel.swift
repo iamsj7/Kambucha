@@ -16,22 +16,41 @@ struct MenuBarPanel: View {
         }
     }
     private var heldRow: SetRow? { model.heldSet }
+    private var health: HealthSummary { HealthSummary(model.rows.map { SetHealth(id: $0.id, name: $0.name, status: $0.status) }) }
+    /// Panel rows are capped, so 50 failing sets can't push the actions off the screen.
+    private static let rowLimit = 5
+
+    /// Only what's active or needs a look; a calm line when there's nothing.
+    @ViewBuilder private var summarySection: some View {
+        let health = health
+        let live = model.progress
+        let rows = PanelRows(attention: health.attention.count, progress: live.count, limit: Self.rowLimit)
+        if health.isCalm {
+            if let line = health.countLine {
+                Divider()
+                Text(line).font(.subheadline).foregroundStyle(.secondary)
+            }
+        } else {
+            Divider()
+            VStack(alignment: .leading, spacing: 8) {
+                ForEach(health.attention.prefix(rows.attention)) { item in
+                    SetRowView(name: item.name, status: item.status)
+                }
+                ForEach(live.prefix(rows.progress)) { ProgressRow(label: $0.label, progress: $0.progress) }
+                if rows.more > 0 {
+                    Button { openMirror("main") } label: { Text("\(rows.more.formatted()) more") }
+                        .buttonStyle(.borderless).font(.subheadline)
+                        .accessibilityHint("Opens Mirror to show all of them")
+                }
+                if !live.isEmpty { NetworkUploadRow(network: network) }
+            }
+        }
+    }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
             header
-            if !model.rows.isEmpty {
-                Divider()
-                VStack(alignment: .leading, spacing: 8) {
-                    ForEach(model.rows) { SetRowView(row: $0) }
-                }
-            }
-            if busy && !model.progress.isEmpty {
-                VStack(alignment: .leading, spacing: 8) {
-                    ForEach(model.progress) { ProgressRow(label: $0.label, progress: $0.progress) }
-                    NetworkUploadRow(network: network)
-                }
-            }
+            summarySection
             if let heldRow {
                 HStack {
                     Button("Review Deletions") { review(heldRow.id) }
@@ -60,7 +79,7 @@ struct MenuBarPanel: View {
             .buttonStyle(.borderless)
             if let err = model.lastError {
                 HStack(alignment: .top) {
-                    Label(err, systemImage: "exclamationmark.triangle").font(.footnote).foregroundStyle(.secondary)
+                    Label(err, systemImage: "exclamationmark.triangle").font(.footnote).foregroundStyle(.secondary).lineLimit(3)
                     Spacer(minLength: 4)
                     Button("Dismiss") { model.dismissError() }.font(.footnote).buttonStyle(.borderless)
                 }
@@ -97,17 +116,18 @@ struct MenuBarPanel: View {
 }
 
 struct SetRowView: View {
-    let row: SetRow
+    let name: String
+    let status: OverallStatus
     var body: some View {
-        let p = StatusPresentation(row.status)
+        let p = StatusPresentation(status)
         HStack(spacing: 8) {
             Image(systemName: p.symbol).accessibilityHidden(true)
-            Text(row.name).lineLimit(1)
+            Text(name).lineLimit(1)
             Spacer(minLength: 8)
-            Text(row.status.shortText).font(.subheadline).foregroundStyle(.secondary).lineLimit(1)
+            Text(status.shortText).font(.subheadline).foregroundStyle(.secondary).lineLimit(1)
         }
         .accessibilityElement(children: .ignore)
-        .accessibilityLabel("\(row.name), \(p.title)")
+        .accessibilityLabel("\(name), \(p.title)")
     }
 }
 
