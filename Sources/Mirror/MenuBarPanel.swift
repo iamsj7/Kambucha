@@ -59,8 +59,8 @@ struct MenuBarPanel: View {
         Divider()
         Button("Back Up Now") { model.runNow(nil) }
             .disabled(!model.canBackUp)
-        Button(model.isPaused ? "Resume Backups" : "Pause Backups") { model.setPaused(!model.isPaused) }
-            .disabled(model.sets.isEmpty)
+        Button(model.pauseTitle) { model.togglePause() }
+            .disabled(!model.canPause)
         Divider()
         Button("Open Mirror") { openMirror() }
         Button("Settings…") { openSettings(); NSApplication.shared.activate() }

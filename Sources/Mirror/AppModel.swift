@@ -353,6 +353,11 @@ final class AppModel {
         }
     }
 
+    /// The pause item, wherever it's offered.
+    var pauseTitle: String { isPaused ? "Resume Backups" : "Pause Backups" }
+    var canPause: Bool { !sets.isEmpty }
+    func togglePause() { setPaused(!isPaused) }
+
     /// Each ask moves an open main window to Overview. A window that isn't open starts there.
     private(set) var overviewRequests = 0
     func showOverview() { overviewRequests += 1 }

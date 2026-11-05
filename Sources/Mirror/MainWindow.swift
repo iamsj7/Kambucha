@@ -106,7 +106,7 @@ struct MainWindow: View {
                 try? await Task.sleep(for: .seconds(onboarding.isComplete ? 30 : 2))
             }
         }
-        // The Dock icon shows only while this window is open; the app is otherwise a menu bar item. Here and not on
+        // The Dock icon shows while this window is open; the app is otherwise a menu bar item, if it has one. Here and not on
         // the split view, or a first-run window would open behind whatever else is on screen.
         .onAppear { DockPresence.windowOpened(); model.windowAppeared() }
         .onDisappear { DockPresence.windowClosed(); model.windowDisappeared() }
@@ -161,7 +161,10 @@ struct MainWindow: View {
             }
         }
         .confirmationDialog(removalTitle, isPresented: $confirmingRemoval, titleVisibility: .visible) {
-            Button("Remove", role: .destructive) { removeSelection() }
+            // Not destructive: the owner chose Remove, and that style is for what they didn't choose. Its own shortcut stops
+            // the dialog making it the Return default, and marking Cancel the default instead would cost Cancel its Escape.
+            Button("Remove") { removeSelection() }
+                .keyboardShortcut("r", modifiers: .command)
             Button("Cancel", role: .cancel) {}
         } message: {
             Text(removalMessage)
@@ -308,17 +311,26 @@ struct MainWindow: View {
 
 struct ReviewTarget: Identifiable { var id: UUID }
 
-/// Shows the Dock icon only while the main window is open.
+/// Shows the Dock icon while the main window is open, and always when there's no menu bar icon.
 @MainActor enum DockPresence {
     private static var open = 0
+    private static var showInMenuBar = true
     static func windowOpened() {
         open += 1
-        NSApp.setActivationPolicy(.regular)
+        apply()
         NSApp.activate()
     }
     static func windowClosed() {
         open = max(0, open - 1)
-        if open == 0 { NSApp.setActivationPolicy(.accessory) }
+        apply()
+    }
+    static func menuBarChanged(_ shown: Bool) {
+        showInMenuBar = shown
+        apply()
+    }
+    private static func apply() {
+        let presence = AppPresence(showInMenuBar: showInMenuBar, windowOpen: open > 0)
+        NSApp.setActivationPolicy(presence.showsInDock ? .regular : .accessory)
     }
 }
 

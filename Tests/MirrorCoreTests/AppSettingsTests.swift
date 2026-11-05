@@ -27,6 +27,37 @@ struct AppSettingsTests {
         #expect(s.fullSpeed && s.deepCheck == .monthly && s.defaultRetentionDays == 30)
     }
 
+    @Test func theMenuBarIconIsOnUntilTurnedOff() throws {
+        #expect(AppSettings().showInMenuBar)
+        let root = tempRoot()
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        try Data(#"{"fullSpeed":true}"#.utf8).write(to: root.appendingPathComponent("settings.json"))
+        #expect(try SettingsStore(root: root).load().showInMenuBar)
+        var off = AppSettings(); off.showInMenuBar = false
+        try SettingsStore(root: root).save(off)
+        #expect(try !SettingsStore(root: root).load().showInMenuBar)
+    }
+
+    /// Every state, including the end of onboarding: there's always an icon to come back to.
+    @Test func theAppCanNeverBeLeftWithNoWayBack() {
+        for shown in [true, false] {
+            for open in [true, false] {
+                let presence = AppPresence(showInMenuBar: shown, windowOpen: open)
+                #expect(presence.showInMenuBar || presence.showsInDock)
+            }
+        }
+        #expect(!AppPresence(showInMenuBar: true, windowOpen: false).showsInDock)
+        #expect(AppPresence(showInMenuBar: true, windowOpen: true).showsInDock)
+        #expect(AppPresence(showInMenuBar: false, windowOpen: false).showsInDock)
+    }
+
+    @Test func aLaunchStaysQuietOnlyWithAnIconAndOnboardingDone() {
+        #expect(!AppPresence.opensWindowAtLaunch(onboardingFinished: true, showInMenuBar: true))
+        #expect(AppPresence.opensWindowAtLaunch(onboardingFinished: true, showInMenuBar: false))
+        #expect(AppPresence.opensWindowAtLaunch(onboardingFinished: false, showInMenuBar: true))
+        #expect(AppPresence.opensWindowAtLaunch(onboardingFinished: false, showInMenuBar: false))
+    }
+
     @Test func drillIsDueSixMonthsAfterTheLastOne() {
         let now = Date(timeIntervalSince1970: 1_800_000_000)
         let cloud = Destination(name: "Drive", kind: .googleDrive)

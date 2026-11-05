@@ -26,6 +26,22 @@ struct SettingsModelTests {
         #expect(SettingsModel(store: SettingsStore(root: r), login: FakeLogin()).settings.fullSpeed)
     }
 
+    @Test func hidingTheMenuBarIconPersists() throws {
+        let r = root()
+        let m = SettingsModel(store: SettingsStore(root: r), login: FakeLogin())
+        #expect(m.settings.showInMenuBar)
+        m.update { $0.showInMenuBar = false }
+        #expect(!SettingsModel(store: SettingsStore(root: r), login: FakeLogin()).settings.showInMenuBar)
+    }
+
+    /// Damage never hides the icon: it reads as the default, which keeps the way back.
+    @Test func damagedSettingsKeepTheIcon() throws {
+        let r = root()
+        try FileManager.default.createDirectory(at: r, withIntermediateDirectories: true)
+        try Data("garbage".utf8).write(to: r.appendingPathComponent("settings.json"))
+        #expect(SettingsModel(store: SettingsStore(root: r), login: FakeLogin()).settings.showInMenuBar)
+    }
+
     @Test func damagedSettingsFileIsSurfaced() throws {
         let r = root()
         try FileManager.default.createDirectory(at: r, withIntermediateDirectories: true)

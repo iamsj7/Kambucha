@@ -5,11 +5,15 @@ import MirrorCore
 @main
 struct MirrorApp: App {
     @State private var model: AppModel
-    @State private var settings = SettingsModel()
-    /// Past the first-run screen, Mirror is a menu bar app: opening at login must not put a window in the way.
-    private let opensWindowAtLaunch = !ConfigStore(root: MirrorPaths.support).onboardingFinished
+    @State private var settings: SettingsModel
+    @NSApplicationDelegateAdaptor private var delegate: AppDelegate
+    @Environment(\.openWindow) private var openWindow
+    /// Past the first-run screen, Mirror is a menu bar app: opening at login must not put a window in the way, unless
+    /// there's no menu bar icon to open it from. An unreadable settings file counts as the icon being there, as it will be.
+    private let opensWindowAtLaunch: Bool
 
     init() {
+        let model: AppModel
         #if DEBUG
         // Debug builds only: --fixture <name> runs against fixture state files in a temp folder, and
         // --snapshot <dir> renders every fixture in light and dark to PNGs, then exits.
@@ -44,13 +48,27 @@ struct MirrorApp: App {
             exit(0)
         }
         if let i = dbg.firstIndex(of: "--fixture"), i + 1 < dbg.count, let f = DebugFixtures.Name(rawValue: dbg[i + 1]) {
-            _model = State(initialValue: AppModel(support: DebugFixtures.make(f)))
+            // --fixture-onboarded and --fixture-no-menu-bar set the fixture up for checking the launch and reopen rules by hand.
+            let root = DebugFixtures.make(f)
+            if dbg.contains("--fixture-onboarded") { try? ConfigStore(root: root).noteOnboardingFinished() }
+            if dbg.contains("--fixture-no-menu-bar") {
+                var off = AppSettings()
+                off.showInMenuBar = false
+                try? SettingsStore(root: root).save(off)
+            }
+            model = AppModel(support: root)
         } else {
-            _model = State(initialValue: AppModel())
+            model = AppModel()
         }
         #else
-        _model = State(initialValue: AppModel())
+        model = AppModel()
         #endif
+        _model = State(initialValue: model)
+        _settings = State(initialValue: SettingsModel(store: SettingsStore(root: model.support)))
+        AppDelegate.model = model
+        opensWindowAtLaunch = AppPresence.opensWindowAtLaunch(
+            onboardingFinished: ConfigStore(root: model.support).onboardingFinished,
+            showInMenuBar: (try? SettingsStore(root: model.support).load())?.showInMenuBar ?? true)
         #if MIRROR_PROBES
         // Command-line helpers for the permission proofs; the app has no UI for these yet.
         let args = CommandLine.arguments
@@ -70,13 +88,19 @@ struct MirrorApp: App {
     }
 
     var body: some Scene {
-        MenuBarExtra {
+        // The system can take the icon away too, if the owner drags it out of the menu bar, and that saves here the same way.
+        MenuBarExtra(isInserted: Binding(get: { settings.settings.showInMenuBar },
+                                         set: { shown in settings.update { $0.showInMenuBar = shown } })) {
             MenuBarPanel(model: model)
         } label: {
             Image(systemName: StatusPresentation(model.status).symbol)
                 .accessibilityLabel("Mirror, \(StatusPresentation(model.status).title)")
         }
         .menuBarExtraStyle(.menu)
+        .onChange(of: settings.settings.showInMenuBar, initial: true) { _, shown in
+            DockPresence.menuBarChanged(shown)
+            AppDelegate.showMainWindow = { [openWindow] in openWindow(id: "main") }
+        }
 
         Window("Mirror", id: "main") { MainWindow(model: model) }
             .defaultSize(width: 1040, height: 700)
@@ -118,7 +142,7 @@ private struct BackupCommands: View {
     var body: some View {
         Button("Back Up Now") { model.runNow(nil) }
             .disabled(!model.canBackUp)
-        Button(model.isPaused ? "Resume Backups" : "Pause Backups") { model.setPaused(!model.isPaused) }
-            .disabled(model.sets.isEmpty)
+        Button(model.pauseTitle) { model.togglePause() }
+            .disabled(!model.canPause)
     }
 }

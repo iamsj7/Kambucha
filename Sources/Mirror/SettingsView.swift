@@ -68,8 +68,9 @@ struct SettingsView: View {
                         Label("Needs your approval in System Settings", systemImage: "exclamationmark.triangle")
                     }
                 }
+                Toggle("Show in menu bar", isOn: binding(\.showInMenuBar))
             } header: { Text("General") } footer: {
-                Text("Backups run in the background whether or not Mirror is open.")
+                Text("Backups run in the background whether or not Mirror is open. Without the menu bar icon, Mirror stays in the Dock.")
             }
 
             Section {

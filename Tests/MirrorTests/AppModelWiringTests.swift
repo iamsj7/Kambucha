@@ -454,4 +454,29 @@ private func vol(_ uuid: String, internalLooking: Bool = false) -> VolumeInfo {
         #expect(m.lastError?.contains("eject") == true)
         await ejecting
     }
+
+    private func dockItems(_ m: AppModel) -> [(title: String, enabled: Bool)] {
+        DockMenu(model: m).menu.items.map { ($0.title, $0.isEnabled) }
+    }
+
+    @Test func theDockMenuFollowsTheMenuBarRules() throws {
+        let empty = try make()
+        #expect(dockItems(empty).map(\.title) == ["Back Up Now", "Pause Backups"])
+        #expect(dockItems(empty).map(\.enabled) == [empty.canBackUp, false])
+
+        let d = Destination(name: "iCloud", kind: .iCloudFolder)
+        let m = try make(destinations: [d], sets: [BackupSet(name: "A", source: URL(fileURLWithPath: "/tmp/a"), destinationIDs: [d.id])])
+        #expect(dockItems(m).map(\.enabled) == [m.canBackUp, true])
+    }
+
+    @Test func theDockMenuPausesAndResumes() throws {
+        let d = Destination(name: "iCloud", kind: .iCloudFolder)
+        let m = try make(destinations: [d], sets: [BackupSet(name: "A", source: URL(fileURLWithPath: "/tmp/a"), destinationIDs: [d.id])])
+        let dock = DockMenu(model: m)
+        let item = dock.menu.items[1]
+        _ = (item.target as? NSObject)?.perform(item.action)
+        #expect(m.isPaused)
+        #expect(dockItems(m)[1].title == "Resume Backups")
+        #expect(dockItems(m)[0].enabled == m.canBackUp)
+    }
 }

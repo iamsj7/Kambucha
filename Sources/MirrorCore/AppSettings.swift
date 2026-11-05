@@ -22,6 +22,8 @@ public struct AppSettings: Codable, Equatable, Sendable {
     public var fullSpeed = false
     /// A drive away for longer than this gets one quiet reminder.
     public var driveReminderDays = 7
+    /// Off, Mirror lives in the Dock instead (see `AppPresence`). Backups run either way.
+    public var showInMenuBar = true
 
     public static let retentionChoices = [7, 14, 30, 60, 90]
 
@@ -34,6 +36,7 @@ public struct AppSettings: Codable, Equatable, Sendable {
         pauseInLowPowerMode = try c.decodeIfPresent(Bool.self, forKey: .pauseInLowPowerMode) ?? false
         fullSpeed = try c.decodeIfPresent(Bool.self, forKey: .fullSpeed) ?? false
         driveReminderDays = try c.decodeIfPresent(Int.self, forKey: .driveReminderDays) ?? 7
+        showInMenuBar = try c.decodeIfPresent(Bool.self, forKey: .showInMenuBar) ?? true
     }
 }
 
