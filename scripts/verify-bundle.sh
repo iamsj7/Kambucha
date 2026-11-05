@@ -1,7 +1,7 @@
 #!/bin/zsh
 set -euo pipefail
 cd "${0:A:h}/.."
-app="dist/Mirror.app"
+app="dist/Kambucha.app"
 proofs=0; [[ "${1:-}" == "--proofs" ]] && proofs=1
 fail() { echo "FAIL: $*" >&2; exit 1; }
 
@@ -23,18 +23,18 @@ grep -qE '^CodeDirectory .*flags=.*runtime' <<<"$info" || fail "hardened runtime
 # The requirements the agent pins (SignedCodeTrust), for the team that signed this build. Team ID is the
 # certificate's OU, not the code in its name. Each must hold with the anchor, not just the claimed team.
 pin="anchor apple generic and certificate leaf[subject.OU] = \"$team\""
-codesign --verify --strict -R="identifier \"com.shaikjaleel.mirror\" and $pin" "$app" || fail "app doesn't meet the caller requirement"
-codesign --verify --strict -R="identifier \"com.shaikjaleel.mirror.agent\" and $pin" "$app/Contents/MacOS/MirrorAgent" || fail "agent can't prove its own team"
-codesign --verify --strict -R="identifier \"com.shaikjaleel.mirror.rclone\" and $pin" "$app/Contents/Helpers/rclone" || fail "rclone doesn't meet the helper requirement"
+codesign --verify --strict -R="identifier \"com.shaikjaleel.kambucha\" and $pin" "$app" || fail "app doesn't meet the caller requirement"
+codesign --verify --strict -R="identifier \"com.shaikjaleel.kambucha.agent\" and $pin" "$app/Contents/MacOS/KambuchaAgent" || fail "agent can't prove its own team"
+codesign --verify --strict -R="identifier \"com.shaikjaleel.kambucha.rclone\" and $pin" "$app/Contents/Helpers/rclone" || fail "rclone doesn't meet the helper requirement"
 
-# Keychain rule: only MirrorAgent may touch it.
-symbols="$(nm -u "$app/Contents/MacOS/Mirror")" || fail "nm failed on Mirror"
-[[ -n "$symbols" ]] || fail "nm found no symbols in Mirror"
-if grep -qE '_SecItem|_SecKeychain' <<<"$symbols"; then fail "Mirror references the Keychain"; fi
+# Keychain rule: only KambuchaAgent may touch it.
+symbols="$(nm -u "$app/Contents/MacOS/Kambucha")" || fail "nm failed on Kambucha"
+[[ -n "$symbols" ]] || fail "nm found no symbols in Kambucha"
+if grep -qE '_SecItem|_SecKeychain' <<<"$symbols"; then fail "Kambucha references the Keychain"; fi
 
 # Privileged binaries must not ship proof modes. Opt out only for a --proofs build.
 if (( ! proofs )); then
-  for b in MirrorAgent Mirror; do
+  for b in KambuchaAgent Kambucha; do
     ! grep -aq -e '--probe' -e '--register-agent' "$app/Contents/MacOS/$b" || fail "$b contains proof strings (build with --proofs only for Gate 1)"
   done
 fi

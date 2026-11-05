@@ -1,4 +1,0 @@
-{"time":"2026-11-04T22:39:54.470441+04:00","level":"info","msg":"Making map for --track-renames","object":"Local file system at /tmp/mirror-fixture/dst","objectType":"*local.Fs","source":"sync/sync.go:856"}
-{"time":"2026-11-04T22:39:54.470565+04:00","level":"info","msg":"Finished making map for --track-renames","object":"Local file system at /tmp/mirror-fixture/dst","objectType":"*local.Fs","source":"sync/sync.go:891"}
-{"time":"2026-11-04T22:39:54.470762+04:00","level":"notice","msg":"Skipped move into backup dir as --dry-run is set (size 12)","skipped":"move into backup dir","size":12,"object":"a.txt","objectType":"*local.Object","source":"operations/operations.go:2672"}
-{"time":"2026-11-04T22:39:54.470794+04:00","level":"info","msg":"There was nothing to transfer","source":"sync/sync.go:1033"}

@@ -1,0 +1,5 @@
+{"time":"2026-11-04T22:39:54.402338+04:00","level":"info","msg":"Making map for --track-renames","object":"Local file system at /tmp/kambucha-fixture/dst","objectType":"*local.Fs","source":"sync/sync.go:856"}
+{"time":"2026-11-04T22:39:54.403304+04:00","level":"info","msg":"Finished making map for --track-renames","object":"Local file system at /tmp/kambucha-fixture/dst","objectType":"*local.Fs","source":"sync/sync.go:891"}
+{"time":"2026-11-04T22:39:54.404157+04:00","level":"info","msg":"Copied (server-side copy)","size":4,"object":"b.txt","objectType":"*local.Object","source":"operations/copy.go:382"}
+{"time":"2026-11-04T22:39:54.404167+04:00","level":"info","msg":"Copied (server-side copy)","size":6,"object":"old.txt","objectType":"*local.Object","source":"operations/copy.go:382"}
+{"time":"2026-11-04T22:39:54.404655+04:00","level":"info","msg":"Copied (server-side copy)","size":4,"object":"a.txt","objectType":"*local.Object","source":"operations/copy.go:382"}

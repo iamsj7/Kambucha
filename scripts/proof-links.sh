@@ -3,10 +3,10 @@
 # Creates and deletes only: a temp source, a temp restore folder, and "Mac Backup Test/links".
 set -euo pipefail
 cd "${0:A:h}/.."
-# Bundle under test (a --proofs build). Override only with MIRROR_APP, never the tool paths.
-APP="${MIRROR_APP:-$PWD/dist/Mirror.app}"
+# Bundle under test (a --proofs build). Override only with KAMBUCHA_APP, never the tool paths.
+APP="${KAMBUCHA_APP:-$PWD/dist/Kambucha.app}"
 RCLONE="$APP/Contents/Helpers/rclone"
-AGENT="$APP/Contents/MacOS/MirrorAgent"
+AGENT="$APP/Contents/MacOS/KambuchaAgent"
 [[ -x "$RCLONE" && -x "$AGENT" ]] || { echo "not a bundle: $APP" >&2; exit 1; }
 WORK="$(mktemp -d)"
 SRC="$WORK/src"

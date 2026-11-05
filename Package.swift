@@ -2,16 +2,16 @@
 import PackageDescription
 
 let package = Package(
-    name: "Mirror",
+    name: "Kambucha",
     platforms: [.macOS(.v26)],
     targets: [
-        .target(name: "MirrorCore", resources: [.process("Resources")]),
-        // Keychain and code-signing checks. Only the agent links this, so Mirror.app can't reach the Keychain.
-        .target(name: "MirrorSecrets", dependencies: ["MirrorCore"]),
-        .executableTarget(name: "MirrorAgent", dependencies: ["MirrorCore", "MirrorSecrets"]),
-        .executableTarget(name: "Mirror", dependencies: ["MirrorCore"]),
-        .testTarget(name: "MirrorTests", dependencies: ["Mirror", "MirrorCore"]),
-        .testTarget(name: "MirrorCoreTests", dependencies: ["MirrorCore", "MirrorSecrets"], exclude: ["Fixtures"]),
+        .target(name: "KambuchaCore", resources: [.process("Resources")]),
+        // Keychain and code-signing checks. Only the agent links this, so Kambucha.app can't reach the Keychain.
+        .target(name: "KambuchaSecrets", dependencies: ["KambuchaCore"]),
+        .executableTarget(name: "KambuchaAgent", dependencies: ["KambuchaCore", "KambuchaSecrets"]),
+        .executableTarget(name: "Kambucha", dependencies: ["KambuchaCore"]),
+        .testTarget(name: "KambuchaTests", dependencies: ["Kambucha", "KambuchaCore"]),
+        .testTarget(name: "KambuchaCoreTests", dependencies: ["KambuchaCore", "KambuchaSecrets"], exclude: ["Fixtures"]),
     ],
     swiftLanguageModes: [.v6]
 )

@@ -1,0 +1,8 @@
+{"time":"2026-11-04T22:39:54.437524+04:00","level":"info","msg":"Making map for --track-renames","object":"Local file system at /tmp/kambucha-fixture/dst","objectType":"*local.Fs","source":"sync/sync.go:856"}
+{"time":"2026-11-04T22:39:54.43763+04:00","level":"info","msg":"Finished making map for --track-renames","object":"Local file system at /tmp/kambucha-fixture/dst","objectType":"*local.Fs","source":"sync/sync.go:891"}
+{"time":"2026-11-04T22:39:54.437681+04:00","level":"info","msg":"Moved (server-side)","object":"a.txt","objectType":"*local.Object","source":"operations/operations.go:495"}
+{"time":"2026-11-04T22:39:54.437757+04:00","level":"info","msg":"Moved (server-side) to: renamed.txt","object":"old.txt","objectType":"*local.Object","source":"operations/operations.go:493"}
+{"time":"2026-11-04T22:39:54.437778+04:00","level":"info","msg":"Renamed from \"old.txt\"","object":"renamed.txt","objectType":"*local.Object","source":"sync/sync.go:925"}
+{"time":"2026-11-04T22:39:54.438046+04:00","level":"info","msg":"Copied (server-side copy)","size":12,"object":"a.txt","objectType":"*local.Object","source":"operations/copy.go:382"}
+{"time":"2026-11-04T22:39:54.43816+04:00","level":"info","msg":"Moved (server-side)","object":"b.txt","objectType":"*local.Object","source":"operations/operations.go:495"}
+{"time":"2026-11-04T22:39:54.438173+04:00","level":"info","msg":"Moved into backup dir","object":"b.txt","objectType":"*local.Object","source":"operations/operations.go:581"}

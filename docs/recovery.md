@@ -36,7 +36,7 @@ Every destination has the same layout inside a folder called `Mac Backup`.
 |---|---|---|
 | iCloud folder | `~/Library/Mobile Documents/com~apple~CloudDocs/Mac Backup`. In Finder: iCloud Drive, then Mac Backup | Yes |
 | External drive | `/Volumes/<drive name>/Mac Backup` | Yes |
-| Google Drive | In your Google Drive, in a folder made by Mirror | No. File and folder names are scrambled. Use rclone. |
+| Google Drive | In your Google Drive, in a folder made by Kambucha | No. File and folder names are scrambled. Use rclone. |
 | OneDrive | In your OneDrive | No. Same as Google Drive. |
 
 The `<timestamp>` folders look like `2026-11-04T10-00-30`, and they are in UTC, not your local time. Allow for that when you look for a run by its time.
@@ -47,16 +47,16 @@ Google Drive and OneDrive backups are encrypted by default, so opening them in a
 
 ## 2. Get rclone (only if you do not have the app)
 
-rclone is the free tool Mirror uses. It runs from Terminal.
+rclone is the free tool Kambucha uses. It runs from Terminal.
 
-- If Mirror is installed, you already have it: `/Applications/Mirror.app/Contents/Helpers/rclone`.
+- If Kambucha is installed, you already have it: `/Applications/Kambucha.app/Contents/Helpers/rclone`.
 - Otherwise, download it from <https://rclone.org/downloads/>. Choose macOS, Apple silicon (arm64), unzip it, and note the path to the `rclone` file. If macOS refuses to open it, go to System Settings, Privacy & Security, and choose Open Anyway for rclone.
 
 The Recovery Kit says which version made your backup. A newer version works too.
 
 In the commands below, `rclone` means whichever one you have. The easiest way is to make a shortcut for this Terminal window only:
 
-    $ alias rclone='/Applications/Mirror.app/Contents/Helpers/rclone'
+    $ alias rclone='/Applications/Kambucha.app/Contents/Helpers/rclone'
 
 or, for a download in your Downloads folder:
 
@@ -71,7 +71,7 @@ Set up shortcuts for your backup folder (use whichever matches your destination)
     $ BACKUP="$HOME/Library/Mobile Documents/com~apple~CloudDocs/Mac Backup"
     $ BACKUP="/Volumes/<drive name>/Mac Backup"
 
-For Google Drive and OneDrive there is no folder to point at. Section 6 gives you a name instead, `mirror-restore:`, that works in place of `"$BACKUP/"` in the rclone commands.
+For Google Drive and OneDrive there is no folder to point at. Section 6 gives you a name instead, `kambucha-restore:`, that works in place of `"$BACKUP/"` in the rclone commands.
 
 ## 3. Restore one deleted or overwritten file
 
@@ -81,12 +81,12 @@ The newest copy is in `Sets/<set name>/`. A file you deleted or overwrote is in 
 
 ### With the app (any destination)
 
-1. Open Mirror, then Archive in the sidebar, and choose the set and the destination at the top.
+1. Open Kambucha, then Archive in the sidebar, and choose the set and the destination at the top.
 2. For a file you deleted or overwrote, stay on Older Versions. Files are grouped by the backup run that moved them, then by folder. Use the search field to find a file across all your sets. Choose Restore next to the one you want.
 3. For the newest copy of a file, choose Latest Backup, open the folders down to it, and choose Restore next to it.
-4. For a single file, the save window opens in the folder it came from. Choose Restore to put it back, or pick another place to keep both copies. If a file with that name is there, macOS asks before replacing it. A whole folder must go to a new place, as Mirror will not restore a folder into one it backs up.
+4. For a single file, the save window opens in the folder it came from. Choose Restore to put it back, or pick another place to keep both copies. If a file with that name is there, macOS asks before replacing it. A whole folder must go to a new place, as Kambucha will not restore a folder into one it backs up.
 
-Mirror restores through rclone, so symlinks come back correctly. Files that iCloud has freed to save space are downloaded as needed.
+Kambucha restores through rclone, so symlinks come back correctly. Files that iCloud has freed to save space are downloaded as needed.
 
 ### iCloud folder or external drive, without the app
 
@@ -111,10 +111,10 @@ On iCloud, a file may show as a cloud icon and not yet be on the Mac. rclone and
 
 ### Google Drive or OneDrive, without the app
 
-First do section 6, so that `mirror-restore:` exists. Then:
+First do section 6, so that `kambucha-restore:` exists. Then:
 
-    $ rclone lsf -R mirror-restore:Archive/<set name> | grep "<part of the file name>"
-    $ rclone copyto "mirror-restore:Archive/<set name>/<timestamp>/<path to file>" ~/Restored/<file name>
+    $ rclone lsf -R kambucha-restore:Archive/<set name> | grep "<part of the file name>"
+    $ rclone copyto "kambucha-restore:Archive/<set name>/<timestamp>/<path to file>" ~/Restored/<file name>
 
 ## 4. Restore a whole project
 
@@ -122,10 +122,10 @@ The project is a folder inside the set. The set is the folder you chose when you
 
 ### With the app
 
-1. Open Mirror, then Archive in the sidebar, and choose the set and the destination at the top.
+1. Open Kambucha, then Archive in the sidebar, and choose the set and the destination at the top.
 2. Choose Latest Backup.
 3. Choose Restore next to the project folder. To restore a folder deeper down, open the folders and choose Restore This Folder. At the top of the set, the same button is Restore Whole Set.
-4. Type a new name for the restored folder and choose where to put it. Mirror will not restore into a folder it backs up, or over a folder that already has files in it.
+4. Type a new name for the restored folder and choose where to put it. Kambucha will not restore into a folder it backs up, or over a folder that already has files in it.
 
 ### iCloud folder or external drive, without the app
 
@@ -137,9 +137,9 @@ First wait until iCloud Drive has finished (see section 5) if this is a new Mac.
 
 After section 6:
 
-    $ rclone copy "mirror-restore:Sets/<set name>/<project folder>" ~/Restored/<project folder> --links --progress
+    $ rclone copy "kambucha-restore:Sets/<set name>/<project folder>" ~/Restored/<project folder> --links --progress
 
-To restore a whole set, leave off the project folder. To restore everything, use `mirror-restore:Sets` and `~/Restored/Sets`.
+To restore a whole set, leave off the project folder. To restore everything, use `kambucha-restore:Sets` and `~/Restored/Sets`.
 
 Add `--dry-run` to any copy to see what it would do without doing it.
 
@@ -152,9 +152,9 @@ Do not forget `--links`. Section 7 explains why. Then do sections 7 and 8 for sy
 1. Sign in to the same Apple Account (System Settings, then your name).
 2. Turn on iCloud Drive.
 3. Wait. Open Finder, then iCloud Drive, and check that `Mac Backup` appears. Large backups take a long time to appear in full. Let the Mac stay on and connected. Do not restore until the status shows no more downloading.
-4. Follow section 4 "without the app", using the iCloud folder path in section 1. The app's Archive lists only the sets on this Mac, so it can't restore a set this Mac has not backed up. If you have installed Mirror, its rclone is already there (section 2).
+4. Follow section 4 "without the app", using the iCloud folder path in section 1. The app's Archive lists only the sets on this Mac, so it can't restore a set this Mac has not backed up. If you have installed Kambucha, its rclone is already there (section 2).
 
-Do not add the old set again as a new backup right away. First restore, then check the result. When you do add the restored folder under its old name, Mirror tells you the name is still in use by a backup in that destination. Choose Use Existing Backup to carry on from it: Mirror compares, copies what changed, and moves anything that isn't in the folder to the archive. Or choose a different name to start a fresh backup beside the old one, which stays where it is.
+Do not add the old set again as a new backup right away. First restore, then check the result. When you do add the restored folder under its old name, Kambucha tells you the name is still in use by a backup in that destination. Choose Use Existing Backup to carry on from it: Kambucha compares, copies what changed, and moves anything that isn't in the folder to the archive. Or choose a different name to start a fresh backup beside the old one, which stays where it is.
 
 ### External drive
 
@@ -162,29 +162,29 @@ Plug the drive in. If it has a password, unlock it. Follow section 4 with `BACKU
 
 ### Google Drive or OneDrive
 
-You need two things: your Recovery Kit, and the ability to sign in to the same Google or Microsoft account. You do not need the Mirror app, and you do not need the old Mac.
+You need two things: your Recovery Kit, and the ability to sign in to the same Google or Microsoft account. You do not need the Kambucha app, and you do not need the old Mac.
 
 Go to section 6.
 
 ## 6. Google Drive and OneDrive: open the backup with the Recovery Kit
 
-Your Recovery Kit is a text document. Inside it, between the lines `BEGIN MIRROR RECOVERY KIT` and `END MIRROR RECOVERY KIT`, are your values. The Kit itself also has restore steps. This section is the same procedure, explained.
+Your Recovery Kit is a text document. Inside it, between the lines `BEGIN KAMBUCHA RECOVERY KIT` and `END KAMBUCHA RECOVERY KIT`, are your values. The Kit itself also has restore steps. This section is the same procedure, explained.
 
 ### With the app
 
-This puts the destination back on this Mac, so Mirror can carry on backing up to it. Do it after you have your files back.
+This puts the destination back on this Mac, so Kambucha can carry on backing up to it. Do it after you have your files back.
 
-1. Install Mirror and open it.
+1. Install Kambucha and open it.
 2. Choose the plus button, then Add Destination, and choose Google Drive or OneDrive.
 3. Choose I Have a Recovery Kit. Do not choose Sign In, which makes new keys.
 4. Paste the whole Recovery Kit and choose Restore. A browser opens. Sign in to the same account.
-5. Add your restored folder as a set, using its old name, and choose Use Existing Backup when Mirror says the name is in use (section 5).
+5. Add your restored folder as a set, using its old name, and choose Use Existing Backup when Kambucha says the name is in use (section 5).
 
 The app's Archive lists only the sets on this Mac, so on a new Mac use "Without the app" below to get your files back first.
 
 If a destination on this Mac has lost its keys, choose Restore From Recovery Kit on its screen.
 
-If Mirror asks you to paste the Kit as a test ("restore test"), that only checks the Kit. Passing it means your Kit works.
+If Kambucha asks you to paste the Kit as a test ("restore test"), that only checks the Kit. Passing it means your Kit works.
 
 ### Without the app, using only plain rclone
 
@@ -192,49 +192,49 @@ This works on any Mac, with only the Kit and the right account.
 
 **Step 1: Sign in.** The Kit gives you the exact line. For Google Drive it looks like this:
 
-    $ rclone config create mirror-cloud drive scope=drive.file client_id='<Client ID from the Kit>' client_secret='<Client secret from the Kit>'
+    $ rclone config create kambucha-cloud drive scope=drive.file client_id='<Client ID from the Kit>' client_secret='<Client secret from the Kit>'
 
 A browser opens. Sign in with the account that holds the backup and allow access. You must use the same client ID and secret from the Kit. Google shows a client only the files that client created, so a different client would see an empty Drive.
 
 For OneDrive:
 
-    $ rclone config create mirror-cloud onedrive
+    $ rclone config create kambucha-cloud onedrive
 
 Sign in with the Microsoft account that holds the backup. If the Kit lists a client ID, add it as `client_id='...' client_secret='...'` to the same line.
 
 **Step 2: Describe the encryption.** Copy the values from the Kit.
 
-    $ rclone config create mirror-restore crypt remote='mirror-cloud:Mac Backup' filename_encryption=standard directory_name_encryption=true filename_encoding=<base32 or base32768> password='<Passphrase from the Kit>' password2='<Salt from the Kit>' --obscure
+    $ rclone config create kambucha-restore crypt remote='kambucha-cloud:Mac Backup' filename_encryption=standard directory_name_encryption=true filename_encoding=<base32 or base32768> password='<Passphrase from the Kit>' password2='<Salt from the Kit>' --obscure
 
 Notes:
 
 - The filename encoding is on the Kit's "Filename encoding" line. It is `base32` for Google Drive and `base32768` for OneDrive. A wrong value makes every file look missing.
 - Keep `--obscure`. Without it, rclone can take the passphrase for an already-scrambled value and then fail to decrypt anything.
 - Keep the single quotes. The Kit's passphrase and salt are 64 letters and digits.
-- The first line `remote='mirror-cloud:Mac Backup'` is correct as written. The name `Mac Backup` is the root folder, and `Sets` and `Archive` sit directly under `mirror-restore:`.
+- The first line `remote='kambucha-cloud:Mac Backup'` is correct as written. The name `Mac Backup` is the root folder, and `Sets` and `Archive` sit directly under `kambucha-restore:`.
 
 **Step 3: Look.**
 
-    $ rclone lsd mirror-restore:Sets
+    $ rclone lsd kambucha-restore:Sets
 
 You should see the names of your sets. If you see nothing, or an error about decrypting, see "If it does not work" below.
 
-    $ rclone lsd mirror-restore:Sets/<set name>
+    $ rclone lsd kambucha-restore:Sets/<set name>
 
 **Step 4: Copy back.**
 
-    $ rclone copy mirror-restore:Sets ~/Restored/Sets --links --progress
+    $ rclone copy kambucha-restore:Sets ~/Restored/Sets --links --progress
 
 To restore just one set or project, add its name to both sides:
 
-    $ rclone copy "mirror-restore:Sets/<set name>/<project folder>" ~/Restored/Sets/<set name>/<project folder> --links --progress
+    $ rclone copy "kambucha-restore:Sets/<set name>/<project folder>" ~/Restored/Sets/<set name>/<project folder> --links --progress
 
-Archive works the same way, for example `mirror-restore:Archive/<set name>`.
+Archive works the same way, for example `kambucha-restore:Archive/<set name>`.
 
 **Step 5: Clean up.** These commands hold your passphrase, and your rclone settings now hold your keys. When you are done:
 
-    $ rclone config delete mirror-restore
-    $ rclone config delete mirror-cloud
+    $ rclone config delete kambucha-restore
+    $ rclone config delete kambucha-cloud
 
 Then quit Terminal. Your shell remembers what you typed, including the passphrase. To forget all of it, run `rm -f ~/.zsh_history` after quitting Terminal, then open it again.
 
@@ -247,9 +247,9 @@ Do not paste the contents of your Recovery Kit into chat tools, emails or anywhe
 | What you see | Likely reason | What to do |
 |---|---|---|
 | `rclone lsd` shows nothing | Wrong account, or a different Google client than the Kit's | Check the account. Redo Step 1 with the Kit's client ID and secret. |
-| `directory not found` when listing `mirror-restore:Sets` | Wrong passphrase or salt, or `--obscure` was left off. rclone cannot tell a wrong key from a missing folder | Run `rclone config delete mirror-restore`, then redo Step 2, copying the values again from the Kit. |
+| `directory not found` when listing `kambucha-restore:Sets` | Wrong passphrase or salt, or `--obscure` was left off. rclone cannot tell a wrong key from a missing folder | Run `rclone config delete kambucha-restore`, then redo Step 2, copying the values again from the Kit. |
 | `Skipping undecryptable dir name` | Wrong filename encoding | Redo Step 2 with the encoding from the Kit. |
-| Everything is listed but names look scrambled | You are looking at `mirror-cloud:`, not `mirror-restore:` | Use `mirror-restore:`. |
+| Everything is listed but names look scrambled | You are looking at `kambucha-cloud:`, not `kambucha-restore:` | Use `kambucha-restore:`. |
 | Sign-in error from Microsoft mentioning `AADSTS65005` | Your organisation blocks rclone | Use a personal Microsoft account, or ask your administrator. |
 | Google says access blocked | The Google project may be back in Testing, or you used the wrong client | Check the project's Publishing status is In production. Use the Kit's client. |
 
@@ -288,7 +288,7 @@ This applies to the iCloud folder and to drives formatted APFS or Mac OS Extende
 
 iCloud stores symlinks in a way that could not be fully proven from one Mac. So each run also saves a list of every symlink in the set, at `Mac Backup/Manifests/<set name>.json`. Each entry has a relative path and the target. If a symlink is missing after a restore, recreate it from the list.
 
-The Mirror app does this for you when you restore. By hand:
+The Kambucha app does this for you when you restore. By hand:
 
 1. Copy the manifest next to your restored files.
 
@@ -309,7 +309,7 @@ Some links point at things outside the project, or at nothing. That is how they 
 
 ## 8. Reinstall dependencies
 
-Mirror does not back up folders that can be rebuilt, such as `node_modules`. After a restore, rebuild them. Run the matching command inside each restored project.
+Kambucha does not back up folders that can be rebuilt, such as `node_modules`. After a restore, rebuild them. Run the matching command inside each restored project.
 
 | Project has | Run |
 |---|---|
@@ -339,11 +339,11 @@ Also check:
 
 ## 9. Undo a mass deletion
 
-Mirror makes a mass deletion hard to do by accident, and easy to undo.
+Kambucha makes a mass deletion hard to do by accident, and easy to undo.
 
-### If Mirror says "N deletions held"
+### If Kambucha says "N deletions held"
 
-Nothing has been deleted from the backup. Mirror holds only the deletions. New and changed files keep backing up.
+Nothing has been deleted from the backup. Kambucha holds only the deletions. New and changed files keep backing up.
 
 1. Choose Review Deletions.
 2. Read the list of files. If you removed them on purpose, choose Allow Once. If it is a mistake, such as a folder that moved, a drive that did not mount or a wrong command, choose Keep Holding.
@@ -362,13 +362,13 @@ The files are in the archive, not gone. The archive keeps them 30 days by defaul
 
    Google Drive or OneDrive (after section 6):
 
-        $ rclone lsd mirror-restore:Archive/<set name>
+        $ rclone lsd kambucha-restore:Archive/<set name>
 
 3. Check what is inside.
 
         $ rclone lsf -R "$BACKUP/Archive/<set name>/<timestamp>" | head -50
 
-   or with `mirror-restore:Archive/<set name>/<timestamp>`.
+   or with `kambucha-restore:Archive/<set name>/<timestamp>`.
 
 4. Restore to a new folder. If several runs deleted files, restore each one into the same new folder, newest first, adding `--ignore-existing` so that an older copy never replaces a newer one.
 
@@ -391,7 +391,7 @@ iCloud folder or external drive:
 
 Google Drive or OneDrive:
 
-    $ rclone check "mirror-restore:Sets/<set name>/<project folder>" ~/Restored/<project folder> --links --size-only
+    $ rclone check "kambucha-restore:Sets/<set name>/<project folder>" ~/Restored/<project folder> --links --size-only
 
 `0 differences found` means every file is there with the right size. A line saying `No common hash found` is expected here and is not a problem. Sizes cannot show an unchanged-size edit, but this is a good first check. To compare contents of a few files by eye, open them.
 

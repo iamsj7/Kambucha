@@ -1,0 +1,165 @@
+#if DEBUG
+import SwiftUI
+import AppKit
+import ServiceManagement
+import KambuchaCore
+
+/// Debug-only: renders the recovery, onboarding and settings views with fake data to PNGs, in light and dark.
+@MainActor
+enum DebugViewSnapshots {
+    private struct FakeArchive: ArchiveProviding {
+        func list(set: BackupSet, destination: Destination) async throws -> [ArchiveEntry] {
+            let now = Date()
+            func e(_ id: String, _ path: String, _ days: Double, _ size: Int64) -> ArchiveEntry {
+                ArchiveEntry(id: id, setName: set.name, stamp: now.addingTimeInterval(-days * 86_400), path: path, size: size)
+            }
+            return [e("1", "src/App.swift", 0.1, 18_400), e("2", "src/Model.swift", 0.1, 9_200), e("3", "notes/plan.md", 1.2, 4_100),
+                    e("4", "assets/logo.png", 3.5, 220_000), e("5", "README.md", 3.5, 2_900)]
+        }
+        func restore(entry: ArchiveEntry, set: BackupSet, destination: Destination, to: URL, replacing: Bool) async throws {}
+        func browse(path: String, set: BackupSet, destination: Destination) async throws -> [BackupItem] {
+            [BackupItem(name: "client-site", isFolder: true, size: 0), BackupItem(name: "mobile-app", isFolder: true, size: 0),
+             BackupItem(name: "notes.md", isFolder: false, size: 4_100), BackupItem(name: "README.md", isFolder: false, size: 2_900)]
+        }
+    }
+
+    @MainActor private final class FakeSystem: OnboardingSystem {
+        var access = AgentAccess.Status.confirmed
+        var report: AccessReport?
+        var agent = SMAppService.Status.requiresApproval
+        func fullDiskAccess() async -> AgentAccess.Status { access }
+        func accessReport() -> AccessReport? { report }
+        func checkFullDiskAccessNow() async -> AccessConfirmation.Outcome { access == .confirmed ? .confirmed : .notConfirmed }
+        func agentStatus() -> SMAppService.Status { agent }
+        func enableAgent() throws {}
+        func enableOpenAtLogin() throws {}
+        func notificationAccess() async -> NotificationAccess { .notDetermined }
+        func requestNotifications() async -> NotificationAccess { .allowed }
+        func openFullDiskAccessPane() {}
+        func openFilesAndFoldersPane() {}
+        func openLoginItemsSettings() {}
+        func openNotificationSettings() {}
+    }
+
+    @MainActor private struct FakeLogin: LoginItemControlling {
+        var status: SMAppService.Status = .requiresApproval
+        func register() throws {}
+        func unregister() throws {}
+    }
+
+    private static func settle(_ seconds: Double) {
+        RunLoop.current.run(until: Date().addingTimeInterval(seconds))
+    }
+
+    private static func write<V: View>(_ view: V, size: CGSize, name: String, to dir: URL) {
+        DebugRender.render(view, size: size, name: name, to: dir, settle: 0.6)
+    }
+
+    static func snapshotAll(to dir: URL) {
+        try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        let support = DebugFixtures.make(.held)   // sets, destinations and run records
+        let store = ConfigStore(root: support)
+        let sets = (try? store.loadSets()) ?? []
+        // A Google Drive destination that finished a backup and was never tested, so the reminder shows.
+        var dests = (try? store.loadDestinations()) ?? []
+        if let i = dests.firstIndex(where: { $0.kind == .googleDrive }) {
+            dests[i].encrypted = true
+            try? store.saveDestinations(dests)
+        }
+
+        // Archive
+        let archive = ArchiveModel(provider: FakeArchive(), store: store)
+        archive.loadConfig()
+        Task { await archive.reload() }
+        settle(0.5)
+        write(ArchiveView(model: archive, agent: AgentClient(executable: URL(fileURLWithPath: "/dev/null"))),
+              size: CGSize(width: 720, height: 460), name: "archive", to: dir)
+
+        // The latest backup, inside a folder
+        let latest = ArchiveModel(provider: FakeArchive(), store: store)
+        latest.loadConfig()
+        latest.mode = .latest
+        Task { await latest.open("client-site") }
+        settle(0.5)
+        write(ArchiveView(model: latest, agent: nil), size: CGSize(width: 720, height: 460), name: "archive-latest", to: dir)
+
+        DebugArchiveSnapshots.snapshotAll(store: store, sets: sets, destinations: dests, to: dir)
+
+        // Archive, empty and failed states
+        let empty = ArchiveModel(provider: EmptyArchive(), store: store); empty.loadConfig()
+        Task { await empty.reload() }; settle(0.3)
+        write(ArchiveView(model: empty, agent: nil), size: CGSize(width: 720, height: 360), name: "archive-empty", to: dir)
+
+        // Activity
+        let records = (try? RunRecordStore(root: support).recent(limit: 50)) ?? []
+        let activitySupport = FileManager.default.temporaryDirectory.appendingPathComponent("kambucha-activity-\(UUID().uuidString)")
+        let runStore = RunRecordStore(root: activitySupport)
+        let now = Date()
+        let s = sets.first
+        let specs: [(RunRecord.Status, Int, Int, String, [String])] = [
+            (.success, 12, 0, "Quick check passed", []), (.held, 40, 1_240, "Quick check passed", []),
+            (.verificationFailed, 3, 0, "2 files differ", ["notes/plan.md differs from the backup", "src/App.swift size mismatch"]),
+            (.partial, 220, 0, "Passed", []), (.failed, 0, 0, "Not run", ["Couldn't reach Google Drive"]), (.skipped, 0, 0, "", [])]
+        for (i, spec) in specs.enumerated() {
+            var r = RunRecord(setID: s?.id ?? UUID(), setName: s?.name ?? "Projects", destinationID: UUID(),
+                              destinationName: i % 2 == 0 ? "iCloud Drive" : "Google Drive",
+                              start: now.addingTimeInterval(-Double(i) * 3_600 - 600), end: now.addingTimeInterval(-Double(i) * 3_600),
+                              trigger: .schedule, scope: "all", filesChecked: 48_210, copied: spec.1, deleted: spec.2,
+                              verification: spec.3, errors: spec.4, status: spec.0)
+            r.archived = spec.2 > 0 ? 0 : (i == 0 ? 2 : 0)
+            try? runStore.append(r)
+        }
+        _ = records
+        let activity = ActivityModel(support: activitySupport)
+        Task { await activity.reload() }; settle(0.5)
+        write(ActivityView(model: activity), size: CGSize(width: 980, height: 420), name: "activity", to: dir)
+
+        // Onboarding: Full Disk Access granted, the agent waiting for approval.
+        let onboardRoot = FileManager.default.temporaryDirectory.appendingPathComponent("kambucha-onboard-\(UUID().uuidString)")
+        let onboarding = OnboardingModel(system: FakeSystem(), store: ConfigStore(root: onboardRoot))
+        Task { await onboarding.refresh() }; settle(0.4)
+        write(OnboardingView(model: onboarding), size: CGSize(width: 600, height: 560), name: "onboarding", to: dir)
+        write(OnboardingView(model: onboarding), size: CGSize(width: 1040, height: 700), name: "onboarding-default-window", to: dir)
+
+        // Onboarding: a check that found folders readable and no Full Disk Access, then one that couldn't read them.
+        for (name, folders) in [("onboarding-partial", true), ("onboarding-folders", false)] {
+            let system = FakeSystem()
+            system.agent = .enabled; system.access = .failing
+            system.report = AccessReport(folders: folders, fullDiskAccess: false, checkedAt: Date().addingTimeInterval(60))
+            let model = OnboardingModel(system: system, store: ConfigStore(root: onboardRoot.appendingPathComponent(name)))
+            Task { await model.refresh(); await model.checkAccessNow() }; settle(0.4)
+            write(OnboardingView(model: model), size: CGSize(width: 600, height: 620), name: name, to: dir)
+        }
+
+        // Settings
+        let settingsRoot = FileManager.default.temporaryDirectory.appendingPathComponent("kambucha-settings-\(UUID().uuidString)")
+        let settings = SettingsModel(store: SettingsStore(root: settingsRoot), login: FakeLogin())
+        write(SettingsView(model: settings), size: CGSize(width: 560, height: 640), name: "settings", to: dir)
+
+        // Drill sheet, each outcome.
+        let drillDest = dests.first { $0.kind == .googleDrive } ?? Destination(name: "Google Drive", kind: .googleDrive)
+        func drill(_ phase: DrillModel.Phase, kit: String) -> DrillModel {
+            let m = DrillModel(destinations: [drillDest], sets: sets, store: store, candidate: { _ in nil }, run: { _, _, _, _ in true })
+            m.kitText = kit
+            m.debugSet(phase)
+            return m
+        }
+        let kitSample = "KAMBUCHA RECOVERY KIT\n-----BEGIN-----\nkind: googleDrive\n..."
+        write(DrillSheet(model: drill(.idle, kit: kitSample)), size: CGSize(width: 480, height: 400), name: "drill-idle", to: dir)
+        write(DrillSheet(model: drill(.finished(.passed), kit: "")), size: CGSize(width: 480, height: 400), name: "drill-passed", to: dir)
+        write(DrillSheet(model: drill(.finished(.badKit), kit: "")), size: CGSize(width: 480, height: 400), name: "drill-badkit", to: dir)
+        write(DrillSheet(model: drill(.finished(.couldntTell), kit: "")), size: CGSize(width: 480, height: 400), name: "drill-unsure", to: dir)
+    }
+
+    private struct EmptyArchive: ArchiveProviding {
+        func list(set: BackupSet, destination: Destination) async throws -> [ArchiveEntry] { [] }
+        func restore(entry: ArchiveEntry, set: BackupSet, destination: Destination, to: URL, replacing: Bool) async throws {}
+        func browse(path: String, set: BackupSet, destination: Destination) async throws -> [BackupItem] { [] }
+    }
+}
+
+extension DrillModel {
+    /// Debug snapshots only: shows a result without running a drill.
+    func debugSet(_ p: Phase) { setPhaseForSnapshot(p) }
+}
+#endif

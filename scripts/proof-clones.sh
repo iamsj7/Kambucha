@@ -1,15 +1,15 @@
 #!/bin/zsh
 # Gate 2 (deterministic): do copies into iCloud Drive share physical blocks with their source?
-# Reads physical offsets via F_LOG2PHYS_EXT (MirrorAgent --probe-blocks) instead of df.
-# Generated data only. Deletes only ~/Documents/.mirror-proof-tmp and "Mac Backup Test" in iCloud Drive.
+# Reads physical offsets via F_LOG2PHYS_EXT (KambuchaAgent --probe-blocks) instead of df.
+# Generated data only. Deletes only ~/Documents/.kambucha-proof-tmp and "Mac Backup Test" in iCloud Drive.
 set -euo pipefail
 cd "${0:A:h}/.."
-# Bundle under test (a --proofs build). Override only with MIRROR_APP, never the tool paths.
-APP="${MIRROR_APP:-$PWD/dist/Mirror.app}"
+# Bundle under test (a --proofs build). Override only with KAMBUCHA_APP, never the tool paths.
+APP="${KAMBUCHA_APP:-$PWD/dist/Kambucha.app}"
 RCLONE="$APP/Contents/Helpers/rclone"
-AGENT="$APP/Contents/MacOS/MirrorAgent"
+AGENT="$APP/Contents/MacOS/KambuchaAgent"
 [[ -x "$RCLONE" && -x "$AGENT" ]] || { echo "not a bundle: $APP" >&2; exit 1; }
-SRC="$HOME/Documents/.mirror-proof-tmp"
+SRC="$HOME/Documents/.kambucha-proof-tmp"
 BASE="$HOME/Library/Mobile Documents/com~apple~CloudDocs/Mac Backup Test"
 [[ -e "$BASE" ]] && { echo "refusing: $BASE exists" >&2; exit 1; }
 [[ -e "$SRC" ]] && { echo "refusing: $SRC exists" >&2; exit 1; }
