@@ -12,6 +12,7 @@ struct SetDetailView: View {
     @State private var lastSaved: BackupSet
     @State private var network = NetworkStatus()
     @State private var confirmingAdoption = false
+    @State private var outsidePicks = 0
 
     init(model: AppModel, setID: UUID) {
         self.model = model
@@ -99,7 +100,7 @@ struct SetDetailView: View {
                         }
                         .labelsHidden().frame(width: 100)
                         .onChange(of: rule.action) { if !rule.pattern.isEmpty { requestPreview() } }
-                        TextField("Pattern", text: $rule.pattern, prompt: Text("For example *.log or /Drafts"))
+                        TextField("Pattern", text: $rule.pattern, prompt: Text("For example *.log or /Drafts/**"))
                             .labelsHidden()
                             .onSubmit { requestPreview(after: 0) }
                         Button(role: .destructive) { draft.rules.removeAll { $0.id == rule.id }; requestPreview() } label: {
@@ -109,11 +110,15 @@ struct SetDetailView: View {
                         .accessibilityLabel("Delete rule \(rule.pattern)")
                     }
                 }
-                Button("Add Rule") { draft.rules.append(UserRule(pattern: "", action: .exclude)) }
+                HStack {
+                    Button("Exclude File or Folder…") { Task { await excludeItems() } }
+                        .accessibilityHint("Pick items in this set to leave out of the backup")
+                    Button("Add Rule") { draft.rules.append(UserRule(pattern: "", action: .exclude)) }
+                }
             } header: {
                 Text("Your Rules")
             } footer: {
-                Text("Your rules come before stacks. With Secrets or Git history off, those files stay out whatever your rules say. Press Return after typing a pattern to preview the effect.")
+                Text("Your rules come before stacks. With Secrets or Git history off, those files stay out whatever your rules say. Press Return after typing a pattern to preview the effect. A folder's pattern ends in /**.")
             }
 
             Section("Destinations") {
@@ -178,6 +183,11 @@ struct SetDetailView: View {
             }
             Button("Cancel", role: .cancel) {}
         } message: { Text(SetNameConflict.message(name: draft.name)) }
+        .alert("Choose Items Inside \(draft.name)", isPresented: Binding(get: { outsidePicks > 0 }, set: { if !$0 { outsidePicks = 0 } })) {
+            Button("OK", role: .cancel) {}
+        } message: {
+            Text(outsidePicks == 1 ? "1 item wasn't inside this set, so it was left out." : "\(outsidePicks) items weren't inside this set, so they were left out.")
+        }
         .onChange(of: draft.presets) { requestPreview() }
         .onChange(of: draft.backupSecrets) { requestPreview() }
         .onChange(of: draft.backupGit) { requestPreview() }
@@ -193,6 +203,30 @@ struct SetDetailView: View {
                 model.runNow(accepted.id)
             }
         }
+    }
+
+    /// Hidden files show, as `.env` and friends are what people often want to pick. Links stay links, so picking
+    /// one excludes the link and not what it points at.
+    private func excludeItems() async {
+        let panel = NSOpenPanel()
+        panel.canChooseFiles = true
+        panel.canChooseDirectories = true
+        panel.allowsMultipleSelection = true
+        panel.resolvesAliases = false
+        panel.showsHiddenFiles = true
+        panel.treatsFilePackagesAsDirectories = true
+        panel.directoryURL = draft.source
+        panel.prompt = "Exclude"
+        panel.message = "Choose the files and folders to leave out of this backup."
+        let picked: [URL] = await withCheckedContinuation { c in
+            panel.begin { c.resume(returning: $0 == .OK ? panel.urls : []) }
+        }
+        guard !picked.isEmpty else { return }
+        let result = ExcludeRule.adding(picked, to: draft)
+        outsidePicks = result.outside
+        guard result.rules != draft.rules else { return }
+        draft.rules = result.rules
+        requestPreview(after: 0)
     }
 
     /// Several quick changes become one preview.
