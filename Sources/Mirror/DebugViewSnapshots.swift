@@ -83,6 +83,8 @@ enum DebugViewSnapshots {
         settle(0.5)
         write(ArchiveView(model: latest, agent: nil), size: CGSize(width: 720, height: 460), name: "archive-latest", to: dir)
 
+        DebugArchiveSnapshots.snapshotAll(store: store, sets: sets, destinations: dests, to: dir)
+
         // Archive, empty and failed states
         let empty = ArchiveModel(provider: EmptyArchive(), store: store); empty.loadConfig()
         Task { await empty.reload() }; settle(0.3)
