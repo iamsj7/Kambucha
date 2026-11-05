@@ -21,6 +21,11 @@ cp vendor/rclone/LICENSE.txt "$app/Contents/Resources/ThirdPartyLicenses/rclone.
 # SwiftPM resource bundle (presets.json); Bundle.module finds it in Contents/Resources
 cp -R "$bin/Kambucha_KambuchaCore.bundle" "$app/Contents/Resources/"
 cp Resources/Info.plist "$app/Contents/Info.plist"
+# Icon Composer's document, compiled so macOS can apply its glass and appearances.
+partial="$(mktemp)"
+xcrun actool Resources/AppIcon.icon --compile "$app/Contents/Resources" --platform macosx --minimum-deployment-target 26.0 \
+  --app-icon AppIcon --output-partial-info-plist "$partial" --errors --warnings >/dev/null
+rm -f "$partial"
 cp Resources/com.shaikjaleel.kambucha.agent.plist "$app/Contents/Library/LaunchAgents/"
 
 sign() { codesign --force --timestamp=none --options runtime --sign "$IDENTITY" "$@"; }

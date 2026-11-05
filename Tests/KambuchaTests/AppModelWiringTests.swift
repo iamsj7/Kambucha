@@ -84,6 +84,19 @@ private func vol(_ uuid: String, internalLooking: Bool = false) -> VolumeInfo {
         #expect(!m.isWatchingProgress)
     }
 
+    @Test func theMenuBarIconStillSaysTheStatus() {
+        #expect(OverallStatus.attention("x").menuBarCutout == "exclamationmark")
+        #expect(OverallStatus.paused.menuBarCutout == "pause.fill")
+        #expect(OverallStatus.held(1).menuBarCutout == "pause.fill")
+        #expect(OverallStatus.uploading(1).menuBarCutout == "arrow.up")
+        #expect(OverallStatus.backedUp(last: Date(), files: 1).menuBarCutout == "arrow.triangle.2.circlepath")
+        let statuses: [OverallStatus] = [.attention("x"), .paused, .uploading(1), .notConfigured, .running]
+        for status in statuses {
+            #expect(NSImage(systemSymbolName: status.menuBarCutout, accessibilityDescription: nil) != nil)
+            #expect(MenuBarIcon.image(for: status).isTemplate)
+        }
+    }
+
     @Test func aMenuItemStaysOneShortLine() {
         #expect(MenuText.short("Short.") == "Short.")
         #expect(MenuText.short("The backup agent stopped with code 1. Then a long story.") == "The backup agent stopped with code 1")

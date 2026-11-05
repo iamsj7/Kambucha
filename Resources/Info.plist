@@ -3,6 +3,8 @@
 <plist version="1.0">
 <dict>
 	<key>CFBundleIdentifier</key><string>com.shaikjaleel.kambucha</string>
+	<key>CFBundleIconFile</key><string>AppIcon</string>
+	<key>CFBundleIconName</key><string>AppIcon</string>
 	<key>CFBundleName</key><string>Kambucha</string>
 	<key>CFBundleDisplayName</key><string>Kambucha</string>
 	<key>CFBundleExecutable</key><string>Kambucha</string>

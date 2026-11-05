@@ -28,6 +28,7 @@ codesign --verify --strict -R="identifier \"com.shaikjaleel.kambucha.agent\" and
 codesign --verify --strict -R="identifier \"com.shaikjaleel.kambucha.rclone\" and $pin" "$app/Contents/Helpers/rclone" || fail "rclone doesn't meet the helper requirement"
 
 # rclone ships inside the app, so its MIT notice has to as well.
+[[ -f "$app/Contents/Resources/Assets.car" && -f "$app/Contents/Resources/AppIcon.icns" ]] || fail "the app icon is missing"
 grep -q 'Permission is hereby granted' "$app/Contents/Resources/ThirdPartyLicenses/rclone.txt" || fail "rclone's licence is missing"
 
 # Keychain rule: only KambuchaAgent may touch it.

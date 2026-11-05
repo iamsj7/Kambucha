@@ -28,7 +28,7 @@ Kambucha is built from source.
 
    It should finish with `OK`.
 
-6. Drag `dist/Kambucha.app` into `/Applications` and open it. A cloud icon appears in the menu bar and the Kambucha window opens at its first-run screen. If it does not, choose Open Kambucha from the menu bar. The Dock icon shows only while the window is open.
+6. Drag `dist/Kambucha.app` into `/Applications` and open it. A bottle icon appears in the menu bar and the Kambucha window opens at its first-run screen. If it does not, choose Open Kambucha from the menu bar. The Dock icon shows only while the window is open.
 
 ## 2. The first-run screen
 

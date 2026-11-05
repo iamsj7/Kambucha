@@ -93,7 +93,7 @@ struct KambuchaApp: App {
                                          set: { shown in settings.update { $0.showInMenuBar = shown } })) {
             MenuBarPanel(model: model)
         } label: {
-            Image(systemName: StatusPresentation(model.status).symbol)
+            Image(nsImage: MenuBarIcon.image(for: model.status))
                 .accessibilityLabel("Kambucha, \(StatusPresentation(model.status).title)")
         }
         .menuBarExtraStyle(.menu)
