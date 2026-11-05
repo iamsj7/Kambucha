@@ -119,6 +119,7 @@ enum DebugViewSnapshots {
         let onboarding = OnboardingModel(system: FakeSystem(), store: ConfigStore(root: onboardRoot))
         Task { await onboarding.refresh() }; settle(0.4)
         write(OnboardingView(model: onboarding), size: CGSize(width: 600, height: 560), name: "onboarding", to: dir)
+        write(OnboardingView(model: onboarding), size: CGSize(width: 1040, height: 700), name: "onboarding-default-window", to: dir)
 
         // Onboarding: a check that found folders readable and no Full Disk Access, then one that couldn't read them.
         for (name, folders) in [("onboarding-partial", true), ("onboarding-folders", false)] {

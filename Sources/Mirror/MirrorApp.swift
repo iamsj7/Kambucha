@@ -33,6 +33,12 @@ struct MirrorApp: App {
             DebugCoverageSnapshots.snapshotAll(to: URL(fileURLWithPath: dbg[i + 1]))
             exit(0)
         }
+        if let i = dbg.firstIndex(of: "--snapshot-layout"), i + 1 < dbg.count {
+            _ = NSApplication.shared
+            let only = dbg.firstIndex(of: "--snapshot-only").flatMap { $0 + 1 < dbg.count ? dbg[$0 + 1] : nil }
+            DebugLayoutSnapshots.snapshotAll(to: URL(fileURLWithPath: dbg[i + 1]), only: only)
+            exit(0)
+        }
         if let i = dbg.firstIndex(of: "--snapshot-progress"), i + 1 < dbg.count {
             DebugFixtures.snapshotProgress(to: URL(fileURLWithPath: dbg[i + 1]))
             exit(0)
@@ -73,6 +79,7 @@ struct MirrorApp: App {
         .menuBarExtraStyle(.window)
 
         Window("Mirror", id: "main") { MainWindow(model: model, settings: settings) }
+            .defaultSize(width: 1040, height: 700)
             .defaultLaunchBehavior(opensWindowAtLaunch ? .presented : .suppressed)
             .restorationBehavior(.disabled)
 

@@ -386,7 +386,7 @@ struct OnboardingView: View {
             }
         }
         .padding(24)
-        .frame(minWidth: 520, idealWidth: 560)
+        .frame(minWidth: 520, idealWidth: 560, maxWidth: PageLayout.readingWidth)
         .task {
             // Grants happen in System Settings, so look again once a second while this is open.
             while !Task.isCancelled {

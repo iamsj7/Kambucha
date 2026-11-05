@@ -82,12 +82,13 @@ struct MainWindow: View {
     /// For snapshots, which can't pass the real system checks.
     private let skipsOnboarding: Bool
 
-    init(model: AppModel, settings: SettingsModel, selection: SidebarSelection = SidebarSelection(), skipsOnboarding: Bool = false) {
+    init(model: AppModel, settings: SettingsModel, selection: SidebarSelection = SidebarSelection(), skipsOnboarding: Bool = false,
+         archive: ArchiveModel? = nil) {
         self.model = model
         self.settings = settings
         self.skipsOnboarding = skipsOnboarding
         _selection = State(initialValue: selection)
-        _archive = State(initialValue: ArchiveModel(provider: model.services.archive, store: ConfigStore(root: model.support)))
+        _archive = State(initialValue: archive ?? ArchiveModel(provider: model.services.archive, store: ConfigStore(root: model.support)))
         _activity = State(initialValue: ActivityModel(support: model.support))
         _onboarding = State(initialValue: OnboardingModel(store: ConfigStore(root: model.support),
                                                           settings: SettingsStore(root: model.support)))
@@ -255,10 +256,10 @@ struct MainWindow: View {
                          hovering: { pointerOverCoverage = $0 })
         case .one(.set(let id)):
             if model.set(id) != nil { SetDetailView(model: model, setID: id).id(id) }
-            else { ContentUnavailableView("Set Not Found", systemImage: "questionmark.folder") }
+            else { PageState { ContentUnavailableView("Set Not Found", systemImage: "questionmark.folder") } }
         case .one(.destination(let id)):
             if let d = model.destination(id) { DestinationDetailView(model: model, destination: d) }
-            else { ContentUnavailableView("Destination Not Found", systemImage: "questionmark.folder") }
+            else { PageState { ContentUnavailableView("Destination Not Found", systemImage: "questionmark.folder") } }
         case .one(.archive):
             ArchiveView(model: archive, agent: model.services.agent)
         case .one(.activity):
@@ -368,7 +369,7 @@ struct ErrorBar: View {
             Spacer()
             Button("Dismiss", action: dismiss)
         }
-        .padding(10)
+        .padding(.horizontal, PageLayout.inset).padding(.vertical, PageLayout.bannerGap)
         .background(.bar)
         .accessibilityElement(children: .contain)
     }
@@ -385,7 +386,7 @@ struct AccessWarningBar: View {
             Button("Open Settings", action: open)
                 .accessibilityHint("Opens Full Disk Access in System Settings")
         }
-        .padding(10)
+        .padding(.horizontal, PageLayout.inset).padding(.vertical, PageLayout.bannerGap)
         .background(.bar)
         .accessibilityElement(children: .contain)
     }

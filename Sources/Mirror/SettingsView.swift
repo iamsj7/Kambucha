@@ -58,7 +58,7 @@ struct SettingsView: View {
     }
 
     var body: some View {
-        Form {
+        ReadingForm {
             Section {
                 Toggle("Open Mirror at login", isOn: Binding(get: { model.launchAtLogin }, set: { model.setLaunchAtLogin($0) }))
                 if model.loginStatus == .requiresApproval {
@@ -101,7 +101,6 @@ struct SettingsView: View {
                 Section { Label(e, systemImage: "exclamationmark.triangle").font(.callout) }
             }
         }
-        .formStyle(.grouped)
         .navigationTitle("Settings")
         .frame(minWidth: 460, idealWidth: 520)
         .onAppear { model.refreshLoginStatus() }

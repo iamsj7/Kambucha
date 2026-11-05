@@ -24,6 +24,7 @@ struct SetDetailView: View {
     /// Here and not in the pane, which a pane switch destroys.
     @State private var ruleQuery = ""
     @State private var revealRule: UUID?
+    @State private var width: CGFloat = 0
 
     init(model: AppModel, setID: UUID, pane: SetPane? = nil) {
         _pane = State(initialValue: pane ?? SetPaneMemory.last)
@@ -47,33 +48,34 @@ struct SetDetailView: View {
     }
 
     var body: some View {
-        VStack(spacing: 0) {
-            Picker("Section", selection: $pane) {
-                ForEach(SetPane.allCases, id: \.self) { Text($0.title).tag($0) }
-            }
-            .pickerStyle(.segmented).labelsHidden()
-            .padding([.horizontal, .top])
-            .padding(.bottom, 8)
-            .accessibilityLabel("Section")
+        BannerPage(kind: .reading) {
+            banners
+        } content: {
             switch pane {
-            case .status: form { statusPane }
+            case .status: ReadingForm { statusPane }
             case .included:
-                VStack(spacing: 0) {
-                    bannerBar
-                    IncludedPane(draft: $draft, query: $ruleQuery, revealRule: $revealRule, presets: presets, presetBinding: presetBinding,
-                                 requestPreview: { requestPreview(after: $0) }, excludeItems: { Task { await excludeItems() } })
-                }
-            case .destinations: form { destinationsPane }
-            case .safety: form { safetyPane }
+                IncludedPane(draft: $draft, query: $ruleQuery, revealRule: $revealRule, presets: presets, presetBinding: presetBinding,
+                             requestPreview: { requestPreview(after: $0) }, excludeItems: { Task { await excludeItems() } })
+            case .destinations: ReadingForm { destinationsPane }
+            case .safety: ReadingForm { safetyPane }
             }
         }
+        .measuringWidth($width)
         .onChange(of: pane) { _, new in SetPaneMemory.last = new }
         .toolbar {
-            ToolbarItemGroup {
-                Button("Preview Backup…") { showingPreview = true }
-                    .accessibilityHint("Shows what a backup of this set would change")
-                Button("Back Up Now") { model.runNow(setID) }
-                    .disabled(!accepted || draft.isPaused)
+            ToolbarItem(placement: .principal) { panePicker }
+            ToolbarItemGroup(placement: .primaryAction) {
+                Group {
+                    Button { showingPreview = true } label: { Label("Preview Backup…", systemImage: "eye") }
+                        .help("Preview Backup")
+                        .accessibilityLabel("Preview Backup…")
+                        .accessibilityHint("Shows what a backup of this set would change")
+                    Button { model.runNow(setID) } label: { Label("Back Up Now", systemImage: "arrow.clockwise.icloud") }
+                        .help("Back Up Now")
+                        .accessibilityLabel("Back Up Now")
+                        .disabled(!accepted || draft.isPaused)
+                }
+                .labelStyle(PageToolbarLabelStyle(wordy: PageLayout.hasWordyToolbar(width: width)))
             }
         }
         .navigationTitle(draft.name)
@@ -118,61 +120,37 @@ struct SetDetailView: View {
         }
     }
 
-    private func form<Content: View>(@ViewBuilder _ content: () -> Content) -> some View {
-        Form {
-            banners
-            content()
+    @ViewBuilder private var panePicker: some View {
+        let picker = Picker("Section", selection: $pane) {
+            ForEach(SetPane.allCases, id: \.self) { Text($0.title).tag($0) }
         }
-        .formStyle(.grouped)
+        .labelsHidden()
+        .accessibilityLabel("Section")
+        if PageLayout.hasRoomyToolbar(width: width) { picker.pickerStyle(.segmented).fixedSize() } else { picker.pickerStyle(.menu) }
     }
 
     private var shownBanners: [SetBanner] {
         SetBanners.visible(nameConflict: !nameConflicts.isEmpty, previewAccepted: accepted, on: pane)
     }
 
-    /// Notices that need the owner show at the top of every pane: as sections in a form pane.
+    /// Notices that need the owner show at the top of every pane, and don't scroll away with 200 rules.
     @ViewBuilder private var banners: some View {
         ForEach(shownBanners, id: \.self) { banner in
-            Section {
+            PageBanner {
                 switch banner {
                 case .nameConflict:
-                    Label(SetNameConflict.title(name: draft.name, in: nameConflicts), systemImage: "exclamationmark.triangle")
-                    Text(Self.conflictHelp).font(.caption).foregroundStyle(.secondary)
+                    VStack(alignment: .leading, spacing: 4) {
+                        Label(SetNameConflict.title(name: draft.name, in: nameConflicts), systemImage: "exclamationmark.triangle")
+                        Text(Self.conflictHelp).font(.caption).foregroundStyle(.secondary)
+                    }
+                    Spacer(minLength: PageLayout.bannerGap)
                     Button("\(SetNameConflict.adoptButton)…") { confirmingAdoption = true }
                 case .previewNeeded:
                     Label(Self.previewHelp, systemImage: "eye")
-                    Button("Preview Backup…") { showingPreview = true }
-                        .buttonStyle(.borderedProminent)
+                    Spacer(minLength: PageLayout.bannerGap)
+                    Button("Preview Backup…") { showingPreview = true }.buttonStyle(.borderedProminent)
                 }
             }
-        }
-    }
-
-    /// The same notices as a bar above the list pane, so they don't scroll away with 200 rules.
-    @ViewBuilder private var bannerBar: some View {
-        if !shownBanners.isEmpty {
-            VStack(alignment: .leading, spacing: 8) {
-                ForEach(shownBanners, id: \.self) { banner in
-                    switch banner {
-                    case .nameConflict:
-                        HStack {
-                            Label(SetNameConflict.title(name: draft.name, in: nameConflicts), systemImage: "exclamationmark.triangle")
-                            Spacer()
-                            Button("\(SetNameConflict.adoptButton)…") { confirmingAdoption = true }
-                        }
-                        Text(Self.conflictHelp).font(.caption).foregroundStyle(.secondary)
-                    case .previewNeeded:
-                        HStack {
-                            Label(Self.previewHelp, systemImage: "eye")
-                            Spacer()
-                            Button("Preview Backup…") { showingPreview = true }.buttonStyle(.borderedProminent)
-                        }
-                    }
-                }
-            }
-            .padding(12)
-            .background(.quaternary, in: RoundedRectangle(cornerRadius: 8))
-            .padding(.horizontal).padding(.bottom, 8)
         }
     }
 

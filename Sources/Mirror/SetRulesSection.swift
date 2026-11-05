@@ -20,39 +20,35 @@ struct IncludedPane: View {
         ScrollViewReader { proxy in
             List {
                 Section {
-                    Toggle(isOn: .constant(true)) { Text("macOS (.DS_Store, .Trash)") }
+                    title("Stacks")
+                    toggle("macOS (.DS_Store, .Trash)", isOn: .constant(true))
                         .disabled(true)
+                        .cardRow(presets.isEmpty ? .only : .first)
                     ForEach(presets) { preset in
-                        Toggle(preset.name, isOn: presetBinding(preset.id))
+                        toggle(preset.name, isOn: presetBinding(preset.id))
+                            .cardRow(preset.id == presets.last?.id ? .last : .middle)
                     }
-                } header: {
-                    Text("Stacks")
-                } footer: {
-                    Text("Build folders and caches for these stacks are skipped. When unsure, Mirror backs a file up.")
+                    footnote("Build folders and caches for these stacks are skipped. When unsure, Mirror backs a file up.")
+
+                    title("Secrets and Git")
+                    toggle("Back up secrets", isOn: $draft.backupSecrets).cardRow(.first)
+                    toggle("Back up Git history", isOn: $draft.backupGit).cardRow(.last)
+                    footnote("Secrets are .env files and private keys. Git history adds the .git folders, which can be large.")
                 }
 
                 Section {
-                    Toggle("Back up secrets", isOn: $draft.backupSecrets)
-                    Toggle("Back up Git history", isOn: $draft.backupGit)
-                } header: {
-                    Text("Secrets and Git")
-                } footer: {
-                    Text("Secrets are .env files and private keys. Git history adds the .git folders, which can be large.")
-                }
-
-                Section {
-                    // A row and not a footer: List footers stay on one line, which cut this off.
-                    Text("Your rules come before stacks. With Secrets or Git history off, those files stay out whatever your rules say. Press Return after typing a pattern to preview the effect. A folder's pattern ends in /**.")
-                        .font(.footnote).foregroundStyle(.secondary)
-                        .listRowSeparator(.hidden)
+                    footnote("Your rules come before stacks. With Secrets or Git history off, those files stay out whatever your rules say. Press Return after typing a pattern to preview the effect. A folder's pattern ends in /**.")
                     // Ids, not filtered indices: each row binds to its real rule, and stored order is kept.
-                    ForEach(RuleFilter.visibleIDs(draft.rules, query: query, keep: focusedRule.map { [$0] } ?? []), id: \.self) { id in
-                        row(id)
+                    let ids = RuleFilter.visibleIDs(draft.rules, query: query, keep: focusedRule.map { [$0] } ?? [])
+                    ForEach(ids, id: \.self) { id in
+                        row(id).cardRow(position(of: id, in: ids))
                     }
                 } header: {
                     rulesHeader
                 }
             }
+            .listStyle(.inset)
+            .readingColumn(ownInset: true)
             .onChange(of: pendingFocus) { _, id in
                 guard let id else { return }
                 Task { @MainActor in
@@ -72,11 +68,31 @@ struct IncludedPane: View {
         }
     }
 
+    private func title(_ text: String) -> some View {
+        Text(text).font(.headline).cardCaption()
+    }
+
+    /// A row and not a section footer: List footers stay on one line, which cut this off.
+    private func footnote(_ text: String) -> some View {
+        Text(text).font(.subheadline).foregroundStyle(.secondary).cardCaption()
+    }
+
+    /// As a Form lays out a toggle: the switch at the far end.
+    private func toggle(_ title: String, isOn: Binding<Bool>) -> some View {
+        LabeledContent(title) {
+            Toggle(title, isOn: isOn).labelsHidden().toggleStyle(.switch).controlSize(.mini)
+        }
+    }
+
+    private func position(of id: UUID, in ids: [UUID]) -> PageCard.Position {
+        id == ids.first ? (ids.count == 1 ? .only : .first) : id == ids.last ? .last : .middle
+    }
+
     /// Add Rule and Exclude stay above the rows; the header floats while the rows scroll.
     private var rulesHeader: some View {
         VStack(alignment: .leading, spacing: 8) {
             HStack {
-                Text("Your Rules")
+                Text("Your Rules").font(.headline).foregroundStyle(.primary)
                 Text(RuleFilter.countText(total: draft.rules.count,
                                           shown: RuleFilter.visibleIDs(draft.rules, query: query, keep: focusedRule.map { [$0] } ?? []).count))
                     .foregroundStyle(.secondary).font(.subheadline)
@@ -97,6 +113,7 @@ struct IncludedPane: View {
                     .accessibilityHint("Shows only rules whose pattern contains this text. The order doesn't change.")
             }
         }
+        .cardHeader()
     }
 
     @ViewBuilder private func row(_ id: UUID) -> some View {

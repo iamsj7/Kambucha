@@ -97,6 +97,7 @@ struct ActivityView: View {
     @Bindable var model: ActivityModel
     @State private var sortOrder = [KeyPathComparator(\RunRecord.start, order: .reverse)]
     @State private var selection: RunRecord.ID?
+    @State private var width: CGFloat = 0
 
     private var sorted: [RunRecord] { model.records.sorted(using: sortOrder) }
     private var selected: RunRecord? { model.records.first { $0.id == selection } }
@@ -104,54 +105,60 @@ struct ActivityView: View {
     var body: some View {
         VStack(spacing: 0) {
             if model.records.isEmpty && model.reachedScanLimit {
-                ContentUnavailableView("No Results", systemImage: "magnifyingglass",
-                                       description: Text("\(ActivityModel.scanNote) Older runs may match."))
+                PageState {
+                    ContentUnavailableView("No Results", systemImage: "magnifyingglass",
+                                           description: Text("\(ActivityModel.scanNote) Older runs may match."))
+                }
             } else if model.records.isEmpty && model.emptyState == .noSearchResults {
-                ContentUnavailableView.search
+                PageState { ContentUnavailableView.search }
             } else if model.records.isEmpty && model.emptyState == .noMatchingRuns {
-                ContentUnavailableView("No Matching Runs", systemImage: "line.3.horizontal.decrease.circle",
-                                       description: Text("No runs match these filters."))
+                PageState {
+                    ContentUnavailableView("No Matching Runs", systemImage: "line.3.horizontal.decrease.circle",
+                                           description: Text("No runs match these filters."))
+                }
             } else if model.records.isEmpty {
-                ContentUnavailableView(model.loadFailed ? "Couldn't Read Activity" : "No Activity Yet",
-                                       systemImage: model.loadFailed ? "exclamationmark.triangle" : "clock.arrow.circlepath",
-                                       description: Text(model.loadFailed ? "Mirror couldn't read its run history. Try again."
-                                                                          : model.filter.includeSkipped ? "Backups appear here after they run."
-                                                                          : "Backups appear here after they run. Skipped runs are hidden."))
+                PageState {
+                    ContentUnavailableView(model.loadFailed ? "Couldn't Read Activity" : "No Activity Yet",
+                                           systemImage: model.loadFailed ? "exclamationmark.triangle" : "clock.arrow.circlepath",
+                                           description: Text(model.loadFailed ? "Mirror couldn't read its run history. Try again."
+                                                                              : model.filter.includeSkipped ? "Backups appear here after they run."
+                                                                              : "Backups appear here after they run. Skipped runs are hidden."))
+                }
             } else {
                 Table(sorted, selection: $selection, sortOrder: $sortOrder) {
                     TableColumn("Started", value: \.start) { r in
                         Text(r.start.formatted(date: .abbreviated, time: .shortened))
-                    }.width(min: 120, ideal: 150)
+                    }.width(min: 100, ideal: 140)
                     TableColumn("Set", value: \.setName) { r in
                         VStack(alignment: .leading, spacing: 0) {
                             Text(r.setName)
                             Text(r.destinationName).font(.caption).foregroundStyle(.secondary)
                         }
                         .accessibilityElement(children: .combine)
-                    }.width(min: 100, ideal: 150)
+                    }.width(min: 80, ideal: 130)
                     TableColumn("Result") { r in
                         let p = RunResultPresentation(r.status)
                         Label(p.title, systemImage: p.symbol)
-                    }.width(min: 130, ideal: 160)
+                    }.width(min: 100, ideal: 130)
                     TableColumn("Files") { r in
                         VStack(alignment: .leading, spacing: 0) {
                             Text(RunResultPresentation.counts(r))
                             Text("\(r.filesChecked.formatted()) checked").font(.caption).foregroundStyle(.secondary)
                         }
                         .accessibilityElement(children: .combine)
-                    }.width(min: 120, ideal: 170)
+                    }.width(min: 100, ideal: 150)
                     TableColumn("Verification") { r in
                         Text(r.verification.isEmpty ? "Not checked" : r.verification).lineLimit(2)
-                    }.width(min: 90, ideal: 130)
+                    }.width(min: 60, ideal: 110)
                     TableColumn("Errors") { r in
                         Text(r.errors.isEmpty ? "None" : "\(r.errors.count.formatted()), \(r.errors[0])").lineLimit(2)
                             .foregroundStyle(r.errors.isEmpty ? .secondary : .primary)
-                    }.width(min: 90, ideal: 180)
+                    }.width(min: 60, ideal: 130)
                 }
                 if model.reachedScanLimit {
                     Text(ActivityModel.scanNote).font(.callout).foregroundStyle(.secondary)
                         .frame(maxWidth: .infinity, alignment: .leading)
-                        .padding(.horizontal).padding(.vertical, 8)
+                        .padding(.horizontal, PageLayout.dataInset).padding(.vertical, PageLayout.bannerGap)
                 }
                 if let selected, !selected.errors.isEmpty {
                     Divider()
@@ -159,6 +166,7 @@ struct ActivityView: View {
                 }
             }
         }
+        .measuringWidth($width)
         .navigationTitle("Activity")
         .searchable(text: $model.filter.search, prompt: "Search sets")
         .toolbar {
@@ -168,13 +176,8 @@ struct ActivityView: View {
                     ForEach(model.sets, id: \.id) { Text($0.name).tag(UUID?.some($0.id)) }
                 }
                 .help("Show one set's runs")
-                Picker("Result", selection: $model.filter.result) {
-                    Text("All").tag(RunFilter.Result.all)
-                    Text("Problems").tag(RunFilter.Result.problems)
-                    Text("Success").tag(RunFilter.Result.success)
-                }
-                .pickerStyle(.segmented)
-                .help("Show all runs, only those with problems, or only those that succeeded")
+                resultPicker
+                    .help("Show all runs, only those with problems, or only those that succeeded")
                 Toggle(isOn: $model.filter.includeSkipped) { Label("Show Skipped Runs", systemImage: "minus.circle") }
                     .help("Include runs that had nothing to do or couldn't start, such as a paused set or a drive that isn't connected")
                     .disabled(model.filter.result != .all)
@@ -195,6 +198,15 @@ struct ActivityView: View {
             }
         }
     }
+
+    @ViewBuilder private var resultPicker: some View {
+        let picker = Picker("Result", selection: $model.filter.result) {
+            Text("All").tag(RunFilter.Result.all)
+            Text("Problems").tag(RunFilter.Result.problems)
+            Text("Success").tag(RunFilter.Result.success)
+        }
+        if PageLayout.hasRoomyToolbar(width: width) { picker.pickerStyle(.segmented).fixedSize() } else { picker.pickerStyle(.menu) }
+    }
 }
 
 private struct ErrorList: View {
@@ -211,7 +223,7 @@ private struct ErrorList: View {
             }
             .frame(maxHeight: 100)
         }
-        .padding()
+        .padding(PageLayout.dataInset)
         .accessibilityElement(children: .contain)
     }
 }

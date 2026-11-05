@@ -94,7 +94,7 @@ struct OverviewView: View {
 
     var body: some View {
         let p = StatusPresentation(model.status)
-        Form {
+        ReadingForm {
             Section {
                 HStack(alignment: .top, spacing: 12) {
                     Image(systemName: p.symbol).font(.largeTitle).accessibilityHidden(true)
@@ -177,7 +177,6 @@ struct OverviewView: View {
                 }
             }
         }
-        .formStyle(.grouped)
         .navigationTitle("Overview")
         .sheet(isPresented: $showingAllReview) { ReviewAllSheet(model: model) }
     }

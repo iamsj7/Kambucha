@@ -6,14 +6,14 @@ import MirrorCore
 /// Debug-only: Coverage and the sidebar with 50 sets and 10 destinations, every state in the mix.
 @MainActor
 enum DebugCoverageSnapshots {
-    private struct Volumes: VolumeLocating {
+    struct Volumes: VolumeLocating {
         func mounted() -> [VolumeInfo] {
             [VolumeInfo(uuid: "A", name: "Backup SSD", mountPoint: URL(fileURLWithPath: "/Volumes/Backup SSD"), fileSystem: "apfs", freeBytes: 420_000_000_000),
              VolumeInfo(uuid: "B", name: "Archive", mountPoint: URL(fileURLWithPath: "/Volumes/Archive"), fileSystem: "apfs", freeBytes: 1_800_000_000_000, looksInternal: true)]
         }
     }
 
-    private static func model(sets setCount: Int = 50) -> AppModel {
+    static func fixture(sets setCount: Int) -> URL {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent("mirror-coverage-\(UUID().uuidString)")
         let store = ConfigStore(root: root)
         var google = Destination(name: "Google Drive", kind: .googleDrive); google.recoveryKitConfirmed = true
@@ -53,6 +53,11 @@ enum DebugCoverageSnapshots {
                 try? store.save(st, for: PairID(set: s.id, destination: id))
             }
         }
+        return root
+    }
+
+    private static func model(sets setCount: Int = 50) -> AppModel {
+        let root = fixture(sets: setCount)
         let services = AppServices(preview: AppServices.live.preview, dryRun: AppServices.live.dryRun, inspector: nil, volumes: Volumes(),
                                    agent: .bundled(in: Bundle.main.bundleURL), archive: AppServices.live.archive)
         let model = AppModel(support: root, services: services)

@@ -1,4 +1,5 @@
 import SwiftUI
+import AppKit
 import MirrorCore
 
 /// A destination as Coverage needs it, worked out once per render and not per cell.
@@ -79,9 +80,8 @@ struct CoverageView: View {
     /// The pointer is over the grid, so rows hold still as they do in the sidebar.
     var hovering: (Bool) -> Void = { _ in }
     @State private var turningOff: TurnOffRequest?
+    @State private var width: CGFloat = 0
 
-    static let nameWidth: CGFloat = 220
-    static let columnWidth: CGFloat = 156
     static let rowHeight: CGFloat = 32
 
     private struct TurnOffRequest: Equatable {
@@ -91,17 +91,22 @@ struct CoverageView: View {
     var body: some View {
         Group {
             if model.sets.isEmpty {
-                ContentUnavailableView("No Backup Sets", systemImage: "folder",
-                                       description: Text("Add a folder to start backing it up."))
+                PageState {
+                    ContentUnavailableView("No Backup Sets", systemImage: "folder",
+                                           description: Text("Add a folder to start backing it up."))
+                }
             } else if model.destinations.isEmpty {
-                ContentUnavailableView("No Destinations", systemImage: "externaldrive",
-                                       description: Text("Add a place to keep your backups."))
+                PageState {
+                    ContentUnavailableView("No Destinations", systemImage: "externaldrive",
+                                           description: Text("Add a place to keep your backups."))
+                }
             } else if rows.isEmpty {
-                ContentUnavailableView.search(text: filter)
+                PageState { ContentUnavailableView.search(text: filter) }
             } else {
                 grid
             }
         }
+        .measuringWidth($width)
         .navigationTitle("Coverage")
         // The view can go with the pointer still inside it, and then no hover ends.
         .onDisappear { hovering(false) }
@@ -120,12 +125,13 @@ struct CoverageView: View {
 
     private var grid: some View {
         let columns = model.coverageColumns
+        let layout = CoverageLayout(available: width - Self.scrollerWidth, columns: columns.count)
         return ScrollView([.horizontal, .vertical]) {
             LazyVStack(alignment: .leading, spacing: 0, pinnedViews: [.sectionHeaders]) {
                 Section {
                     ForEach(rows) { row in
                         if let set = model.set(row.id) {
-                            CoverageRow(row: row, set: set, columns: columns, model: model, select: select) { column in
+                            CoverageRow(row: row, set: set, columns: columns, layout: layout, model: model, select: select) { column in
                                 turningOff = TurnOffRequest(set: set.id, setName: set.name, destination: column.id,
                                                             destinationName: column.destination.name)
                             }
@@ -134,14 +140,19 @@ struct CoverageView: View {
                         }
                     }
                 } header: {
-                    CoverageHeader(columns: columns, select: select)
+                    CoverageHeader(columns: columns, layout: layout, select: select)
                 }
             }
-            .frame(width: Self.nameWidth + CGFloat(columns.count) * Self.columnWidth)
+            .frame(width: layout.width)
         }
         .defaultScrollAnchor(.topLeading)
         .background(.background)
         .onHover(perform: hovering)
+    }
+
+    /// A scroller that takes up room, as it does with a mouse attached, comes out of what the columns can share.
+    private static var scrollerWidth: CGFloat {
+        NSScroller.preferredScrollerStyle == .legacy ? NSScroller.scrollerWidth(for: .regular, scrollerStyle: .legacy) : 0
     }
 }
 
@@ -158,14 +169,15 @@ private extension View {
 
 private struct CoverageHeader: View {
     let columns: [CoverageColumn]
+    let layout: CoverageLayout
     var select: (SidebarItem) -> Void
 
     var body: some View {
         VStack(spacing: 0) {
             HStack(spacing: 0) {
                 Text("Set").font(.headline)
-                    .padding(.horizontal, 12)
-                    .frame(width: CoverageView.nameWidth, height: 40, alignment: .leading)
+                    .padding(.horizontal, PageLayout.dataInset)
+                    .frame(width: layout.name, height: 40, alignment: .leading)
                     .background(.background)
                     .pinnedToLeadingEdge()
                 ForEach(columns) { column in
@@ -173,7 +185,7 @@ private struct CoverageHeader: View {
                         Label(column.destination.name, systemImage: column.destination.kind.symbol)
                             .font(.subheadline.weight(.semibold)).lineLimit(2)
                             .padding(.horizontal, 8)
-                            .frame(width: CoverageView.columnWidth, height: 40, alignment: .leading)
+                            .frame(width: layout.column, height: 40, alignment: .leading)
                             .contentShape(Rectangle())
                     }
                     .buttonStyle(.plain)
@@ -182,6 +194,7 @@ private struct CoverageHeader: View {
                     .accessibilityValue(column.status.text)
                     .accessibilityHint("Opens this destination")
                 }
+                Spacer(minLength: 0)
             }
             Divider()
         }
@@ -193,6 +206,7 @@ private struct CoverageRow: View {
     let row: SetRow
     let set: BackupSet
     let columns: [CoverageColumn]
+    let layout: CoverageLayout
     let model: AppModel
     var select: (SidebarItem) -> Void
     var askToTurnOff: (CoverageColumn) -> Void
@@ -207,8 +221,8 @@ private struct CoverageRow: View {
                     Image(systemName: p.symbol).foregroundStyle(row.status.needsAttention ? Color.orange : .secondary)
                         .frame(width: 20)
                 }
-                .padding(.horizontal, 12)
-                .frame(width: CoverageView.nameWidth, height: CoverageView.rowHeight, alignment: .leading)
+                .padding(.horizontal, PageLayout.dataInset)
+                .frame(width: layout.name, height: CoverageView.rowHeight, alignment: .leading)
                 .contentShape(Rectangle())
             }
             .buttonStyle(.plain)
@@ -219,10 +233,11 @@ private struct CoverageRow: View {
             .pinnedToLeadingEdge()
             ForEach(columns) { column in
                 CoverageCellView(cell: model.coverageCell(set, column), setName: row.name, destinationName: column.destination.name,
-                                 isOn: Binding(get: { set.destinationIDs.contains(column.id) }, set: { on in
+                                 width: layout.column, isOn: Binding(get: { set.destinationIDs.contains(column.id) }, set: { on in
                                      if on { model.setDestination(column.id, on: true, for: set.id) } else { askToTurnOff(column) }
                                  }))
             }
+            Spacer(minLength: 0)
         }
         .contextMenu { SetBatchActions(model: model, ids: [row.id]) }
         .accessibilityElement(children: .contain)
@@ -233,6 +248,7 @@ private struct CoverageCellView: View {
     let cell: CoverageCell
     let setName: String
     let destinationName: String
+    let width: CGFloat
     @Binding var isOn: Bool
 
     var body: some View {
@@ -246,7 +262,7 @@ private struct CoverageCellView: View {
         }
         .toggleStyle(.checkbox)
         .padding(.horizontal, 8)
-        .frame(width: CoverageView.columnWidth, alignment: .leading)
+        .frame(width: width, alignment: .leading)
         .help("\(destinationName): \(p.detail)")
         .accessibilityLabel("\(setName) to \(destinationName), \(p.detail)")
         .accessibilityHint("Turns this destination on or off for the set")
@@ -289,7 +305,7 @@ struct SeveralSetsView: View {
 
     var body: some View {
         let summary = SetBatch.summary(attention: rows.filter(\.status.needsAttention).count, paused: rows.filter(\.isPaused).count)
-        Form {
+        ReadingForm {
             Section {
                 VStack(alignment: .leading, spacing: 2) {
                     Text("\(rows.count.formatted()) Sets Selected").font(.title2.weight(.semibold))
@@ -313,7 +329,6 @@ struct SeveralSetsView: View {
                 }
             }
         }
-        .formStyle(.grouped)
         .navigationTitle("\(rows.count.formatted()) Sets")
     }
 }

@@ -17,7 +17,7 @@ struct DestinationDetailView: View {
     private var connected: VolumeInfo? { ExternalVolume.find(destination, in: model.volumeCache.volumes) }
 
     var body: some View {
-        Form {
+        ReadingForm {
             Section {
                 LabeledContent("Kind") { Label(destination.kind.title, systemImage: destination.kind.symbol) }
                 LabeledContent("Status") { Label(status.text, systemImage: status.symbol) }
@@ -82,7 +82,6 @@ struct DestinationDetailView: View {
                 if usedBy.isEmpty { Text("No set uses this destination.").foregroundStyle(.secondary) }
             }
         }
-        .formStyle(.grouped)
         .navigationTitle(destination.name)
         .sheet(isPresented: $showingKit) {
             RecoveryKitSheet(model: model, destination: destination) {

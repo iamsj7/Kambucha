@@ -33,6 +33,16 @@ enum RestoreTarget {
     }
 }
 
+/// Where the owner is in the latest backup, as a window subtitle has room for it: the far end matters most.
+enum ArchivePath {
+    static let shownFolders = 2
+
+    static func text(set: String?, folder: [String]) -> String {
+        let shown = folder.count > shownFolders ? ["…"] + folder.suffix(shownFolders) : folder
+        return ((set.map { [$0] } ?? []) + shown).joined(separator: " / ")
+    }
+}
+
 struct ArchiveSelection: Hashable { var set: UUID?; var destination: UUID? }
 
 /// What a search has found so far, across every set and destination.
@@ -513,42 +523,53 @@ struct ArchiveView: View {
     @State private var drill: DrillModel?
     @State private var showDrill = false
     @State private var focused: ArchiveEntry.ID?
+    @State private var width: CGFloat = 0
 
     private func chooseLocation(for hit: ArchiveHit) -> (ArchiveEntry) async -> URL? {
         { [model] entry in await chooseRestoreLocation(for: entry, startingIn: model.startFolder(for: entry, of: hit)) }
     }
 
+    private var showsLatest: Bool { !model.isSearching && model.mode == .latest }
+
     var body: some View {
-        VStack(spacing: 0) {
+        BannerPage {
             if let due = model.drillDueDestinations.first { reminder(due) }
-            if model.isSearching {
-                searchResults
-            } else {
-                Picker("Show", selection: $model.mode) {
-                    Text("Older Versions").tag(ArchiveModel.Mode.archive)
-                    Text("Latest Backup").tag(ArchiveModel.Mode.latest)
-                }
-                .pickerStyle(.segmented).labelsHidden().fixedSize()
-                .padding(.vertical, 8)
-                if model.mode == .archive { content } else { latest }
-            }
+        } content: {
+            if model.isSearching { searchResults } else if model.mode == .archive { content } else { latest }
+        } bottom: {
             if model.restoreState != .idle { restoreBar }
         }
+        .measuringWidth($width)
         .navigationTitle("Archive")
+        .navigationSubtitle(showsLatest ? ArchivePath.text(set: model.selectedSet?.name, folder: model.folder) : "")
         .searchable(text: $model.query, placement: .toolbar, prompt: "Search all archived files")
         .toolbar {
+            if showsLatest && !model.folder.isEmpty {
+                ToolbarItem(placement: .navigation) {
+                    Button { Task { await model.goUp(to: model.folder.count - 1) } } label: { Label("Back", systemImage: "chevron.left") }
+                        .accessibilityHint("Goes up one folder")
+                }
+            }
+            ToolbarItem(placement: .principal) { modePicker }
             ToolbarItemGroup {
+                if showsLatest {
+                    Button(model.folder.isEmpty ? "Restore Whole Set…" : "Restore This Folder…") {
+                        Task { await model.restoreLatest(nil, chooseLocation: chooseLocation) }
+                    }
+                    .disabled(model.selectedDestination == nil)
+                    .accessibilityHint("Asks where to put the restored copy")
+                }
                 Picker("Set", selection: $model.selection.set) {
                     ForEach(model.sets) { Text($0.name).tag(Optional($0.id)) }
                 }
                 Picker("Destination", selection: $model.selection.destination) {
                     ForEach(model.destinationsForSelectedSet) { Text($0.name).tag(Optional($0.id)) }
                 }
+                Button { Task { await model.reloadAll() } } label: { Label("Reload", systemImage: "arrow.clockwise") }
+                    .help("Read the archive again")
                 Button { openDrill() } label: { Label("Test Recovery Kit", systemImage: "key.horizontal") }
                     .help("Check that your Recovery Kit still opens a backup")
                     .disabled(model.encryptedDestinations.isEmpty || agent == nil)
-                Button { Task { await model.reloadAll() } } label: { Label("Reload", systemImage: "arrow.clockwise") }
-                    .help("Read the archive again")
             }
         }
         .task(id: model.selection) {
@@ -560,6 +581,17 @@ struct ArchiveView: View {
         .sheet(isPresented: $showDrill, onDismiss: { drill?.discard(); drill = nil; model.loadConfig() }) {
             if let drill { DrillSheet(model: drill) }
         }
+    }
+
+    /// A search covers both, so there's nothing for this to switch while one is on.
+    @ViewBuilder private var modePicker: some View {
+        let picker = Picker("Show", selection: $model.mode) {
+            Text("Older Versions").tag(ArchiveModel.Mode.archive)
+            Text("Latest Backup").tag(ArchiveModel.Mode.latest)
+        }
+        .labelsHidden()
+        .disabled(model.isSearching)
+        if PageLayout.hasRoomyToolbar(width: width) { picker.pickerStyle(.segmented).fixedSize() } else { picker.pickerStyle(.menu) }
     }
 
     /// One model per opening, so the sheet keeps its state while it is on screen.
@@ -576,20 +608,26 @@ struct ArchiveView: View {
     @ViewBuilder private var content: some View {
         switch model.phase {
         case .idle where model.sets.isEmpty:
-            ContentUnavailableView("No Archive Yet", systemImage: "externaldrive.badge.checkmark",
-                                   description: Text("Old versions and deleted files appear here after your first backup."))
+            PageState {
+                ContentUnavailableView("No Archive Yet", systemImage: "externaldrive.badge.checkmark",
+                                       description: Text("Old versions and deleted files appear here after your first backup."))
+            }
         case .idle, .loading:
-            ProgressView("Reading the archive").frame(maxWidth: .infinity, maxHeight: .infinity)
+            PageState(loading: "Reading the archive")
         case .failed(let why):
-            ContentUnavailableView {
-                Label("Couldn't Read the Archive", systemImage: "exclamationmark.triangle")
-            } description: { Text(why) } actions: {
-                Button("Try Again") { Task { await model.reload() } }
+            PageState {
+                ContentUnavailableView {
+                    Label("Couldn't Read the Archive", systemImage: "exclamationmark.triangle")
+                } description: { Text(why) } actions: {
+                    Button("Try Again") { Task { await model.reload() } }
+                }
             }
         case .loaded(let runs):
             if runs.isEmpty {
-                ContentUnavailableView("Nothing Archived", systemImage: "externaldrive.badge.checkmark",
-                                       description: Text("Changed and deleted files are kept for \(model.selectedSet?.archiveDays ?? 30) days. None are kept right now."))
+                PageState {
+                    ContentUnavailableView("Nothing Archived", systemImage: "externaldrive.badge.checkmark",
+                                           description: Text("Changed and deleted files are kept for \(model.selectedSet?.archiveDays ?? 30) days. None are kept right now."))
+                }
             } else {
                 List(selection: $focused) {
                     ForEach(runs) { run in
@@ -604,43 +642,41 @@ struct ArchiveView: View {
         let results = model.results
         if results.matches.hits.isEmpty, results.unreadable.isEmpty {
             if results.isReading || results.query != model.query {
-                ProgressView("Searching the archive").frame(maxWidth: .infinity, maxHeight: .infinity)
+                PageState(loading: "Searching the archive")
             } else {
-                ContentUnavailableView.search(text: model.query)
+                PageState { ContentUnavailableView.search(text: model.query) }
             }
         } else {
-            VStack(spacing: 0) {
+            List {
+                // A row, so that the results start right under the toolbar and this scrolls with them.
                 HStack {
                     if results.isReading { ProgressView().controlSize(.small) }
                     Text(results.status).font(.callout).foregroundStyle(.secondary).lineLimit(1)
-                    Spacer()
                 }
-                .padding(.horizontal).padding(.vertical, 8)
+                .listRowSeparator(.hidden)
                 .accessibilityElement(children: .combine)
-                List {
-                    if !results.unreadable.isEmpty {
-                        Section {
-                            ForEach(results.unreadable) { unreadable in
-                                VStack(alignment: .leading, spacing: 0) {
-                                    Label(unreadable.destinationName, systemImage: "exclamationmark.triangle")
-                                    Text(unreadable.text).font(.caption).foregroundStyle(.secondary)
-                                }
-                                .accessibilityElement(children: .combine)
+                if !results.unreadable.isEmpty {
+                    Section {
+                        ForEach(results.unreadable) { unreadable in
+                            VStack(alignment: .leading, spacing: 0) {
+                                Label(unreadable.destinationName, systemImage: "exclamationmark.triangle")
+                                Text(unreadable.text).font(.caption).foregroundStyle(.secondary)
                             }
-                        } header: {
-                            HStack {
-                                Text("Not searched")
-                                Spacer()
-                                Button("Try Again") { model.retryUnreadable() }
-                                    .accessibilityHint("Reads these destinations again")
-                            }
+                            .accessibilityElement(children: .combine)
+                        }
+                    } header: {
+                        HStack {
+                            Text("Not searched")
+                            Spacer()
+                            Button("Try Again") { model.retryUnreadable() }
+                                .accessibilityHint("Reads these destinations again")
                         }
                     }
-                    if results.matches.hits.isEmpty {
-                        Text(results.nothingFoundNote).foregroundStyle(.secondary)
-                    } else {
-                        Section { ForEach(results.matches.hits) { row($0) } }
-                    }
+                }
+                if results.matches.hits.isEmpty {
+                    Text(results.nothingFoundNote).foregroundStyle(.secondary)
+                } else {
+                    Section { ForEach(results.matches.hits) { row($0) } }
                 }
             }
         }
@@ -670,40 +706,27 @@ struct ArchiveView: View {
     }
 
     @ViewBuilder private var latest: some View {
-        VStack(spacing: 0) {
-            HStack {
-                if !model.folder.isEmpty {
-                    Button { Task { await model.goUp(to: model.folder.count - 1) } } label: { Label("Back", systemImage: "chevron.left") }
-                        .accessibilityHint("Goes up one folder")
-                }
-                Text(((model.selectedSet.map { [$0.name] } ?? []) + model.folder).joined(separator: " / "))
-                    .lineLimit(1).truncationMode(.head).foregroundStyle(.secondary)
-                Spacer()
-                Button(model.folder.isEmpty ? "Restore Whole Set…" : "Restore This Folder…") {
-                    Task { await model.restoreLatest(nil, chooseLocation: chooseLocation) }
-                }
-                .disabled(model.selectedDestination == nil)
-                .accessibilityHint("Asks where to put the restored copy")
-            }
-            .padding(.horizontal).padding(.bottom, 8)
-            switch model.latest {
-            case .idle where model.sets.isEmpty:
+        switch model.latest {
+        case .idle where model.sets.isEmpty:
+            PageState {
                 ContentUnavailableView("No Backup Yet", systemImage: "externaldrive.badge.checkmark",
                                        description: Text("Your backed-up folders appear here after your first backup."))
-            case .idle, .loading:
-                ProgressView("Reading the backup").frame(maxWidth: .infinity, maxHeight: .infinity)
-            case .failed(let why):
+            }
+        case .idle, .loading:
+            PageState(loading: "Reading the backup")
+        case .failed(let why):
+            PageState {
                 ContentUnavailableView {
                     Label("Couldn't Read the Backup", systemImage: "exclamationmark.triangle")
                 } description: { Text(why) } actions: {
                     Button("Try Again") { Task { await model.reloadLatest() } }
                 }
-            case .loaded(let items):
-                if items.isEmpty {
-                    ContentUnavailableView("Nothing Here", systemImage: "folder")
-                } else {
-                    List(items) { latestRow($0) }
-                }
+            }
+        case .loaded(let items):
+            if items.isEmpty {
+                PageState { ContentUnavailableView("Nothing Here", systemImage: "folder") }
+            } else {
+                List(items) { latestRow($0) }
             }
         }
     }
@@ -729,18 +752,15 @@ struct ArchiveView: View {
     }
 
     private func reminder(_ d: Destination) -> some View {
-        HStack {
+        PageBanner {
             Label("Time to test your Recovery Kit for \(d.name)", systemImage: "key.horizontal")
-            Spacer()
+            Spacer(minLength: PageLayout.bannerGap)
             Button("Test Now…") { openDrill() }.disabled(agent == nil)
         }
-        .padding(.horizontal).padding(.vertical, 8)
-        .background(.bar)
-        .accessibilityElement(children: .combine)
     }
 
     private var restoreBar: some View {
-        HStack {
+        PageBanner {
             switch model.restoreState {
             case .restoring(let n):
                 ProgressView().controlSize(.small)
@@ -753,13 +773,10 @@ struct ArchiveView: View {
             case .idle:
                 EmptyView()
             }
-            Spacer()
+            Spacer(minLength: PageLayout.bannerGap)
             if case .restoring = model.restoreState {} else { Button("Dismiss") { model.dismissRestoreState() } }
         }
         .font(.callout)
-        .padding(.horizontal).padding(.vertical, 8)
-        .background(.bar)
-        .accessibilityElement(children: .contain)
     }
 }
 
