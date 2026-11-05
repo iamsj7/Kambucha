@@ -21,4 +21,7 @@ mkdir -p "$dir/extracted"
 unzip -q -o "$zip" -d "$dir/extracted"
 cp "$dir/extracted/rclone-${VERSION}-osx-arm64/rclone" "$dir/rclone"
 chmod +x "$dir/rclone"
+# The release zip has no COPYING file. Its README carries the licence as its own section, and that zip is checksummed above.
+sed -n '/^License$/,/^Authors and contributors$/p' "$dir/extracted/rclone-${VERSION}-osx-arm64/README.txt" | sed '$d' > "$dir/LICENSE.txt"
+grep -q 'Permission is hereby granted' "$dir/LICENSE.txt" || { echo "no licence text found in rclone's README" >&2; exit 1; }
 echo "$dir/rclone"

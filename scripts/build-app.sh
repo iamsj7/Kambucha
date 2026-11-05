@@ -2,7 +2,7 @@
 set -euo pipefail
 cd "${0:A:h}/.."
 IDENTITY="$(scripts/signing-identity.sh)"
-[[ -x vendor/rclone/rclone ]] || { echo "run scripts/fetch-rclone.sh first" >&2; exit 1; }
+[[ -x vendor/rclone/rclone && -f vendor/rclone/LICENSE.txt ]] || { echo "run scripts/fetch-rclone.sh first" >&2; exit 1; }
 
 # Default build has no proof code. --proofs compiles the --probe* modes and --register-agent (Gate 1 only).
 flags=()
@@ -13,10 +13,11 @@ swift build -c release --arch arm64 "${scratch[@]}" "${flags[@]}"
 bin="$(swift build -c release --arch arm64 "${scratch[@]}" --show-bin-path)"
 app="${KAMBUCHA_DIST:-${PWD}/dist}/Kambucha.app"
 rm -rf "$app"
-mkdir -p "$app/Contents/MacOS" "$app/Contents/Helpers" "$app/Contents/Library/LaunchAgents" "$app/Contents/Resources"
+mkdir -p "$app/Contents/MacOS" "$app/Contents/Helpers" "$app/Contents/Library/LaunchAgents" "$app/Contents/Resources/ThirdPartyLicenses"
 cp "$bin/Kambucha" "$app/Contents/MacOS/Kambucha"
 cp "$bin/KambuchaAgent" "$app/Contents/MacOS/KambuchaAgent"
 cp vendor/rclone/rclone "$app/Contents/Helpers/rclone"
+cp vendor/rclone/LICENSE.txt "$app/Contents/Resources/ThirdPartyLicenses/rclone.txt"
 # SwiftPM resource bundle (presets.json); Bundle.module finds it in Contents/Resources
 cp -R "$bin/Kambucha_KambuchaCore.bundle" "$app/Contents/Resources/"
 cp Resources/Info.plist "$app/Contents/Info.plist"

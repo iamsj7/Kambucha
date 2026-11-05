@@ -1,4 +1,5 @@
 import SwiftUI
+import AppKit
 import ServiceManagement
 import KambuchaCore
 
@@ -97,6 +98,14 @@ struct SettingsView: View {
             } header: { Text("Performance") } footer: {
                 Text("Scheduled backups run quietly at background priority. Full Speed uses normal priority with more files at once (4 transfers, 8 checks), so it finishes sooner and uses more of your Mac and network. Back Up Now and backups to an external drive always run at normal priority.")
             }
+
+            Section {
+                Button("Kambucha uses rclone, MIT License") {
+                    NSWorkspace.shared.open(KambuchaPaths.rcloneLicense(bundle: Bundle.main.bundleURL))
+                }
+                .buttonStyle(.link)
+                .accessibilityHint("Opens the license")
+            } header: { Text("Credits") }
 
             if let e = model.error {
                 Section { Label(e, systemImage: "exclamationmark.triangle").font(.callout) }

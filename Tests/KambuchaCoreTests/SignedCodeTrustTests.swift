@@ -165,6 +165,19 @@ private func runScript(_ name: String, environment: [String: String]) throws -> 
         #expect(verify.contains(#"symbols="$(nm -u"#))   // a failed nm must not read as "no references"
     }
 
+    @Test func theRcloneLicenseShipsWhereSettingsLooks() throws {
+        let path = String(KambuchaPaths.rcloneLicense(bundle: URL(fileURLWithPath: "/A.app")).path.dropFirst("/A.app/".count))
+        let build = try String(contentsOf: repoRoot.appendingPathComponent("scripts/build-app.sh"), encoding: .utf8)
+        let verify = try String(contentsOf: repoRoot.appendingPathComponent("scripts/verify-bundle.sh"), encoding: .utf8)
+        #expect(build.contains("$app/\(path)") && verify.contains("$app/\(path)"))
+    }
+
+    @Test(.enabled(if: hasSignedBundle, noBundle))
+    func theBundleCarriesRclonesNotice() throws {
+        let text = try String(contentsOf: KambuchaPaths.rcloneLicense(bundle: bundle), encoding: .utf8)
+        #expect(text.contains("Permission is hereby granted") && text.contains("Nick Craig-Wood"))
+    }
+
     /// The real check, on this test process's real parent, which isn't Kambucha.app.
     @Test func realCheckRefusesThisTestsParent() {
         #expect(throws: AgentFailure.untrustedCaller) { try SignedCodeTrust().verifyCaller() }

@@ -33,6 +33,11 @@ public enum KambuchaPaths {
     public static func mirrorPath(_ set: BackupSet) -> String { "Sets/\(set.name)" }
     public static func archivePath(_ set: BackupSet, stamp: String) -> String { "Archive/\(set.name)/\(stamp)" }
 
+    /// rclone's MIT notice, which build-app.sh copies into the app.
+    public static func rcloneLicense(bundle: URL) -> URL {
+        bundle.appendingPathComponent("Contents/Resources/ThirdPartyLicenses/rclone.txt")
+    }
+
     public static func support(home: URL = ownerHome) -> URL {
         home.appendingPathComponent("Library/Application Support/Kambucha", isDirectory: true)
     }

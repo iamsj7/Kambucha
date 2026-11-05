@@ -27,6 +27,9 @@ codesign --verify --strict -R="identifier \"com.shaikjaleel.kambucha\" and $pin"
 codesign --verify --strict -R="identifier \"com.shaikjaleel.kambucha.agent\" and $pin" "$app/Contents/MacOS/KambuchaAgent" || fail "agent can't prove its own team"
 codesign --verify --strict -R="identifier \"com.shaikjaleel.kambucha.rclone\" and $pin" "$app/Contents/Helpers/rclone" || fail "rclone doesn't meet the helper requirement"
 
+# rclone ships inside the app, so its MIT notice has to as well.
+grep -q 'Permission is hereby granted' "$app/Contents/Resources/ThirdPartyLicenses/rclone.txt" || fail "rclone's licence is missing"
+
 # Keychain rule: only KambuchaAgent may touch it.
 symbols="$(nm -u "$app/Contents/MacOS/Kambucha")" || fail "nm failed on Kambucha"
 [[ -n "$symbols" ]] || fail "nm found no symbols in Kambucha"
