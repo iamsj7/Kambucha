@@ -281,8 +281,10 @@ struct SetBatchActions: View {
 /// The detail pane while more than one set is selected.
 struct SeveralSetsView: View {
     let model: AppModel
-    /// In the sidebar's order.
+    /// By name: these are buttons, and the hold that keeps the sidebar still doesn't reach here.
     let rows: [SetRow]
+    /// How many of them the filter is hiding in the sidebar. The actions here still reach those.
+    var hidden = 0
     var select: (SidebarItem) -> Void
 
     var body: some View {
@@ -292,6 +294,7 @@ struct SeveralSetsView: View {
                 VStack(alignment: .leading, spacing: 2) {
                     Text("\(rows.count.formatted()) Sets Selected").font(.title2.weight(.semibold))
                     if let summary { Text(summary).foregroundStyle(.secondary) }
+                    if let note = SetBatch.hiddenNote(count: hidden) { Text(note).foregroundStyle(.secondary) }
                 }
                 .accessibilityElement(children: .combine)
             }

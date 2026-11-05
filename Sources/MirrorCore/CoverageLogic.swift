@@ -6,14 +6,15 @@ import Foundation
 
 extension StatusSummary {
     /// Each pair judged by `overall` and `withPreviewNeeded` as if it were a set with that one destination, so a cell
-    /// can't disagree with its set's row. A trouble with the agent as a whole belongs to no pair, so it's left out.
-    /// `running` holds the pairs moving files now. Destinations no longer known have no column, so they get no entry.
+    /// can't disagree with its set's row. A trouble with the agent as a whole belongs to no pair, so what a pair says of
+    /// itself stands, except "Backed Up": no cell claims that while Mirror can't run. `running` holds the pairs moving files now. Destinations no longer known have no column, so they get no entry.
     public static func pairStatuses(sets: [BackupSet], destinations: [Destination], states: [PairID: SetState],
                                     records: [RunRecord], problems: [ActiveProblem], running: Set<PairID>,
                                     disconnected: Set<UUID>) -> [PairID: OverallStatus] {
         let known = Dictionary(destinations.map { ($0.id, $0) }, uniquingKeysWith: { a, _ in a })
         let recordsByPair = Dictionary(grouping: records) { PairID(set: $0.setID, destination: $0.destinationID) }
         let problemsByPair = Dictionary(grouping: problems, by: \.pair)
+        let agentProblem = problemsByPair[.agent]?.first
         var out: [PairID: OverallStatus] = [:]
         for s in sets {
             for id in s.destinationIDs {
@@ -24,8 +25,20 @@ extension StatusSummary {
                 let status = overall(sets: [alone], destinations: [d], states: states, records: recordsByPair[pair] ?? [],
                                      problems: problemsByPair[pair] ?? [], running: running.contains(pair),
                                      disconnected: disconnected.contains(id) ? [id] : [])
-                out[pair] = withPreviewNeeded(status, sets: [alone])
+                let judged = withPreviewNeeded(status, sets: [alone])
+                if case .backedUp = judged, let agentProblem { out[pair] = .attention(agentProblem.problem.headline) }
+                else { out[pair] = judged }
             }
+        }
+        return out
+    }
+
+    /// A pair turned back on has only an old finish to go by, so it reads as owing a run until one finishes after
+    /// `turnedOn`. For reading only: in a state file `wholeSetOwed` would change what the agent's next run does.
+    public static func withTurnedOn(_ states: [PairID: SetState], turnedOn: [PairID: Date]) -> [PairID: SetState] {
+        var out = states
+        for (pair, since) in turnedOn {
+            if let last = out[pair]?.lastFinished, last <= since { out[pair]?.wholeSetOwed = true }
         }
         return out
     }
@@ -207,6 +220,11 @@ public struct SetBatch: Equatable, Sendable {
         if attention > 0 { parts.append("\(attention.formatted()) \(attention == 1 ? "needs" : "need") attention") }
         if paused > 0 { parts.append("\(paused.formatted()) paused") }
         return parts.isEmpty ? nil : parts.joined(separator: ", ")
+    }
+
+    /// Or nil, with none hidden.
+    public static func hiddenNote(count: Int) -> String? {
+        count > 0 ? "\(count.formatted()) hidden by the filter" : nil
     }
 
     public static func removalTitle(count: Int) -> String { "Remove \(count.formatted()) Sets?" }

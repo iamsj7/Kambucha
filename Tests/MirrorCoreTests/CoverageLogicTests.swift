@@ -56,11 +56,30 @@ private func statuses(_ sets: [BackupSet], _ ds: [Destination], _ states: [PairI
         #expect(out[b] == .attention(Problem.repeatedFailures.headline))
     }
 
-    @Test func theAgentFailingBelongsToNoPair() {
+    @Test func noPairSaysBackedUpWhileMirrorCanNotRun() {
+        let s = accepted("A", [icloud, drive])
+        let p = PairID(set: s.id, destination: icloud.id), q = PairID(set: s.id, destination: drive.id)
+        let failed = ActiveProblem(problem: .agentFailed, pair: .agent, setName: "", detail: "", since: now)
+        let out = statuses([s], [icloud, drive], [p: finished(), q: finished { $0.pendingUploads = 3 }], problems: [failed])
+        #expect(out[p] == .attention(Problem.agentFailed.headline))
+        #expect(out[q] == .uploading(3))
+    }
+
+    @Test func aPairTurnedBackOnOwesARunUntilOneFinishes() {
         let s = accepted("A", [icloud])
         let p = PairID(set: s.id, destination: icloud.id)
-        let failed = ActiveProblem(problem: .agentFailed, pair: .agent, setName: "", detail: "", since: now)
-        #expect(statuses([s], [icloud], [p: finished()], problems: [failed])[p] == .backedUp(last: now, files: 10))
+        let turnedOn = [p: now.addingTimeInterval(60)]
+        #expect(statuses([s], [icloud], StatusSummary.withTurnedOn([p: finished()], turnedOn: turnedOn))[p] == .unfinished)
+        let later = finished { $0.lastFinished = now.addingTimeInterval(120) }
+        #expect(statuses([s], [icloud], StatusSummary.withTurnedOn([p: later], turnedOn: turnedOn))[p]
+                == .backedUp(last: now.addingTimeInterval(120), files: 10))
+    }
+
+    @Test func aPairThatNeverFinishedStillReadsAsNotBackedUpWhenTurnedOn() {
+        let s = accepted("A", [icloud])
+        let p = PairID(set: s.id, destination: icloud.id)
+        let states = StatusSummary.withTurnedOn([p: SetState()], turnedOn: [p: now])
+        #expect(statuses([s], [icloud], states)[p] == .attention("Not backed up yet"))
     }
 
     @Test func onlyThePairMovingFilesSaysSo() {
@@ -293,5 +312,11 @@ private struct Item: Identifiable { var id: UUID }
         #expect(SetBatch.summary(attention: 1, paused: 0) == "1 needs attention")
         #expect(SetBatch.summary(attention: 2, paused: 3) == "2 need attention, 3 paused")
         #expect(SetBatch.summary(attention: 0, paused: 0) == nil)
+    }
+
+    @Test func selectedSetsTheFilterHidesAreCounted() {
+        #expect(SetBatch.hiddenNote(count: 0) == nil)
+        #expect(SetBatch.hiddenNote(count: 1) == "1 hidden by the filter")
+        #expect(SetBatch.hiddenNote(count: 2) == "2 hidden by the filter")
     }
 }

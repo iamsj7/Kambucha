@@ -9,6 +9,22 @@ struct SetRow: Identifiable, Equatable {
     var name: String
     var isPaused: Bool
     var status: OverallStatus
+    /// Whether `status` would need attention with no run under way. A run reads as running ahead of what's owed here.
+    var attentionWhenIdle: Bool
+}
+
+extension SetRow {
+    /// Judged as if idle, or sets needing the owner would sink for as long as any backup runs.
+    var sortKey: SetSortKey { SetSortKey(id: id, name: name, needsAttention: attentionWhenIdle) }
+}
+
+extension Array where Element == SetRow {
+    /// By name alone, so a change of status can't move a row as it's clicked.
+    var byName: [SetRow] {
+        var order = SetOrder()
+        order.update(map { SetSortKey(id: $0.id, name: $0.name, needsAttention: false) }, held: false)
+        return order.arranged(self)
+    }
 }
 
 /// One live progress line for the panel.
@@ -30,16 +46,17 @@ private struct Snapshot: Sendable {
     var running: Bool
 
     /// `volumes` is nil until the first read of the mounted drives: no drive is called away on a guess.
-    static func load(support: URL, volumes: [VolumeInfo]?) -> Snapshot? {
+    static func load(support: URL, volumes: [VolumeInfo]?, turnedOn: [PairID: Date] = [:]) -> Snapshot? {
         let store = ConfigStore(root: support)
         guard let sets = try? store.loadSets(), let destinations = try? store.loadDestinations() else { return nil }
-        var states: [PairID: SetState] = [:]
+        var saved: [PairID: SetState] = [:]
         for s in sets {
             for d in s.destinationIDs {
                 let p = PairID(set: s.id, destination: d)
-                if let st = try? store.state(for: p) { states[p] = st }
+                if let st = try? store.state(for: p) { saved[p] = st }
             }
         }
+        let states = StatusSummary.withTurnedOn(saved, turnedOn: turnedOn)
         // `overall` ignores skipped runs, so they must not crowd real ones out of the 200.
         let records = (try? RunRecordStore(root: support).recent(limit: 200, matching: RunFilter())) ?? []
         let problems = (try? ProblemCenter(root: support, notifier: NoNotifier()).active()) ?? []
@@ -52,14 +69,17 @@ private struct Snapshot: Sendable {
             return ProgressItem(label: dest.map { "\(set.name) to \($0)" } ?? set.name, progress: p)
         }.sorted { $0.label < $1.label }
         let disconnected = volumes.map { ExternalVolume.disconnected(destinations, in: $0) } ?? []
-        func overall(_ ss: [BackupSet]) -> OverallStatus {
-            StatusSummary.overall(sets: ss, destinations: destinations, states: states,
-                                  records: records, problems: problems, running: running, disconnected: disconnected)
+        func judged(_ ss: [BackupSet], running: Bool) -> OverallStatus {
+            let status = StatusSummary.overall(sets: ss, destinations: destinations, states: states, records: records,
+                                               problems: problems, running: running, disconnected: disconnected)
+            return StatusSummary.withPreviewNeeded(status, sets: ss)
         }
-        func needsPreview(_ ss: [BackupSet]) -> OverallStatus { StatusSummary.withPreviewNeeded(overall(ss), sets: ss) }
-        return Snapshot(sets: sets, status: needsPreview(sets),
-                        rows: sets.map { SetRow(id: $0.id, name: $0.name, isPaused: $0.isPaused,
-                                                status: $0.isPaused ? .paused : needsPreview([$0])) },
+        func row(_ s: BackupSet) -> SetRow {
+            let status = s.isPaused ? OverallStatus.paused : judged([s], running: running)
+            let idle = running && !s.isPaused ? judged([s], running: false) : status
+            return SetRow(id: s.id, name: s.name, isPaused: s.isPaused, status: status, attentionWhenIdle: idle.needsAttention)
+        }
+        return Snapshot(sets: sets, status: judged(sets, running: running), rows: sets.map(row),
                         destinations: destinations, states: states,
                         pairStatus: StatusSummary.pairStatuses(sets: sets, destinations: destinations, states: states, records: records,
                                                                problems: problems, running: Set(live.map(\.pair)), disconnected: disconnected),
@@ -110,8 +130,15 @@ final class AppModel {
     @ObservationIgnored private nonisolated(unsafe) var watchers: [String: DispatchSourceFileSystemObject] = [:]
     @ObservationIgnored private var generation = 0
     @ObservationIgnored private var process: Process?
+    /// Next to the app binary, never derived from argv. Tests point it at a stand-in.
+    @ObservationIgnored var agentExecutable = Bundle.main.bundleURL.appendingPathComponent("Contents/MacOS/MirrorAgent")
     @ObservationIgnored private var runQueue = RunQueue()
     @ObservationIgnored private var surfaces = SurfaceVisibility()
+    /// When each pair was last turned on. Kept here and not in its state file, which is the agent's: there `wholeSetOwed`
+    /// would widen the next run. A relaunch forgets it, and the pair reads as its state does.
+    @ObservationIgnored private var turnedOn: [PairID: Date] = [:]
+    /// The sets Pause Backups paused, so Resume Backups leaves any paused on their own.
+    @ObservationIgnored private var pausedTogether: Set<UUID> = []
     private var agentRunning = false
     @ObservationIgnored private var poller: Task<Void, Never>?
 
@@ -151,9 +178,11 @@ final class AppModel {
     func refresh() {
         generation += 1
         let mine = generation
-        let support = support, volumes = loadedVolumes
+        let support = support, volumes = loadedVolumes, turnedOn = turnedOn
         Task { [weak self] in
-            let snap = await Task.detached(priority: .utility) { Snapshot.load(support: support, volumes: volumes) }.value
+            let snap = await Task.detached(priority: .utility) {
+                Snapshot.load(support: support, volumes: volumes, turnedOn: turnedOn)
+            }.value
             guard let self, mine == self.generation else { return }
             if let snap { self.apply(snap) } else { self.status = .attention("Mirror could not read its settings") }
             self.attachMissingWatchers()
@@ -163,7 +192,7 @@ final class AppModel {
 
     /// Reads state now, for a change made outside this model that the next line depends on.
     func reload() {
-        if let snap = Snapshot.load(support: support, volumes: loadedVolumes) { apply(snap) }
+        if let snap = Snapshot.load(support: support, volumes: loadedVolumes, turnedOn: turnedOn) { apply(snap) }
     }
 
     private var loadedVolumes: [VolumeInfo]? { volumeCache.hasLoaded ? volumeCache.volumes : nil }
@@ -177,7 +206,21 @@ final class AppModel {
 
     /// Asks for a run of `set` now, or as soon as the one under way ends.
     func runSoon(_ set: UUID) {
-        if isBackupActive { if !queuedRuns.contains(set) { queuedRuns.append(set) } } else { runNow(set) }
+        if runsMustWait { enqueue([set]) } else { runNow(set) }
+    }
+
+    /// A batch counts until its last set has gone, as its agent's exit may not have reached this model yet.
+    private var runsMustWait: Bool { isBackupActive || !runQueue.waiting.isEmpty }
+
+    private func enqueue(_ ids: [UUID]) {
+        for id in ids where !queuedRuns.contains(id) && !runQueue.waiting.contains(id) { queuedRuns.append(id) }
+    }
+
+    /// Asked for while another backup is under way. That one's queue is left alone, and these follow it.
+    private func runAfterwards(_ ids: [UUID]) {
+        guard !ids.isEmpty else { return }
+        enqueue(ids)
+        lastError = [lastError, Self.queuedText].compactMap(\.self).joined(separator: " ")
     }
 
     /// Every state load comes here, and the end of any run, launchd's included, changes the folders being watched.
@@ -234,13 +277,14 @@ final class AppModel {
         lastError = nil
         // Starting a run while a drive unmounts could write to a drive that is going away.
         guard !eject.isEjecting else { lastError = "A drive is being ejected. Start the backup when it finishes."; return }
-        runQueue.start(.all)
         // No backup for a set starts until its preview was accepted once (spec section 9).
         // Accepted sets still run; the others are named so the owner can preview them.
         let plan = RunNowPlan.make(sets: sets, target: set, isAccepted: \.isPreviewAccepted)
         if !plan.unaccepted.isEmpty {
             lastError = "Preview before the first backup: \(plan.unaccepted.joined(separator: ", ")). Open each in Mirror and choose Preview Backup."
         }
+        if runsMustWait { runAfterwards(plan.run); return }
+        runQueue.start(.all)
         guard !plan.run.isEmpty else { return }
         if set == nil && plan.unaccepted.isEmpty {
             launchAgent(["--run-now"])
@@ -251,31 +295,37 @@ final class AppModel {
     }
 
     func setPaused(_ paused: Bool) {
-        lastError = nil
         var updated = sets
-        for i in updated.indices { updated[i].isPaused = paused }
-        do { try store.saveSets(updated); refresh() }
-        catch { lastError = "Mirror could not save the pause setting." }
+        if paused {
+            pausedTogether.formUnion(sets.filter { !$0.isPaused }.map(\.id))
+            for i in updated.indices { updated[i].isPaused = true }
+        } else {
+            // With no record, as after a relaunch, Resume is all there is to go on.
+            let chosen = pausedTogether.intersection(sets.map(\.id))
+            for i in updated.indices where chosen.isEmpty || chosen.contains(updated[i].id) { updated[i].isPaused = false }
+            pausedTogether = []
+        }
+        commit(updated, failure: Self.pauseFailedText)
     }
 
     /// Several sets, one after the other. Paused sets stay out, as Back Up Now is off for them on their own page.
     func runNow(sets ids: Set<UUID>) {
         lastError = nil
         guard !eject.isEjecting else { lastError = "A drive is being ejected. Start the backup when it finishes."; return }
-        runQueue.start(.all)
         let plan = SetBatch(sets: sets.filter { ids.contains($0.id) }).runPlan
         lastError = SetBatch.runNotice(plan)
+        if runsMustWait { runAfterwards(plan.run); return }
+        runQueue.start(.all)
         guard !plan.run.isEmpty else { return }
         runQueue.start(.sets(plan.run))
         if let id = runQueue.first { launchAgent(["--run-now", id.uuidString]) }
     }
 
     func setPaused(_ paused: Bool, sets ids: Set<UUID>) {
-        lastError = nil
         var updated = sets
         for i in updated.indices where ids.contains(updated[i].id) { updated[i].isPaused = paused }
-        do { try store.saveSets(updated); refresh() }
-        catch { lastError = "Mirror could not save the pause setting." }
+        pausedTogether.subtract(ids)
+        commit(updated, failure: Self.pauseFailedText)
     }
 
     /// Opens the deletion review. Approving deletions needs the owner to see the list first.
@@ -284,6 +334,8 @@ final class AppModel {
     func keepHolding() { reviewingSet = nil; reviewNotice = nil }
 
     static let busyText = "A backup is running. Try again shortly."
+    static let queuedText = "A backup is running. The next one starts when it finishes."
+    private static let pauseFailedText = "Mirror could not save the pause setting."
 
     /// Launches the agent with the count the owner reviewed; it holds again if the list has grown. False, with the
     /// review left open, while a run holds the lock: the agent couldn't take this, and the approval mustn't vanish.
@@ -309,6 +361,7 @@ final class AppModel {
     func save(set updated: BackupSet) {
         var all = sets
         if let i = all.firstIndex(where: { $0.id == updated.id }) { all[i] = updated } else { all.append(updated) }
+        noteTurnedOn(all)
         persist { try store.saveSets(all) }
     }
 
@@ -318,14 +371,16 @@ final class AppModel {
 
     /// The same change as the switch on the set's page, and saved the same way.
     func setDestination(_ destination: UUID, on: Bool, for setID: UUID) {
-        guard let s = set(setID) else { return }
-        save(set: s.withDestination(destination, on: on))
+        let updated = sets.map { $0.id == setID ? $0.withDestination(destination, on: on) : $0 }
+        noteTurnedOn(updated)
+        commit(updated)
     }
 
     /// One save for all of them, as each save reads every pair's state again.
     func addDestination(_ destination: UUID, to ids: Set<UUID>) {
         let updated = sets.map { ids.contains($0.id) ? $0.withDestination(destination, on: true) : $0 }
-        persist { try store.saveSets(updated) }
+        noteTurnedOn(updated)
+        commit(updated)
     }
 
     func removeSets(_ ids: Set<UUID>) {
@@ -365,6 +420,25 @@ final class AppModel {
         refresh()
     }
 
+    /// For a click that may be one of many. `sets` changes now, so the next edit builds on it, and what's judged from
+    /// every state file follows from the background read.
+    private func commit(_ updated: [BackupSet], failure: String = "Mirror could not save your changes.") {
+        lastError = nil
+        do { try store.saveSets(updated) } catch { lastError = failure; return }
+        sets = updated
+        try? ProblemCenter(root: support, notifier: NoNotifier()).retain(pairs: BackupSet.pairs(of: sets))
+        refresh()
+    }
+
+    /// Call before `sets` changes. A new set has no earlier copy to fall behind, so only sets already here count.
+    private func noteTurnedOn(_ updated: [BackupSet]) {
+        let now = Date()
+        for s in updated {
+            guard let before = set(s.id) else { continue }
+            for d in s.destinationIDs where !before.destinationIDs.contains(d) { turnedOn[PairID(set: s.id, destination: d)] = now }
+        }
+    }
+
     /// The first set that has deletions held, for the Review Deletions action.
     var heldSet: SetRow? { rows.first { if case .held = $0.status { true } else { false } } }
 
@@ -376,9 +450,8 @@ final class AppModel {
             lastError = "A backup is already running. Try again when it finishes."
             return
         }
-        let exe = Bundle.main.bundleURL.appendingPathComponent("Contents/MacOS/MirrorAgent")
         let p = Process()
-        p.executableURL = exe
+        p.executableURL = agentExecutable
         p.arguments = arguments
         let err = Pipe()
         let buffer = BoundedBuffer()
@@ -403,7 +476,10 @@ final class AppModel {
             }
         }
         do { try p.run(); process = p }
-        catch { lastError = "Mirror could not start a backup: \(error.localizedDescription)" }
+        catch {
+            runQueue.start(.all)   // no exit is coming to move it on
+            lastError = "Mirror could not start a backup: \(error.localizedDescription)"
+        }
     }
 
     /// `reviewing` is the set whose approval this launch carried. A launchd run can take the lock between the
