@@ -25,6 +25,7 @@ private struct Snapshot: Sendable {
     var rows: [SetRow]
     var destinations: [Destination]
     var states: [PairID: SetState]
+    var pairStatus: [PairID: OverallStatus]
     var progress: [ProgressItem]
     var running: Bool
 
@@ -59,7 +60,10 @@ private struct Snapshot: Sendable {
         return Snapshot(sets: sets, status: needsPreview(sets),
                         rows: sets.map { SetRow(id: $0.id, name: $0.name, isPaused: $0.isPaused,
                                                 status: $0.isPaused ? .paused : needsPreview([$0])) },
-                        destinations: destinations, states: states, progress: items, running: running)
+                        destinations: destinations, states: states,
+                        pairStatus: StatusSummary.pairStatuses(sets: sets, destinations: destinations, states: states, records: records,
+                                                               problems: problems, running: Set(live.map(\.pair)), disconnected: disconnected),
+                        progress: items, running: running)
     }
 }
 
@@ -83,6 +87,8 @@ final class AppModel {
     private(set) var status: OverallStatus = .notConfigured
     private(set) var destinations: [Destination] = []
     private(set) var states: [PairID: SetState] = [:]
+    /// Each set at each of its destinations, judged as `rows` are.
+    private(set) var pairStatus: [PairID: OverallStatus] = [:]
     private(set) var progress: [ProgressItem] = []
     /// Mounted drives, read off the main thread and refreshed when the system mounts or unmounts one.
     @ObservationIgnored let volumeCache: VolumeCache
@@ -165,7 +171,7 @@ final class AppModel {
     private func apply(_ snap: Snapshot) {
         sets = snap.sets; rows = snap.rows; status = snap.status; progress = snap.progress
         agentRunning = snap.running
-        destinations = snap.destinations; states = snap.states
+        destinations = snap.destinations; states = snap.states; pairStatus = snap.pairStatus
         startQueuedRun()
     }
 
@@ -252,6 +258,26 @@ final class AppModel {
         catch { lastError = "Mirror could not save the pause setting." }
     }
 
+    /// Several sets, one after the other. Paused sets stay out, as Back Up Now is off for them on their own page.
+    func runNow(sets ids: Set<UUID>) {
+        lastError = nil
+        guard !eject.isEjecting else { lastError = "A drive is being ejected. Start the backup when it finishes."; return }
+        runQueue.start(.all)
+        let plan = SetBatch(sets: sets.filter { ids.contains($0.id) }).runPlan
+        lastError = SetBatch.runNotice(plan)
+        guard !plan.run.isEmpty else { return }
+        runQueue.start(.sets(plan.run))
+        if let id = runQueue.first { launchAgent(["--run-now", id.uuidString]) }
+    }
+
+    func setPaused(_ paused: Bool, sets ids: Set<UUID>) {
+        lastError = nil
+        var updated = sets
+        for i in updated.indices where ids.contains(updated[i].id) { updated[i].isPaused = paused }
+        do { try store.saveSets(updated); refresh() }
+        catch { lastError = "Mirror could not save the pause setting." }
+    }
+
     /// Opens the deletion review. Approving deletions needs the owner to see the list first.
     func allowDeletes(_ set: UUID) { lastError = nil; reviewNotice = nil; reviewingSet = set }
 
@@ -288,6 +314,22 @@ final class AppModel {
 
     func removeSet(_ id: UUID) {
         persist { try store.saveSets(sets.filter { $0.id != id }) }
+    }
+
+    /// The same change as the switch on the set's page, and saved the same way.
+    func setDestination(_ destination: UUID, on: Bool, for setID: UUID) {
+        guard let s = set(setID) else { return }
+        save(set: s.withDestination(destination, on: on))
+    }
+
+    /// One save for all of them, as each save reads every pair's state again.
+    func addDestination(_ destination: UUID, to ids: Set<UUID>) {
+        let updated = sets.map { ids.contains($0.id) ? $0.withDestination(destination, on: true) : $0 }
+        persist { try store.saveSets(updated) }
+    }
+
+    func removeSets(_ ids: Set<UUID>) {
+        persist { try store.saveSets(sets.filter { !ids.contains($0.id) }) }
     }
 
     func save(destination updated: Destination) {

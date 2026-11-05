@@ -6,6 +6,7 @@ import MirrorCore
 /// `ArchiveView` and `ActivityView` by editing only `MainWindow.detail`.
 enum SidebarItem: Hashable {
     case overview
+    case coverage
     case set(UUID)
     case destination(UUID)
     case archive
@@ -13,11 +14,59 @@ enum SidebarItem: Hashable {
     case settings
 }
 
+/// What's selected in the sidebar. Several rows can be, but only sets: anything else is one place to go.
+struct SidebarSelection: Equatable {
+    private(set) var items: Set<SidebarItem>
+
+    /// What the detail pane shows.
+    enum Content: Equatable {
+        case one(SidebarItem)
+        case several(Set<UUID>)
+    }
+
+    init(_ item: SidebarItem = .overview) { items = [item] }
+
+    /// Selects by id, so nothing here depends on where a row sits in the list.
+    init(sets: Set<UUID>) { items = Set(sets.map(SidebarItem.set)) }
+
+    mutating func select(_ item: SidebarItem) { items = [item] }
+
+    static func setIDs(in items: Set<SidebarItem>) -> Set<UUID> {
+        Set(items.compactMap { if case .set(let id) = $0 { id } else { nil } })
+    }
+
+    var setIDs: Set<UUID> { Self.setIDs(in: items) }
+
+    /// A change from the list. Command-clicking something else moves there, and a shift-click across sections keeps
+    /// the sets it covered.
+    mutating func change(to new: Set<SidebarItem>) {
+        let sets = Self.setIDs(in: new)
+        if new.count <= 1 || sets.count == new.count { items = new; return }
+        let added = new.subtracting(items)
+        if added.count == 1, let only = added.first, Self.setIDs(in: added).isEmpty { items = [only] }
+        else if !sets.isEmpty { items = Set(sets.map(SidebarItem.set)) }
+        else if let kept = new.intersection(items).first ?? new.first { items = [kept] }
+    }
+
+    /// `live` holds the sets that still exist. Of several, those that went are dropped.
+    func content(live: Set<UUID>) -> Content {
+        let ids = setIDs
+        guard ids.count > 1 else { return .one(items.first ?? .overview) }
+        let left = ids.intersection(live)
+        if left.count > 1 { return .several(left) }
+        return .one(left.first.map(SidebarItem.set) ?? .overview)
+    }
+}
+
 struct MainWindow: View {
     @Bindable var model: AppModel
     /// The Settings window's model, so the two never hold different copies of what's saved.
     let settings: SettingsModel
-    @State private var selection: SidebarItem? = .overview
+    @State private var selection: SidebarSelection
+    @State private var setOrder = SetOrder()
+    @State private var filter = ""
+    @State private var pointerOverSidebar = false
+    @State private var pointerOverCoverage = false
     @State private var addingSet = false
     @State private var addingDestination = false
     @State private var confirmingRemoval = false
@@ -26,10 +75,14 @@ struct MainWindow: View {
     @State private var activity: ActivityModel
     @State private var onboarding: OnboardingModel
     @State private var firstPreview: ReviewTarget?
+    /// For snapshots, which can't pass the real system checks.
+    private let skipsOnboarding: Bool
 
-    init(model: AppModel, settings: SettingsModel) {
+    init(model: AppModel, settings: SettingsModel, selection: SidebarSelection = SidebarSelection(), skipsOnboarding: Bool = false) {
         self.model = model
         self.settings = settings
+        self.skipsOnboarding = skipsOnboarding
+        _selection = State(initialValue: selection)
         _archive = State(initialValue: ArchiveModel(provider: model.services.archive, store: ConfigStore(root: model.support)))
         _activity = State(initialValue: ActivityModel(support: model.support))
         _onboarding = State(initialValue: OnboardingModel(store: ConfigStore(root: model.support),
@@ -40,14 +93,14 @@ struct MainWindow: View {
         // Onboarding stays until every step is done. Nothing is shown until the first read of those
         // steps finishes, so a finished setup doesn't flash it.
         Group {
-            if onboarding.hasRefreshed && !onboarding.isComplete {
+            if !skipsOnboarding && onboarding.hasRefreshed && !onboarding.isComplete {
                 OnboardingView(model: onboarding)
             } else {
                 split
             }
         }
         .task {
-            while !Task.isCancelled {
+            while !Task.isCancelled && !skipsOnboarding {
                 await onboarding.refresh()
                 try? await Task.sleep(for: .seconds(onboarding.isComplete ? 30 : 2))
             }
@@ -60,7 +113,7 @@ struct MainWindow: View {
             guard let id else { return }
             model.reload()
             onboarding.previewShown()
-            selection = .set(id)
+            selection.select(.set(id))
             firstPreview = ReviewTarget(id: id)
         }
     }
@@ -74,11 +127,14 @@ struct MainWindow: View {
         }
         .frame(minWidth: 760, minHeight: 480)
         .navigationTitle("Mirror")
+        .searchable(text: $filter, placement: .sidebar, prompt: "Filter Sets")
+        .onChange(of: orderKeys, initial: true) { updateOrder() }
+        .onChange(of: pointerOverSets) { updateOrder() }
         .sheet(isPresented: $addingSet) {
-            AddSetFlow(model: model) { id in selection = .set(id) }
+            AddSetFlow(model: model) { id in selection.select(.set(id)) }
         }
         .sheet(isPresented: $addingDestination) {
-            AddDestinationFlow(model: model) { id in selection = .destination(id) }
+            AddDestinationFlow(model: model) { id in selection.select(.destination(id)) }
         }
         .sheet(item: reviewBinding) { item in
             DeletionReviewSheet(model: model, setID: item.id)
@@ -110,15 +166,18 @@ struct MainWindow: View {
     // MARK: Sidebar
 
     private var sidebar: some View {
-        List(selection: $selection) {
+        List(selection: listSelection) {
             Label("Overview", systemImage: "gauge.with.dots.needle.33percent").tag(SidebarItem.overview)
+            Label("Coverage", systemImage: "square.grid.3x3").tag(SidebarItem.coverage)
 
             Section("Backup Sets") {
-                ForEach(model.rows) { row in
+                ForEach(visibleRows) { row in
                     SetSidebarRow(row: row).tag(SidebarItem.set(row.id))
                 }
                 if model.rows.isEmpty {
                     Text("No sets yet").foregroundStyle(.secondary)
+                } else if visibleRows.isEmpty {
+                    Text("No sets match").foregroundStyle(.secondary)
                 }
             }
             Section("Destinations") {
@@ -136,6 +195,11 @@ struct MainWindow: View {
             }
             Label("Settings", systemImage: "gearshape").tag(SidebarItem.settings)
         }
+        .contextMenu(forSelectionType: SidebarItem.self) { items in
+            let ids = SidebarSelection.setIDs(in: items)
+            if !ids.isEmpty { SetBatchActions(model: model, ids: ids) }
+        }
+        .onHover { pointerOverSidebar = $0 }
         .toolbar {
             ToolbarItem {
                 Menu {
@@ -155,23 +219,45 @@ struct MainWindow: View {
         }
     }
 
+    private var listSelection: Binding<Set<SidebarItem>> {
+        Binding(get: { selection.items }, set: { selection.change(to: $0) })
+    }
+
+    // MARK: Order
+
+    /// All that the order depends on, so a refresh that changes only counts and times does nothing.
+    private var orderKeys: [SetSortKey] {
+        model.rows.map { SetSortKey(id: $0.id, name: $0.name, needsAttention: $0.status.needsAttention) }
+    }
+    private var pointerOverSets: Bool { pointerOverSidebar || pointerOverCoverage }
+    private func updateOrder() { setOrder.update(orderKeys, held: pointerOverSets) }
+
+    private var orderedRows: [SetRow] { setOrder.arranged(model.rows) }
+    private var visibleRows: [SetRow] { orderedRows.filter { SetFilter.matches($0.name, filter: filter) } }
+    private var content: SidebarSelection.Content { selection.content(live: Set(model.rows.map(\.id))) }
+
     // MARK: Detail
 
     @ViewBuilder private var detail: some View {
-        switch selection ?? .overview {
-        case .overview:
-            OverviewView(model: model, select: { selection = $0 })
-        case .set(let id):
+        switch content {
+        case .several(let ids):
+            SeveralSetsView(model: model, rows: orderedRows.filter { ids.contains($0.id) }, select: { selection.select($0) })
+        case .one(.overview):
+            OverviewView(model: model, select: { selection.select($0) })
+        case .one(.coverage):
+            CoverageView(model: model, rows: visibleRows, filter: filter, select: { selection.select($0) },
+                         hovering: { pointerOverCoverage = $0 })
+        case .one(.set(let id)):
             if model.set(id) != nil { SetDetailView(model: model, setID: id).id(id) }
             else { ContentUnavailableView("Set Not Found", systemImage: "questionmark.folder") }
-        case .destination(let id):
+        case .one(.destination(let id)):
             if let d = model.destination(id) { DestinationDetailView(model: model, destination: d) }
             else { ContentUnavailableView("Destination Not Found", systemImage: "questionmark.folder") }
-        case .archive:
+        case .one(.archive):
             ArchiveView(model: archive, agent: model.services.agent)
-        case .activity:
+        case .one(.activity):
             ActivityView(model: activity)
-        case .settings:
+        case .one(.settings):
             SettingsView(model: settings)
         }
     }
@@ -179,25 +265,28 @@ struct MainWindow: View {
     // MARK: Removal
 
     private var canRemoveSelection: Bool {
-        switch selection { case .set, .destination: true; default: false }
+        switch content { case .several, .one(.set), .one(.destination): true; default: false }
     }
     private var removalTitle: String {
-        switch selection {
-        case .set(let id): "Remove \"\(model.set(id)?.name ?? "this set")\"?"
-        case .destination(let id): "Remove \"\(model.destination(id)?.name ?? "this destination")\"?"
+        switch content {
+        case .several(let ids): SetBatch.removalTitle(count: ids.count)
+        case .one(.set(let id)): "Remove \"\(model.set(id)?.name ?? "this set")\"?"
+        case .one(.destination(let id)): "Remove \"\(model.destination(id)?.name ?? "this destination")\"?"
         default: "Remove?"
         }
     }
     private var removalMessage: String {
-        switch selection {
-        case .set: "Mirror stops backing up this folder. Your files and the copies already in your backups are not deleted."
+        switch content {
+        case .several(let ids): SetBatch.removalMessage(names: orderedRows.filter { ids.contains($0.id) }.map(\.name))
+        case .one(.set): "Mirror stops backing up this folder. Your files and the copies already in your backups are not deleted."
         default: "Sets that use this destination stop backing up to it. The copies already there are not deleted."
         }
     }
     private func removeSelection() {
-        switch selection {
-        case .set(let id): selection = .overview; model.removeSet(id)
-        case .destination(let id): selection = .overview; model.removeDestination(id)
+        switch content {
+        case .several(let ids): selection.select(.overview); model.removeSets(ids)
+        case .one(.set(let id)): selection.select(.overview); model.removeSet(id)
+        case .one(.destination(let id)): selection.select(.overview); model.removeDestination(id)
         default: break
         }
     }
