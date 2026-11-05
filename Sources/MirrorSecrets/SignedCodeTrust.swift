@@ -5,28 +5,78 @@ import Security
 
 /// Pins the agent's caller and helper to our signature. The caller check is defence in depth: a
 /// process of the same user can exec the signed Mirror binary and pass it. See spec section 8a.
-/// Team ID is the certificate's OU, not the code
-/// in its name. The two identifiers differ on purpose: rclone can run commands (`--password-command`),
-/// so if it could pass as the caller, anyone could use it to launder a request.
+/// Team ID is the certificate's OU, not the code in its name. The two identifiers differ on purpose:
+/// rclone can run commands (`--password-command`), so if it could pass as the caller, anyone could
+/// use it to launder a request.
+///
+/// The team is whichever one signed this agent, so any developer's build pins itself. It comes only
+/// from the running signature, never from a file, argument or environment, and it fails closed: with
+/// no proven team, nothing passes. Re-signing the agent moves the pin too, so this guards against
+/// other programs, not against a replaced agent. That job is the Keychain's: its items answer to the
+/// code that wrote them.
 public struct SignedCodeTrust: AgentTrust {
-    static let teamID = "ABCDE12345"
-    private static let pin = "anchor apple generic and certificate leaf[subject.OU] = \"\(teamID)\""
-    static let callerRequirement = "identifier \"\(MirrorCore.bundleID)\" and \(pin)"
-    static let helperRequirement = "identifier \"\(MirrorCore.bundleID).rclone\" and \(pin)"
+    /// Nil on an unsigned, ad-hoc or team-less build, and every check then refuses.
+    let team: String?
 
-    public init() {}
+    public init() { self.init(team: Self.ownTeam()) }
+    init(team: String?) { self.team = team }
+
+    /// Also what keeps a hostile signature from writing its own requirement language.
+    static func isTeamID(_ text: String) -> Bool {
+        text.utf8.count == 10 && text.utf8.allSatisfy { (48...57).contains($0) || (65...90).contains($0) }
+    }
+
+    /// Nil, not a looser requirement, when `team` isn't a Team ID.
+    static func requirement(identifier: String, team: String?) -> String? {
+        guard let team, isTeamID(team) else { return nil }
+        return "identifier \"\(identifier)\" and anchor apple generic and certificate leaf[subject.OU] = \"\(team)\""
+    }
+
+    var callerRequirement: String? { Self.requirement(identifier: MirrorCore.bundleID, team: team) }
+    var helperRequirement: String? { Self.requirement(identifier: "\(MirrorCore.bundleID).rclone", team: team) }
 
     /// By pid, as there's no public way to get a parent's audit token. If the parent exits we're
     /// reparented to launchd, so a second look shows the pid wasn't recycled during the check.
     public func verifyCaller() throws {
         let parent = getppid()
-        guard parent > 1, Self.runningValid(pid: parent, requirement: Self.callerRequirement), getppid() == parent else {
+        guard parent > 1, let requirement = callerRequirement,
+              Self.runningValid(pid: parent, requirement: requirement), getppid() == parent else {
             throw AgentFailure.untrustedCaller
         }
     }
 
     public func verifyHelper(at url: URL) throws {
-        guard Self.staticallyValid(url, requirement: Self.helperRequirement) else { throw AgentFailure.untrustedHelper }
+        guard let requirement = helperRequirement, Self.staticallyValid(url, requirement: requirement) else {
+            throw AgentFailure.untrustedHelper
+        }
+    }
+
+    /// A signature's TeamIdentifier is only a string its signer wrote, and an ad-hoc or self-made
+    /// signature can claim any team. So a claim counts only once `proof` shows that the signature
+    /// meets the whole requirement, which takes an Apple-issued certificate for that team.
+    static func provenTeam(claimed: String?, identifier: String, proof: (String) -> Bool) -> String? {
+        guard let requirement = requirement(identifier: identifier, team: claimed), proof(requirement) else { return nil }
+        return claimed
+    }
+
+    /// `SecCodeCheckValidity` on our own running code also ties the kernel's view of this process to
+    /// the signature read here, so swapping the file on disk after launch doesn't move the pin.
+    private static func ownTeam() -> String? {
+        var running: SecCode?
+        guard SecCodeCopySelf([], &running) == errSecSuccess, let running else { return nil }
+        var onDisk: SecStaticCode?
+        guard SecCodeCopyStaticCode(running, [], &onDisk) == errSecSuccess, let onDisk else { return nil }
+        return provenTeam(claimed: claimedTeam(onDisk), identifier: MirrorCore.agentLabel) { text in
+            guard let requirement = requirement(text) else { return false }
+            return SecCodeCheckValidity(running, [], requirement) == errSecSuccess
+        }
+    }
+
+    static func claimedTeam(_ code: SecStaticCode) -> String? {
+        var info: CFDictionary?
+        guard SecCodeCopySigningInformation(code, SecCSFlags(rawValue: kSecCSSigningInformation), &info) == errSecSuccess,
+              let info = info as? [String: Any] else { return nil }
+        return info[kSecCodeInfoTeamIdentifier as String] as? String
     }
 
     private static func requirement(_ text: String) -> SecRequirement? {

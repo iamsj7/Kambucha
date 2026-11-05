@@ -1,7 +1,7 @@
 #!/bin/zsh
 set -euo pipefail
 cd "${0:A:h}/.."
-IDENTITY="${MIRROR_SIGN_IDENTITY:-Apple Development: Shaik Jaleel}"
+IDENTITY="$(scripts/signing-identity.sh)"
 [[ -x vendor/rclone/rclone ]] || { echo "run scripts/fetch-rclone.sh first" >&2; exit 1; }
 
 # Default build has no proof code. --proofs compiles the --probe* modes and --register-agent (Gate 1 only).
@@ -29,4 +29,7 @@ sign --identifier com.shaikjaleel.mirror.rclone "$app/Contents/Helpers/rclone"
 sign --identifier com.shaikjaleel.mirror.agent "$app/Contents/MacOS/MirrorAgent"
 sign "$app/Contents/MacOS/Mirror"
 sign "$app"
+# The agent pins whichever team signed it and refuses everything without one, so this can't ship.
+team="$(codesign -dvv "$app" 2>&1 | sed -n 's/^TeamIdentifier=//p')"
+[[ "$team" =~ '^[A-Z0-9]{10}$' ]] || { echo "the signature has no Team ID, so the agent would refuse to run: use an Apple Development or Developer ID Application identity" >&2; exit 1; }
 echo "$app"

@@ -15,11 +15,16 @@ while IFS= read -r f; do
 done < <(find "$app/Contents" -type f)
 
 info="$(codesign -dvv "$app" 2>&1)"
-grep -q '^Authority=Apple Development: Shaik Jaleel' <<<"$info" || fail "signing authority"
+grep -qE '^Authority=(Apple Development|Developer ID Application): ' <<<"$info" || fail "signing authority"
+team="$(sed -n 's/^TeamIdentifier=//p' <<<"$info")"
+[[ "$team" =~ '^[A-Z0-9]{10}$' ]] || fail "no Team ID (unsigned, ad-hoc or team-less): $team"
+grep -qE '^CodeDirectory .*flags=.*runtime' <<<"$info" || fail "hardened runtime is off"
 
-# The requirements the agent pins (SignedCodeTrust). Team ID is the certificate's OU, not the code in its name.
-pin='anchor apple generic and certificate leaf[subject.OU] = "ABCDE12345"'
+# The requirements the agent pins (SignedCodeTrust), for the team that signed this build. Team ID is the
+# certificate's OU, not the code in its name. Each must hold with the anchor, not just the claimed team.
+pin="anchor apple generic and certificate leaf[subject.OU] = \"$team\""
 codesign --verify --strict -R="identifier \"com.shaikjaleel.mirror\" and $pin" "$app" || fail "app doesn't meet the caller requirement"
+codesign --verify --strict -R="identifier \"com.shaikjaleel.mirror.agent\" and $pin" "$app/Contents/MacOS/MirrorAgent" || fail "agent can't prove its own team"
 codesign --verify --strict -R="identifier \"com.shaikjaleel.mirror.rclone\" and $pin" "$app/Contents/Helpers/rclone" || fail "rclone doesn't meet the helper requirement"
 
 # Keychain rule: only MirrorAgent may touch it.
