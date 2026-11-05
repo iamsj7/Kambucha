@@ -67,6 +67,22 @@ private let a = UUID(), b = UUID(), c = UUID()
         #expect(SidebarSelection.setIDs(in: [.overview, .destination(a)]).isEmpty)
         #expect(SidebarSelection.setIDs(in: [.set(a), .archive]) == [a])
     }
+
+    @Test func aContextMenuReachesOnlySetsTheFilterLeftShowing() {
+        #expect(SidebarSelection.setIDs(in: [.set(a), .set(b), .set(c)], visible: [a]) == [a])
+    }
+
+    @Test func shiftingFromTheLastSetOntoTheNextRowKeepsTheSets() {
+        var s = SidebarSelection(sets: [a, b])
+        s.change(to: [.set(a), .set(b), .destination(c)], extending: true)
+        #expect(s.items == [.set(a), .set(b)])
+    }
+
+    @Test func shiftingWithNoSetsInvolvedStaysOneItem() {
+        var s = SidebarSelection(.archive)
+        s.change(to: [.archive, .activity], extending: true)
+        #expect(s.items == [.activity])
+    }
 }
 
 @Suite struct CoveragePresentationTests {
@@ -100,6 +116,10 @@ private let a = UUID(), b = UUID(), c = UUID()
         let p = CoveragePresentation(.status(.attention("Preview needed: Photos")))
         #expect(p.short == "Preview Needed" && p.detail == "Preview needed")
     }
+}
+
+private extension OverallStatus {
+    var isBackedUp: Bool { if case .backedUp = self { true } else { false } }
 }
 
 private struct Vols: VolumeLocating {
@@ -145,6 +165,7 @@ private struct Vols: VolumeLocating {
 
         m.setDestination(two.id, on: true, for: s.id)
         #expect(try saved()[0].destinationIDs == [one.id, two.id])
+        m.reload()
         #expect(m.states[pair]?.lastFileCount == 7)
     }
 
@@ -158,12 +179,12 @@ private struct Vols: VolumeLocating {
         #expect(try center.active().isEmpty)
     }
 
-    @Test func aSetCanLoseItsLastDestinationAndThenAsksForAttention() throws {
+    @Test func aSetCanLoseItsLastDestinationAndThenAsksForAttention() async throws {
         let s = set("A", [one.id])
         let m = try model([s])
         m.setDestination(one.id, on: false, for: s.id)
         #expect(try saved()[0].destinationIDs.isEmpty)
-        #expect(m.rows[0].status == .attention("No destination chosen"))
+        try await until { m.rows[0].status == .attention("No destination chosen") }
     }
 
     @Test func aDestinationWithoutItsKitCanBeTurnedOnAndThenSaysSo() throws {
@@ -191,9 +212,215 @@ private struct Vols: VolumeLocating {
         let m = try model([x, y, z])
         m.setPaused(true, sets: [x.id, y.id])
         #expect(try saved().map(\.isPaused) == [true, true, false])
-        m.reload()
         m.setPaused(false, sets: [x.id])
         #expect(try saved().map(\.isPaused) == [false, true, false])
+    }
+
+    @Test func anEditStraightAfterAPauseKeepsThePause() throws {
+        let x = set("X", []), y = set("Y", [])
+        let m = try model([x, y])
+        m.setPaused(true, sets: [x.id, y.id])
+        m.setDestination(one.id, on: true, for: x.id)
+        #expect(try saved().map(\.isPaused) == [true, true])
+        m.setPaused(false, sets: [x.id, y.id])
+        m.setPaused(true)
+        m.addDestination(two.id, to: [y.id])
+        #expect(try saved().map(\.isPaused) == [true, true])
+    }
+
+    @Test func resumingAllLeavesSetsPausedOnTheirOwn() throws {
+        let x = set("X", []), y = set("Y", [])
+        let m = try model([x, y])
+        m.setPaused(true, sets: [x.id])
+        m.setPaused(true)
+        #expect(m.isPaused)
+        m.setPaused(false)
+        #expect(try saved().map(\.isPaused) == [true, false])
+    }
+
+    @Test func resumingAllWhenEachWasPausedOnItsOwnResumesThemAll() throws {
+        let x = set("X", []), y = set("Y", [])
+        let m = try model([x, y])
+        m.setPaused(true, sets: [x.id, y.id])
+        m.setPaused(false)
+        #expect(try saved().map(\.isPaused) == [false, false])
+    }
+
+    @Test func aSetPausedByHandDuringPauseAllStaysPausedAfterIt() throws {
+        let x = set("X", []), y = set("Y", [])
+        let m = try model([x, y])
+        m.setPaused(true)
+        m.setPaused(false, sets: [x.id])
+        m.setPaused(true, sets: [x.id])
+        m.setPaused(false)
+        #expect(try saved().map(\.isPaused) == [true, false])
+    }
+
+    @Test func aClickChangesTheSetsAtOnceAndLeavesStateToTheBackgroundRead() async throws {
+        let s = set("A", [one.id])
+        let pair = PairID(set: s.id, destination: one.id)
+        let m = try model([s])
+        var state = SetState(); state.lastFinished = Date()
+        try ConfigStore(root: root).save(state, for: pair)
+
+        m.setDestination(two.id, on: true, for: s.id)
+
+        #expect(m.set(s.id)?.destinationIDs == [one.id, two.id])
+        #expect(m.states[pair]?.lastFinished == nil)
+        try await until { m.states[pair]?.lastFinished != nil }
+    }
+
+    @Test func aDestinationTurnedBackOnReadsAsNotFinishedUntilARunFinishes() throws {
+        let s = set("A", [one.id])
+        let pair = PairID(set: s.id, destination: one.id)
+        let m = try model([s])
+        var state = SetState(); state.lastFinished = Date().addingTimeInterval(-30 * 86_400); state.lastFileCount = 7
+        try ConfigStore(root: root).save(state, for: pair)
+        m.reload()
+        #expect(m.rows[0].status.isBackedUp)
+
+        m.setDestination(one.id, on: false, for: s.id)
+        m.setDestination(one.id, on: true, for: s.id)
+        m.reload()
+
+        let column = try #require(m.coverageColumns.first { $0.id == one.id })
+        #expect(m.coverageCell(try #require(m.set(s.id)), column) == .status(.unfinished))
+        #expect(m.rows[0].status == .unfinished)
+        // Only how it reads: what the agent plans from is left alone.
+        #expect(try ConfigStore(root: root).state(for: pair).wholeSetOwed == false)
+
+        state.lastFinished = Date().addingTimeInterval(1)
+        try ConfigStore(root: root).save(state, for: pair)
+        m.reload()
+        #expect(m.rows[0].status.isBackedUp)
+    }
+
+    @Test func aDestinationTurnedBackOnFromTheSetsPageReadsTheSame() throws {
+        let s = set("A", [one.id])
+        let pair = PairID(set: s.id, destination: one.id)
+        let m = try model([s])
+        var state = SetState(); state.lastFinished = Date().addingTimeInterval(-60)
+        try ConfigStore(root: root).save(state, for: pair)
+        var off = s; off.destinationIDs = []
+        m.save(set: off)
+        m.save(set: s)
+        #expect(m.rows[0].status == .unfinished)
+    }
+
+    @Test func aSetNeedingAPreviewKeepsItsPlaceDuringARun() throws {
+        let zed = set("Zed", [one.id]), abc = set("Abc", [one.id]), yak = set("Yak", [one.id], accepted: false)
+        let m = try model([zed, abc, yak])
+        var state = SetState(); state.lastFinished = Date()
+        for s in [zed, abc] { try ConfigStore(root: root).save(state, for: PairID(set: s.id, destination: one.id)) }
+        m.reload()
+        #expect(SetOrder.sorted(m.rows.map(\.sortKey)) == [yak.id, abc.id, zed.id])
+        try agentIsRunning()
+        m.reload()
+        #expect(m.rows.allSatisfy { $0.status == .running })
+        #expect(SetOrder.sorted(m.rows.map(\.sortKey)) == [yak.id, abc.id, zed.id])
+    }
+
+    @Test func thePaneOfSeveralListsThemByNameWhateverTheirStatus() throws {
+        let zed = SetRow(id: UUID(), name: "Zed", isPaused: false, status: .attention("Sign-in expired"), attentionWhenIdle: true)
+        let abc = SetRow(id: UUID(), name: "Abc", isPaused: false, status: .running, attentionWhenIdle: false)
+        #expect([zed, abc].byName == [abc, zed])
+    }
+
+    // MARK: Asking for runs while one is under way
+
+    /// Stands in for the agent: notes the set it was given, works for a moment and exits.
+    private func fakeAgent(exit code: Int = 0) throws -> URL {
+        let url = root.appendingPathComponent("fake-agent")
+        try "#!/bin/sh\necho \"$2\" >> \"\(launchLog.path)\"\nsleep 0.2\nexit \(code)\n".write(to: url, atomically: true, encoding: .utf8)
+        try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: url.path)
+        return url
+    }
+
+    private var launchLog: URL { root.appendingPathComponent("launched") }
+    private func launched() -> [String] {
+        ((try? String(contentsOf: launchLog, encoding: .utf8)) ?? "").split(separator: "\n").map(String.init)
+    }
+
+    private func agentIsRunning() throws {
+        try "\(getpid())\n".write(to: root.appendingPathComponent(AgentPresence.fileName), atomically: true, encoding: .utf8)
+    }
+
+    private func until(_ done: @MainActor () -> Bool) async throws {
+        let limit = ContinuousClock.now + .seconds(20)
+        while !done() {
+            if ContinuousClock.now > limit { Issue.record("Timed out"); return }
+            try await Task.sleep(for: .milliseconds(20))
+        }
+    }
+
+    @Test func aSecondBatchWaitsAndTheFirstCarriesOn() async throws {
+        let sets = ["A", "B", "C", "D", "E"].map { set($0, [one.id]) }
+        let ids = sets.map(\.id)
+        let m = try model(sets)
+        m.agentExecutable = try fakeAgent()
+
+        m.runNow(sets: Set(ids[0..<3]))
+        m.runNow(sets: Set(ids[3...]))
+        #expect(m.queuedRuns == Array(ids[3...]))
+        #expect(m.lastError == AppModel.queuedText)
+
+        try await until { launched().count == 5 }
+        #expect(launched() == ids.map(\.uuidString))
+    }
+
+    @Test func oneSetAskedForDuringABatchWaitsToo() async throws {
+        let sets = ["A", "B", "C"].map { set($0, [one.id]) }
+        let ids = sets.map(\.id)
+        let m = try model(sets)
+        m.agentExecutable = try fakeAgent()
+
+        m.runNow(sets: Set(ids[0..<2]))
+        m.runNow(ids[2])
+
+        try await until { launched().count == 3 }
+        #expect(launched() == ids.map(\.uuidString))
+    }
+
+    @Test func aRequestWithNothingToRunLeavesABatchAlone() async throws {
+        let sets = ["A", "B"].map { set($0, [one.id]) }
+        let never = set("N", [one.id], accepted: false)
+        let m = try model(sets + [never])
+        m.agentExecutable = try fakeAgent()
+
+        m.runNow(sets: Set(sets.map(\.id)))
+        m.runNow(sets: [never.id])
+
+        try await until { launched().count == 2 }
+    }
+
+    @Test func aSetAlreadyWaitingInABatchIsNotQueuedAgain() throws {
+        let sets = ["A", "B"].map { set($0, [one.id]) }
+        let m = try model(sets)
+        m.agentExecutable = try fakeAgent()
+        m.runNow(sets: Set(sets.map(\.id)))
+        m.runNow(sets[1].id)
+        #expect(m.queuedRuns.isEmpty)
+    }
+
+    @Test func aRequestDuringAScheduledRunWaitsAndNamesWhatWasLeftOut() throws {
+        var paused = set("P", [one.id]); paused.isPaused = true
+        let x = set("X", [one.id])
+        let m = try model([paused, x])
+        try agentIsRunning()
+        m.reload()
+        m.runNow(sets: [paused.id, x.id])
+        #expect(m.queuedRuns == [x.id])
+        #expect(m.lastError == "Paused, so left out: P. \(AppModel.queuedText)")
+    }
+
+    @Test func anAgentThatCouldNotStartLeavesNothingWaitingOnIt() throws {
+        let sets = ["A", "B", "C"].map { set($0, [one.id]) }
+        let m = try model(sets)
+        m.agentExecutable = root.appendingPathComponent("no-such-agent")
+        m.runNow(sets: [sets[0].id, sets[1].id])
+        m.runNow(sets: [sets[2].id])
+        #expect(m.queuedRuns.isEmpty)
+        #expect(m.lastError?.contains("could not start") == true)
     }
 
     @Test func addingToADestinationSkipsSetsAlreadyThere() throws {

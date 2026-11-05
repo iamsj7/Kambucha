@@ -35,13 +35,17 @@ struct SidebarSelection: Equatable {
         Set(items.compactMap { if case .set(let id) = $0 { id } else { nil } })
     }
 
+    /// A context menu acts on what the owner can see, and the list may pass it rows the filter is hiding.
+    static func setIDs(in items: Set<SidebarItem>, visible: Set<UUID>) -> Set<UUID> { setIDs(in: items).intersection(visible) }
+
     var setIDs: Set<UUID> { Self.setIDs(in: items) }
 
     /// A change from the list. Command-clicking something else moves there, and a shift-click across sections keeps
-    /// the sets it covered.
-    mutating func change(to new: Set<SidebarItem>) {
+    /// the sets it covered. `extending` says Shift is down: one row added looks the same either way.
+    mutating func change(to new: Set<SidebarItem>, extending: Bool = false) {
         let sets = Self.setIDs(in: new)
         if new.count <= 1 || sets.count == new.count { items = new; return }
+        if extending && !sets.isEmpty { items = Set(sets.map(SidebarItem.set)); return }
         let added = new.subtracting(items)
         if added.count == 1, let only = added.first, Self.setIDs(in: added).isEmpty { items = [only] }
         else if !sets.isEmpty { items = Set(sets.map(SidebarItem.set)) }
@@ -196,7 +200,7 @@ struct MainWindow: View {
             Label("Settings", systemImage: "gearshape").tag(SidebarItem.settings)
         }
         .contextMenu(forSelectionType: SidebarItem.self) { items in
-            let ids = SidebarSelection.setIDs(in: items)
+            let ids = SidebarSelection.setIDs(in: items, visible: Set(visibleRows.map(\.id)))
             if !ids.isEmpty { SetBatchActions(model: model, ids: ids) }
         }
         .onHover { pointerOverSidebar = $0 }
@@ -220,14 +224,14 @@ struct MainWindow: View {
     }
 
     private var listSelection: Binding<Set<SidebarItem>> {
-        Binding(get: { selection.items }, set: { selection.change(to: $0) })
+        Binding(get: { selection.items }, set: { selection.change(to: $0, extending: NSEvent.modifierFlags.contains(.shift)) })
     }
 
     // MARK: Order
 
     /// All that the order depends on, so a refresh that changes only counts and times does nothing.
     private var orderKeys: [SetSortKey] {
-        model.rows.map { SetSortKey(id: $0.id, name: $0.name, needsAttention: $0.status.needsAttention) }
+        model.rows.map(\.sortKey)
     }
     private var pointerOverSets: Bool { pointerOverSidebar || pointerOverCoverage }
     private func updateOrder() { setOrder.update(orderKeys, held: pointerOverSets) }
@@ -241,7 +245,8 @@ struct MainWindow: View {
     @ViewBuilder private var detail: some View {
         switch content {
         case .several(let ids):
-            SeveralSetsView(model: model, rows: orderedRows.filter { ids.contains($0.id) }, select: { selection.select($0) })
+            SeveralSetsView(model: model, rows: model.rows.filter { ids.contains($0.id) }.byName,
+                            hidden: ids.subtracting(visibleRows.map(\.id)).count, select: { selection.select($0) })
         case .one(.overview):
             OverviewView(model: model, select: { selection.select($0) })
         case .one(.coverage):
