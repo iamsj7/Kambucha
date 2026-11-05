@@ -38,7 +38,7 @@ struct MenuBarPanel: View {
                 }
                 ForEach(live.prefix(rows.progress)) { ProgressRow(label: $0.label, progress: $0.progress) }
                 if rows.more > 0 {
-                    Button { openMirror("main") } label: { Text("\(rows.more.formatted()) more") }
+                    Button { model.showOverview(); openMirror("main") } label: { Text("\(rows.more.formatted()) more") }
                         .buttonStyle(.borderless).font(.subheadline)
                         .accessibilityHint("Opens Mirror. The Overview lists all of them")
                 }

@@ -315,6 +315,9 @@ private struct Vols: VolumeLocating {
         m.reload()
         #expect(SetOrder.sorted(m.rows.map(\.sortKey)) == [yak.id, abc.id, zed.id])
         try agentIsRunning()
+        for s in [zed, abc, yak] {
+            try ProgressStore(root: root).write(TransferProgress(pair: PairID(set: s.id, destination: one.id), phase: .transferring, bytesDone: 1, updated: Date()))
+        }
         m.reload()
         #expect(m.rows.allSatisfy { $0.status == .running })
         #expect(SetOrder.sorted(m.rows.map(\.sortKey)) == [yak.id, abc.id, zed.id])

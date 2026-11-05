@@ -113,6 +113,7 @@ struct MainWindow: View {
         // the split view, or a first-run window would open behind whatever else is on screen.
         .onAppear { DockPresence.windowOpened(); model.windowAppeared() }
         .onDisappear { DockPresence.windowClosed(); model.windowDisappeared() }
+        .onChange(of: model.overviewRequests) { selection.select(.overview) }
         .onChange(of: onboarding.setAwaitingPreview) { _, id in
             guard let id else { return }
             model.reload()

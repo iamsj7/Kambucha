@@ -29,7 +29,7 @@ public struct HealthSummary: Equatable, Sendable {
     /// Backing up or uploading right now.
     public private(set) var active: [Item] = []
     public private(set) var backedUp = 0
-    /// While any agent runs, every clean set reads as running, so this says nothing about which one is.
+    /// Sets with live progress.
     private var running = 0
     public private(set) var paused = 0
     /// Only on drives that aren't plugged in. Not a problem.

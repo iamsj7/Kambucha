@@ -75,8 +75,10 @@ private struct Snapshot: Sendable {
             return StatusSummary.withPreviewNeeded(status, sets: ss)
         }
         func row(_ s: BackupSet) -> SetRow {
-            let status = s.isPaused ? OverallStatus.paused : judged([s], running: running)
-            let idle = running && !s.isPaused ? judged([s], running: false) : status
+            // Only a set with live progress is running: the agent being alive says nothing about the others.
+            let busy = running && live.contains { $0.pair.set == s.id }
+            let status = s.isPaused ? OverallStatus.paused : judged([s], running: busy)
+            let idle = busy && !s.isPaused ? judged([s], running: false) : status
             return SetRow(id: s.id, name: s.name, isPaused: s.isPaused, status: status, attentionWhenIdle: idle.needsAttention)
         }
         return Snapshot(sets: sets, status: judged(sets, running: running), rows: sets.map(row),
@@ -329,6 +331,10 @@ final class AppModel {
     }
 
     /// Opens the deletion review. Approving deletions needs the owner to see the list first.
+    /// Each ask moves an open main window to Overview. A window that isn't open starts there.
+    private(set) var overviewRequests = 0
+    func showOverview() { overviewRequests += 1 }
+
     func allowDeletes(_ set: UUID) { lastError = nil; reviewNotice = nil; reviewingSet = set }
 
     func keepHolding() { reviewingSet = nil; reviewNotice = nil }

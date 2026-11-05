@@ -47,6 +47,34 @@ private func vol(_ uuid: String, internalLooking: Bool = false) -> VolumeInfo {
         #expect(!m.isWatchingProgress)
     }
 
+    /// One set uploading mustn't make every other set read as running, or the Overview loses their last backup.
+    @Test func onlyTheSetWithLiveProgressReadsAsRunning() throws {
+        let d = Destination(name: "iCloud", kind: .iCloudFolder)
+        let busy = BackupSet(name: "Busy", source: URL(fileURLWithPath: "/tmp/busy"), destinationIDs: [d.id])
+        let calm = BackupSet(name: "Calm", source: URL(fileURLWithPath: "/tmp/calm"), destinationIDs: [d.id])
+        var accepted = [busy, calm]; for i in accepted.indices { accepted[i].acceptPreview() }
+        let m = try make(destinations: [d], sets: accepted) { store, root in
+            for s in accepted {
+                var st = SetState(); st.lastFinished = Date(); st.lastFileCount = 1
+                try store.save(st, for: PairID(set: s.id, destination: d.id))
+            }
+            try AgentPresence.record(for: getpid()).write(to: root.appendingPathComponent(AgentPresence.fileName), atomically: true, encoding: .utf8)
+            try ProgressStore(root: root).write(TransferProgress(pair: PairID(set: busy.id, destination: d.id), phase: .transferring, bytesDone: 1, updated: Date()))
+        }
+        m.reload()
+        let status = Dictionary(uniqueKeysWithValues: m.rows.map { ($0.name, $0.status) })
+        #expect(status["Busy"] == .running)
+        guard case .backedUp = status["Calm"] else { Issue.record("expected Calm backed up, got \(String(describing: status["Calm"]))"); return }
+        #expect(m.status == .running)
+    }
+
+    @Test func nMoreInThePanelAsksForTheOverview() throws {
+        let m = try make()
+        let before = m.overviewRequests
+        m.showOverview()
+        #expect(m.overviewRequests == before + 1)
+    }
+
     @Test func aSecondDestinationForTheSameDriveIsRefused() throws {
         let first = Destination(name: "A", kind: .externalDrive, encrypted: false, volumeUUID: "UUID-1")
         let m = try make(destinations: [first])
