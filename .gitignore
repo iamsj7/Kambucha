@@ -2,3 +2,5 @@
 .build/
 dist/
 vendor/rclone/
+.DS_Store
+.vscode/
