@@ -121,6 +121,7 @@ Kambucha remembers the drive by its internal ID and not its name. A different dr
 - The drive holds real copies, so it needs real space. Kambucha checks that the changes will fit and stops with a clear message if they will not.
 - If you unplug it in the middle of a run, nothing is marked complete and the next connection carries on.
 - When it finishes, you get a notification saying it is safe to eject. To eject from Kambucha, open the drive under Destinations and choose Eject.
+- If the drive is only for backups, you can stop Spotlight indexing it, so it doesn't index every copied file again and your searches don't show each file twice. In Terminal, run `sudo mdutil -i off "/Volumes/<drive name>"`. Kambucha can't do this for you: macOS needs an administrator password, and it no longer respects a "don't index" marker file inside a folder.
 
 ## 6. Connect Google Drive
 
