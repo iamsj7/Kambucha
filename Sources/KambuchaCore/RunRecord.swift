@@ -22,13 +22,20 @@ public struct RunRecord: Codable, Identifiable, Equatable, Sendable {
     public var pendingUploads: Int, refused: Int
     public var errors: [String]
     public var status: Status
+    /// Peak memory in bytes, as Activity Monitor counts it, when rclone ran for this pair. `rclonePeakMemory` is
+    /// the largest rclone process; `agentPeakMemory` is the agent's own peak so far in that agent run. Optional,
+    /// so older records still read.
+    public var rclonePeakMemory: UInt64?
+    public var agentPeakMemory: UInt64?
 
     public init(id: UUID = UUID(), setID: UUID, setName: String, destinationID: UUID, destinationName: String,
                 start: Date, end: Date, trigger: Trigger, scope: String,
                 filesChecked: Int = 0, copied: Int = 0, renamed: Int = 0, deleted: Int = 0, archived: Int = 0,
                 bytes: Int64 = 0, verification: String = "", pendingUploads: Int = 0, refused: Int = 0,
-                errors: [String] = [], status: Status, archivesPruned: Int? = nil) {
+                errors: [String] = [], status: Status, archivesPruned: Int? = nil,
+                rclonePeakMemory: UInt64? = nil, agentPeakMemory: UInt64? = nil) {
         self.archivesPruned = archivesPruned
+        self.rclonePeakMemory = rclonePeakMemory; self.agentPeakMemory = agentPeakMemory
         self.id = id; self.setID = setID; self.setName = setName
         self.destinationID = destinationID; self.destinationName = destinationName
         self.start = start; self.end = end; self.trigger = trigger; self.scope = scope

@@ -85,49 +85,110 @@ public enum RcloneLogParser {
         var isError: Bool { level == "error" || level == "critical" }
     }
 
-    private static func lines(_ data: Data) -> [Line] {
-        data.split(separator: UInt8(ascii: "\n")).compactMap { Line(Data($0)) }
+    /// Calls `body` with each non-empty line of `data`.
+    public static func forEachLine(in data: Data, _ body: (Data) -> Void) {
+        var start = data.startIndex
+        while start < data.endIndex {
+            let end = data[start...].firstIndex(of: newline) ?? data.endIndex
+            if end > start { body(data[start..<end]) }
+            start = end == data.endIndex ? end : data.index(after: end)
+        }
+    }
+
+    /// Calls `body` with each non-empty line of the file, reading `chunkSize` bytes at a time, so a log of
+    /// any size costs one chunk of memory. A missing or unreadable file has no lines.
+    public static func forEachLine(inFileAt url: URL, chunkSize: Int = 1 << 20, _ body: (Data) -> Void) {
+        guard let handle = try? FileHandle(forReadingFrom: url) else { return }
+        defer { try? handle.close() }
+        var carry = Data()
+        while let chunk = try? handle.read(upToCount: chunkSize), !chunk.isEmpty {
+            carry.append(chunk)
+            guard let last = carry.lastIndex(of: newline) else { continue }
+            // One pool per chunk: JSONSerialization's objects would otherwise pile up until the run ends.
+            autoreleasepool { forEachLine(in: carry[..<last], body) }
+            carry = Data(carry[carry.index(after: last)...])
+        }
+        if !carry.isEmpty { autoreleasepool { body(carry) } }
+    }
+
+    private static let newline = UInt8(ascii: "\n")
+
+    /// Reads a log one line at a time, building its summary and what decides its outcome in one pass.
+    /// Nothing but the summary outlives a line.
+    public struct Reader {
+        public private(set) var summary = LogSummary()
+        private var sizeSum: Int64 = 0
+        private var statsBytes: Int64?
+        private var archived = Set<String>(), deleted = Set<String>()
+        // What `outcome(exitCode:)` needs from the error lines.
+        private var maxDeleteStop = false, authFailed = false, uploadLimited = false, onlyLimits = true
+
+        public init() {}
+
+        /// `summarise: false` lets a line count towards the outcome only, as rclone's stderr does.
+        public mutating func read(line raw: Data, summarise: Bool = true) {
+            guard let line = Line(raw) else { return }
+            if line.isError { note(error: line) }
+            if summarise { add(line) }
+        }
+
+        public mutating func read(fileAt url: URL) {
+            RcloneLogParser.forEachLine(inFileAt: url) { read(line: $0) }
+        }
+
+        /// The exit code, refined by the log: `--max-delete` stops and expired sign-ins are only visible there.
+        public func outcome(exitCode: Int32) -> RcloneResult.Outcome {
+            guard exitCode != 0 else { return .success }
+            if maxDeleteStop { return .safetyStop }
+            if authFailed { return .authExpired }
+            // Only when the limit is all that went wrong: a real failure beside it must still count.
+            if uploadLimited, onlyLimits { return .partial }
+            return RcloneLogParser.outcome(exitCode: exitCode)
+        }
+
+        private mutating func note(error line: Line) {
+            if line.msg == "Got fatal error on delete: --max-delete threshold reached" { maxDeleteStop = true }
+            if line.msg.map({ RcloneLogParser.isAuthError($0, removing: line.object) }) ?? false { authFailed = true }
+            let limited = line.msg.map { RcloneLogParser.isUploadLimit($0, removing: line.object) } ?? false
+            if limited { uploadLimited = true } else if !RcloneLogParser.isRunSummary(line) { onlyLimits = false }
+        }
+
+        private mutating func add(_ line: Line) {
+            if let b = line.statsBytes { statsBytes = b; summary.bytes = b }
+            guard let msg = line.msg else { return }
+            let object = line.object ?? ""
+            if line.isError {
+                summary.errors.append(object.isEmpty ? msg : "\(object): \(msg)")
+                if !object.isEmpty { summary.flagged.append(object) }
+            }
+            if let n = RcloneLogParser.differenceCount(msg) { summary.differences = n }
+            if let n = RcloneLogParser.matchingCount(msg) { summary.matching = n }
+            guard !object.isEmpty else { return }
+            if msg.hasPrefix("Skipped copy") {
+                summary.planned.append(object)   // --dry-run
+                summary.plannedBytes += line.size ?? 0
+            } else if msg.hasPrefix("Copied") {
+                summary.copied.append(object); sizeSum += line.size ?? 0
+                if statsBytes == nil { summary.bytes = sizeSum }
+            } else if msg == "Moved into backup dir" {
+                summary.deleted.append(object); deleted.insert(object)
+                if archived.insert(object).inserted { summary.archived.append(object) }
+            } else if msg == "Moved (server-side)" {
+                // With --backup-dir this is the move of an overwritten or deleted file into the archive.
+                if archived.insert(object).inserted { summary.archived.append(object) }
+            } else if msg == "Deleted" || msg.hasPrefix("Skipped delete") || msg.hasPrefix("Skipped move into backup dir") {
+                if deleted.insert(object).inserted { summary.deleted.append(object) }   // the latter two are --dry-run
+            } else if msg.hasPrefix("Renamed from \"") {
+                let old = msg.dropFirst("Renamed from \"".count).dropLast()
+                summary.renamed.append("\(old) -> \(object)")
+            }
+        }
     }
 
     public static func parse(_ data: Data) -> LogSummary {
-        var s = LogSummary()
-        var sizeSum: Int64 = 0
-        var statsBytes: Int64?
-        var archived = Set<String>(), deleted = Set<String>()
-        func appendUnique(_ list: inout [String], _ item: String, seen: inout Set<String>) {
-            if seen.insert(item).inserted { list.append(item) }
-        }
-        for line in lines(data) {
-            if let b = line.statsBytes { statsBytes = b }
-            guard let msg = line.msg else { continue }
-            let object = line.object ?? ""
-            if line.isError {
-                s.errors.append(object.isEmpty ? msg : "\(object): \(msg)")
-                if !object.isEmpty { s.flagged.append(object) }
-            }
-            if let n = differenceCount(msg) { s.differences = n }
-            if let n = matchingCount(msg) { s.matching = n }
-            guard !object.isEmpty else { continue }
-            if msg.hasPrefix("Skipped copy") {
-                s.planned.append(object)   // --dry-run
-                s.plannedBytes += line.size ?? 0
-            } else if msg.hasPrefix("Copied") {
-                s.copied.append(object); sizeSum += line.size ?? 0
-            } else if msg == "Moved into backup dir" {
-                s.deleted.append(object); deleted.insert(object)
-                appendUnique(&s.archived, object, seen: &archived)
-            } else if msg == "Moved (server-side)" {
-                // With --backup-dir this is the move of an overwritten or deleted file into the archive.
-                appendUnique(&s.archived, object, seen: &archived)
-            } else if msg == "Deleted" || msg.hasPrefix("Skipped delete") || msg.hasPrefix("Skipped move into backup dir") {
-                appendUnique(&s.deleted, object, seen: &deleted)   // the latter two are --dry-run
-            } else if msg.hasPrefix("Renamed from \"") {
-                let old = msg.dropFirst("Renamed from \"".count).dropLast()
-                s.renamed.append("\(old) -> \(object)")
-            }
-        }
-        s.bytes = statsBytes ?? sizeSum
-        return s
+        var reader = Reader()
+        forEachLine(in: data) { reader.read(line: $0) }
+        return reader.summary
     }
 
     private static func differenceCount(_ msg: String) -> Int? {
@@ -189,13 +250,17 @@ public enum RcloneLogParser {
     /// it can carry user paths, and with `--log-file` rclone logs everything of interest to the file.
     public static func outcome(exitCode: Int32, log: Data) -> RcloneResult.Outcome {
         guard exitCode != 0 else { return .success }
-        let errorLines = lines(log).filter(\.isError)
-        if errorLines.contains(where: { $0.msg == "Got fatal error on delete: --max-delete threshold reached" }) { return .safetyStop }
-        if errorLines.contains(where: { line in line.msg.map { isAuthError($0, removing: line.object) } ?? false }) { return .authExpired }
-        // Only when the limit is all that went wrong: a real failure beside it must still count.
-        func limited(_ line: Line) -> Bool { line.msg.map { isUploadLimit($0, removing: line.object) } ?? false }
-        if errorLines.contains(where: limited), errorLines.allSatisfy({ limited($0) || isRunSummary($0) }) { return .partial }
-        return outcome(exitCode: exitCode)
+        var reader = Reader()
+        forEachLine(in: log) { reader.read(line: $0, summarise: false) }
+        return reader.outcome(exitCode: exitCode)
+    }
+
+    /// The same, read from a log file a chunk at a time.
+    public static func outcome(exitCode: Int32, logFile: URL) -> RcloneResult.Outcome {
+        guard exitCode != 0 else { return .success }
+        var reader = Reader()
+        forEachLine(inFileAt: logFile) { reader.read(line: $0, summarise: false) }
+        return reader.outcome(exitCode: exitCode)
     }
 
     private static let scrubbers: [(NSRegularExpression, String)] = [

@@ -173,6 +173,9 @@ private final class Written: @unchecked Sendable {
         var record = try await r.run()
         #expect(record.status == .success)
         #expect(record.copied == 300)
+        // rclone ran, so the record says how much memory it and the agent took.
+        #expect((record.rclonePeakMemory ?? 0) > 1_000_000)
+        #expect((record.agentPeakMemory ?? 0) > 1_000_000)
         #expect(try r.store.state(for: r.pair).lastFileCount == 300)
         #expect(try RootMarker.load(backupRoot: r.backupRoot)?.claims(r.set.id) == true)
 

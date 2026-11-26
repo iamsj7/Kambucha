@@ -98,7 +98,7 @@ public struct RestoreDrill: Sendable {
                                              "--config", context.configPath], binary: binary, helper: helper, context: context)
         if code == 0 { return true }
         if code == 3 { return false }
-        if RcloneLogParser.outcome(exitCode: code, log: (try? Data(contentsOf: log)) ?? Data()) == .authExpired {
+        if RcloneLogParser.outcome(exitCode: code, logFile: log) == .authExpired {
             throw RestoreDrillError.signInExpired
         }
         throw RestoreDrillError.couldNotRun

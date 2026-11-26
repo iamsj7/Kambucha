@@ -7,6 +7,9 @@ public protocol RcloneRunning: Sendable {
     func execute(_ arguments: [String], context: RcloneContext, logFile: URL) async throws -> RcloneResult
     /// Runs a listing or size command and returns what it printed.
     func capture(_ arguments: [String], context: RcloneContext) async throws -> RcloneCapture
+    /// Like `capture`, but hands over stdout one non-empty line at a time instead of holding all of it,
+    /// for listings that can run to hundreds of thousands of paths. The result's `stdout` is empty.
+    func captureLines(_ arguments: [String], context: RcloneContext, each: (String) -> Void) async throws -> RcloneCapture
 }
 
 public struct RcloneCapture: Equatable, Sendable {
@@ -27,6 +30,13 @@ public extension RcloneRunning {
     }
     func capture(_ arguments: [String], context: RcloneContext) async throws -> RcloneCapture {
         throw RcloneUnsupported()
+    }
+    /// Built on `capture`, so a runner that only captures (a test fake) streams too.
+    func captureLines(_ arguments: [String], context: RcloneContext, each: (String) -> Void) async throws -> RcloneCapture {
+        var out = try await capture(arguments, context: context)
+        for line in out.stdout.split(separator: "\n") { each(String(line)) }
+        out.stdout = ""
+        return out
     }
 }
 
@@ -50,13 +60,15 @@ public struct RcloneRunner: RcloneRunning {
     /// Called with each live stats record while rclone runs (about every 2 seconds). Off the main thread.
     let onStats: (@Sendable (RcloneStats) -> Void)?
     private let helper: (any HelperValidating)?
+    /// Where `captureLines` keeps rclone's output while it runs.
+    let scratch: URL
 
     public init(binary: URL, helper: any HelperValidating, onStats: (@Sendable (RcloneStats) -> Void)? = nil) {
         self.init(binary: binary, killGrace: 5, helper: helper, onStats: onStats)
     }
     private init(binary: URL, killGrace: TimeInterval, helper: (any HelperValidating)?,
-                 onStats: (@Sendable (RcloneStats) -> Void)? = nil) {
-        self.binary = binary; self.killGrace = killGrace; self.helper = helper; self.onStats = onStats
+                 onStats: (@Sendable (RcloneStats) -> Void)? = nil, scratch: URL = FileManager.default.temporaryDirectory) {
+        self.binary = binary; self.killGrace = killGrace; self.helper = helper; self.onStats = onStats; self.scratch = scratch
     }
 
     /// No helper check, so it accepts only contexts with nothing secret: `/dev/null` for a config and
@@ -64,8 +76,9 @@ public struct RcloneRunner: RcloneRunning {
     public static func localOnly(binary: URL, onStats: (@Sendable (RcloneStats) -> Void)? = nil) -> RcloneRunner {
         localOnly(binary: binary, killGrace: 5, onStats: onStats)
     }
-    static func localOnly(binary: URL, killGrace: TimeInterval, onStats: (@Sendable (RcloneStats) -> Void)? = nil) -> RcloneRunner {
-        RcloneRunner(binary: binary, killGrace: killGrace, helper: nil, onStats: onStats)
+    static func localOnly(binary: URL, killGrace: TimeInterval, onStats: (@Sendable (RcloneStats) -> Void)? = nil,
+                          scratch: URL = FileManager.default.temporaryDirectory) -> RcloneRunner {
+        RcloneRunner(binary: binary, killGrace: killGrace, helper: nil, onStats: onStats, scratch: scratch)
     }
 
     public func sync(_ r: SyncRequest) async throws -> RcloneResult {
@@ -81,20 +94,44 @@ public struct RcloneRunner: RcloneRunning {
     }
 
     public func capture(_ arguments: [String], context: RcloneContext) async throws -> RcloneCapture {
+        try await capture(arguments, context: context, stdoutFile: nil)
+    }
+
+    public func captureLines(_ arguments: [String], context: RcloneContext, each: (String) -> Void) async throws -> RcloneCapture {
+        // stdout goes to a private file rather than memory, then is read back a chunk at a time.
+        let url = scratch.appendingPathComponent("kambucha-lines-\(UUID().uuidString)")
+        guard FileManager.default.createFile(atPath: url.path, contents: nil, attributes: [.posixPermissions: 0o600]) else {
+            throw CocoaError(.fileWriteUnknown)
+        }
+        defer { try? FileManager.default.removeItem(at: url) }
+        let sink = try FileHandle(forWritingTo: url)
+        let result: RcloneCapture
+        do { result = try await capture(arguments, context: context, stdoutFile: sink) } catch {
+            try? sink.close()
+            throw error
+        }
+        try? sink.close()
+        RcloneLogParser.forEachLine(inFileAt: url) { each(String(decoding: $0, as: UTF8.self)) }
+        return result
+    }
+
+    /// `stdoutFile` nil collects stdout in memory; otherwise rclone writes it straight to that file.
+    private func capture(_ arguments: [String], context: RcloneContext, stdoutFile: FileHandle?) async throws -> RcloneCapture {
         try checkHelper(for: context)
         let process = Process()
         process.executableURL = binary
         process.arguments = arguments
         process.environment = Self.childEnvironment(context)
         process.qualityOfService = Self.qos(Task.currentPriority, raised: AgentPriority.isRaised)
-        let out = Pipe(), err = Pipe()
-        process.standardOutput = out
+        let out = stdoutFile == nil ? Pipe() : nil, err = Pipe()
+        process.standardOutput = stdoutFile ?? out
         process.standardError = err
         process.standardInput = FileHandle.nullDevice
         let state = RunState(process, killGrace: killGrace)
         // Both pipes are drained concurrently so a full pipe never blocks the child.
-        let outTask = Task.detached { () -> Data in (try? out.fileHandleForReading.readToEnd()) ?? Data() }
+        let outTask = Task.detached { () -> Data in (try? out?.fileHandleForReading.readToEnd()) ?? Data() }
         let errTask = Task.detached { () -> Data in (try? err.fileHandleForReading.readToEnd()) ?? Data() }
+        let memory = RunMemory.follow(state)
         let exitCode: Int32
         do {
             exitCode = try await withTaskCancellationHandler {
@@ -102,16 +139,18 @@ public struct RcloneRunner: RcloneRunning {
                     process.terminationHandler = { p in cont.resume(returning: p.terminationStatus) }
                     do { try state.start() } catch {
                         process.terminationHandler = nil
-                        try? out.fileHandleForWriting.close(); try? err.fileHandleForWriting.close()
+                        try? out?.fileHandleForWriting.close(); try? err.fileHandleForWriting.close()
                         cont.resume(throwing: error)
                     }
                 }
             } onCancel: { state.cancel() }
         } catch {
             _ = await outTask.value; _ = await errTask.value
+            await RunMemory.stop(memory)
             throw error
         }
         let o = await outTask.value, e = await errTask.value
+        await RunMemory.stop(memory)
         if state.wasCancelled { throw CancellationError() }
         return RcloneCapture(exitCode: exitCode, stdout: String(decoding: o, as: UTF8.self),
                              stderr: String(decoding: e, as: UTF8.self))
@@ -167,8 +206,9 @@ public struct RcloneRunner: RcloneRunning {
         let tail = onStats.map { handler in
             Task.detached { await LogTail.follow(logFile, from: 0, handler: handler) }
         }
+        let memory = RunMemory.follow(state)
         // Cancel and await the tail on every exit path, so no stats callback can land after `sync` returns.
-        func stopTail() async { tail?.cancel(); await tail?.value }
+        func stopTail() async { tail?.cancel(); await tail?.value; await RunMemory.stop(memory) }
         let exitCode: Int32
         do {
             exitCode = try await withTaskCancellationHandler {
@@ -192,15 +232,17 @@ public struct RcloneRunner: RcloneRunning {
         if state.wasCancelled { _ = await stderrTask.value; throw CancellationError() }
 
         let stderr = await stderrTask.value
-        var log = (try? Data(contentsOf: logFile)) ?? Data()
-        var summary = RcloneLogParser.parse(log)
+        // A chunk at a time: a large run's log is tens of MB, and only its summary is needed.
+        var reader = RcloneLogParser.Reader()
+        reader.read(fileAt: logFile)
+        var summary = reader.summary
         // rclone writes some early failures (bad flags, missing remote) only to stderr.
         if !stderr.isEmpty {
-            log.append(stderr)
+            RcloneLogParser.forEachLine(in: stderr) { reader.read(line: $0, summarise: false) }
             let text = String(decoding: stderr, as: UTF8.self).trimmingCharacters(in: .whitespacesAndNewlines)
             if exitCode != 0, summary.errors.isEmpty, !text.isEmpty { summary.errors.append(text) }
         }
-        var outcome = RcloneLogParser.outcome(exitCode: exitCode, log: log)
+        var outcome = reader.outcome(exitCode: exitCode)
         // A check that finds differences exits 1; that is a finding, not a failed run.
         if isCheck, exitCode == 1, summary.differences > 0, outcome == .permanent { outcome = .success }
         return RcloneResult(exitCode: exitCode, summary: summary, outcome: outcome)
@@ -237,7 +279,7 @@ enum LogTail {
 }
 
 /// Lock-protected start/cancel state for one child process.
-private final class RunState: @unchecked Sendable {
+final class RunState: @unchecked Sendable {
     private let lock = NSLock()
     private let process: Process
     private let killGrace: TimeInterval
@@ -246,6 +288,11 @@ private final class RunState: @unchecked Sendable {
     init(_ p: Process, killGrace: TimeInterval) { process = p; self.killGrace = killGrace }
 
     var wasCancelled: Bool { lock.withLock { cancelled } }
+
+    /// The child's pid while it runs; nil before it starts and once it has exited.
+    var runningPID: pid_t? {
+        lock.withLock { started && process.isRunning ? process.processIdentifier : nil }
+    }
 
     func start() throws {
         try lock.withLock {

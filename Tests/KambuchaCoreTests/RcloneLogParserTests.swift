@@ -143,3 +143,74 @@ private func fixture(_ name: String) throws -> Data {
         #expect(Date().timeIntervalSince(started) < 5)
     }
 }
+
+/// The chunked reader must see exactly what the whole-file parser saw, wherever the chunks fall.
+@Suite struct RcloneLogReaderTests {
+    private static let fixtures = ["check-diff", "sync-copy", "sync-delete-rename", "sync-dryrun-delete",
+                                   "sync-dryrun-overwrite-rename", "sync-maxdelete", "sync-stats"]
+
+    private func file(_ data: Data) throws -> URL {
+        let url = FileManager.default.temporaryDirectory.appendingPathComponent("kambucha-reader-\(UUID().uuidString).jsonl")
+        try data.write(to: url)
+        return url
+    }
+
+    private func read(_ url: URL, chunkSize: Int) -> RcloneLogParser.Reader {
+        var reader = RcloneLogParser.Reader()
+        RcloneLogParser.forEachLine(inFileAt: url, chunkSize: chunkSize) { reader.read(line: $0) }
+        return reader
+    }
+
+    @Test(arguments: fixtures)
+    func everyChunkSizeGivesTheWholeFileSummaryAndOutcome(_ name: String) throws {
+        let data = try fixture(name)
+        let url = try file(data)
+        defer { try? FileManager.default.removeItem(at: url) }
+        // 1 byte splits every line; 7 lands mid-line; the default reads the fixture in one go.
+        for size in [1, 7, 64, 1 << 20] {
+            let reader = read(url, chunkSize: size)
+            #expect(reader.summary == RcloneLogParser.parse(data), "chunk size \(size)")
+            for code: Int32 in [0, 1, 7] {
+                #expect(reader.outcome(exitCode: code) == RcloneLogParser.outcome(exitCode: code, log: data))
+                #expect(RcloneLogParser.outcome(exitCode: code, logFile: url) == RcloneLogParser.outcome(exitCode: code, log: data))
+            }
+        }
+    }
+
+    @Test func aLastLineWithoutANewlineAndBlankLinesAreHandled() throws {
+        let log = "\n\n" + #"{"level":"info","msg":"Copied (new)","object":"a.txt","size":3}"# + "\n\n"
+            + #"{"level":"info","msg":"Copied (new)","object":"b.txt","size":4}"#
+        let url = try file(Data(log.utf8))
+        defer { try? FileManager.default.removeItem(at: url) }
+        for size in [1, 5, 1 << 20] {
+            let s = read(url, chunkSize: size).summary
+            #expect(s.copied == ["a.txt", "b.txt"])
+            #expect(s.bytes == 7)
+        }
+    }
+
+    @Test func aMissingFileHasNoLines() {
+        var reader = RcloneLogParser.Reader()
+        reader.read(fileAt: URL(fileURLWithPath: "/nonexistent/kambucha-\(UUID().uuidString).log"))
+        #expect(reader.summary == LogSummary())
+        #expect(reader.outcome(exitCode: 0) == .success)
+        #expect(reader.outcome(exitCode: 7) == .permanent)
+    }
+
+    @Test func outcomeOnlyLinesChangeTheOutcomeButNotTheSummary() {
+        var reader = RcloneLogParser.Reader()
+        let stderr = #"{"level":"error","msg":"Got fatal error on delete: --max-delete threshold reached"}"#
+        reader.read(line: Data(stderr.utf8), summarise: false)
+        #expect(reader.summary == LogSummary())
+        #expect(reader.outcome(exitCode: 7) == .safetyStop)
+    }
+
+    @Test func statsBytesWinOverCopiedSizesWhicheverComesFirst() {
+        let copied = #"{"level":"info","msg":"Copied (new)","object":"a.txt","size":3}"#
+        let stats = #"{"level":"notice","msg":"stats","stats":{"bytes":100}}"#
+        for log in [copied + "\n" + stats, stats + "\n" + copied] {
+            #expect(RcloneLogParser.parse(Data(log.utf8)).bytes == 100)
+        }
+        #expect(RcloneLogParser.parse(Data(copied.utf8)).bytes == 3)
+    }
+}

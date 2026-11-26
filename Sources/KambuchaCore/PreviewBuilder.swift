@@ -29,10 +29,9 @@ public struct PreviewBuilder: PreviewProviding {
 
         let size = try await run(["size", "--json", "--links", "--filter-from", filterFile.path, set.source.path])
         let (count, bytes) = Self.parseSize(size.stdout)
-        let listing = try await run(["lsf", "-R", "--files-only", "--links", "--filter-from", filterFile.path, set.source.path])
-
+        // Every included path streams past once; only the few that need a decision are kept.
         var decisions: [ReviewItem] = []
-        for path in listing.stdout.split(separator: "\n").map(String.init) {
+        try await runLines(["lsf", "-R", "--files-only", "--links", "--filter-from", filterFile.path, set.source.path]) { path in
             let name = (path as NSString).lastPathComponent.lowercased()
             if name.hasSuffix(".tmp") || name.hasSuffix(".nosync") {
                 decisions.append(ReviewItem(id: "refused:\(path)", path: path, kind: .refusedByICloud))
@@ -76,16 +75,22 @@ public struct PreviewBuilder: PreviewProviding {
         let filterFile = FileManager.default.temporaryDirectory.appendingPathComponent("kambucha-preview-\(UUID().uuidString).filter")
         defer { try? FileManager.default.removeItem(at: filterFile) }
         try filters.write(filters.lines(for: set, projects: projects, scope: nil), to: filterFile)
-        let all = try await run(["lsf", "-R", "--files-only", "--links", mirror])
-        let kept = try await run(["lsf", "-R", "--files-only", "--links", "--filter-from", filterFile.path, mirror])
-        let keptSet = Set(kept.stdout.split(separator: "\n").map(String.init))
-        return all.stdout.split(separator: "\n").map(String.init).filter { !keptSet.contains($0) }.sorted()
+        var kept = Set<String>(), excluded: [String] = []
+        try await runLines(["lsf", "-R", "--files-only", "--links", "--filter-from", filterFile.path, mirror]) { kept.insert($0) }
+        try await runLines(["lsf", "-R", "--files-only", "--links", mirror]) { if !kept.contains($0) { excluded.append($0) } }
+        return excluded.sorted()
     }
 
     private func run(_ a: [String]) async throws -> RcloneCapture {
         let out = try await rclone.capture(a + ["--config", context.configPath], context: context)
         guard out.exitCode == 0 else { throw PreviewError.rcloneFailed(out.stderr) }
         return out
+    }
+
+    /// For listings: each path is handed over as rclone prints it, never all at once.
+    private func runLines(_ a: [String], each: (String) -> Void) async throws {
+        let out = try await rclone.captureLines(a + ["--config", context.configPath], context: context, each: each)
+        guard out.exitCode == 0 else { throw PreviewError.rcloneFailed(out.stderr) }
     }
 
     static func parseSize(_ json: String) -> (Int, Int64) {

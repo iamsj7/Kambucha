@@ -240,7 +240,11 @@ public final class RunCoordinator: Sendable {
         for pair in ordered.filter(first.contains) + ordered.filter({ !first.contains($0) }) {
             if Task.isCancelled { break }
             guard let destination = destinations.first(where: { $0.id == pair.destination }) else { continue }
-            switch await run(pair, destination: destination, command: command, settings: settings, expired: &expired, drives: &drives) {
+            // Each pair collects its own rclone memory peak for its record.
+            let end = await RunMemory.$pair.withValue(RunMemory.Peak()) {
+                await run(pair, destination: destination, command: command, settings: settings, expired: &expired, drives: &drives)
+            }
+            switch end {
             case .carryOn: continue
             case .stop: return true
             case .agentFailed: return false
@@ -1398,12 +1402,17 @@ public final class RunCoordinator: Sendable {
 
     private func write(_ tally: Tally, set: BackupSet, destination: Destination, started: Date) {
         let s = tally.summary
-        let record = RunRecord(setID: set.id, setName: set.name, destinationID: destination.id, destinationName: destination.name,
+        var record = RunRecord(setID: set.id, setName: set.name, destinationID: destination.id, destinationName: destination.name,
                                start: started, end: clock(), trigger: tally.trigger, scope: tally.scope,
                                filesChecked: tally.filesChecked, copied: s.copied.count, renamed: s.renamed.count,
                                deleted: s.deleted.count, archived: s.archived.count, bytes: s.bytes,
                                verification: tally.verification, pendingUploads: tally.pending, refused: tally.refused,
                                errors: tally.errors, status: tally.status, archivesPruned: tally.archivesPruned)
+        // Only when rclone ran: a skipped pair has no memory story worth a field.
+        if let rclone = RunMemory.pair?.value {
+            record.rclonePeakMemory = rclone
+            record.agentPeakMemory = RunMemory.ownPeak
+        }
         do { try records.append(record) } catch { Self.log.error("could not write a run record") }
     }
 

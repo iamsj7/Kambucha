@@ -64,8 +64,7 @@ public struct RcloneRemoteFiles: RemoteFileAccessing {
         let result = try await RcloneTool.execute(
             arguments + ["--use-json-log", "--log-file", log.path, "--config", context.configPath],
             binary: binary, helper: helper, context: context, stdin: stdin, capture: capture)
-        let text = (try? Data(contentsOf: log)) ?? Data()
-        if RcloneLogParser.outcome(exitCode: result.code, log: text) == .authExpired { throw RemoteFileError.authExpired }
+        if RcloneLogParser.outcome(exitCode: result.code, logFile: log) == .authExpired { throw RemoteFileError.authExpired }
         return result
     }
 }
